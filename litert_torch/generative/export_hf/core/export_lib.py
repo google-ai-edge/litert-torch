@@ -259,7 +259,12 @@ def export_text_prefill_decode_model(
   print(f'Model conversion executed in {elapsed_time} seconds.')
 
   # Quantization
-  return maybe_quantize_model(model_path, quantization_recipe)
+  quantization_recipe_list = (
+      quantization_recipe.split(',') if quantization_recipe else [None]
+  )
+  for recipe in quantization_recipe_list:
+    model_path = maybe_quantize_model(model_path, recipe)
+  return model_path
 
 
 def maybe_quantize_model(
@@ -271,7 +276,8 @@ def maybe_quantize_model(
     return model_path
   start_time = time.perf_counter()
   quantized_model_path = (
-      model_path.removesuffix('.tflite') + '_quantized.tflite'
+      model_path.removesuffix('.tflite').removesuffix('_quantized')
+      + '_quantized.tflite'
   )
   qt = quantizer_lib.Quantizer(model_path)
   try:
@@ -316,7 +322,12 @@ def export_embedder_model(
   lrt_model = converter.convert(strict_export=False)
   model_path = os.path.join(work_dir, 'model.tflite')
   lrt_model.export(model_path)
-  return maybe_quantize_model(model_path, quantization_recipe)
+  quantization_recipe_list = (
+      quantization_recipe.split(',') if quantization_recipe else [None]
+  )
+  for recipe in quantization_recipe_list:
+    model_path = maybe_quantize_model(model_path, recipe)
+  return model_path
 
 
 def export_tokenizer(
