@@ -14,6 +14,7 @@
 # ==============================================================================
 """Export functions for HuggingFace Transformers models."""
 
+import gc
 import os
 
 from litert_torch.generative.export_hf.core import export_lib
@@ -60,6 +61,7 @@ def export(
   export_lib.export_text_prefill_decode_model(
       pt_model, text_model_config, export_config, work_dir, quantization_recipe
   )
+  gc.collect()
   tokenizer_model_path = export_lib.export_tokenizer(tokenizer, work_dir)
   tflite_model_path = os.path.join(
       work_dir,

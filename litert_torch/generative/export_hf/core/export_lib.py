@@ -14,6 +14,7 @@
 # ==============================================================================
 """Export library for HF integration."""
 
+import gc
 import os
 import time
 
@@ -258,12 +259,17 @@ def export_text_prefill_decode_model(
   elapsed_time = end_time - start_time
   print(f'Model conversion executed in {elapsed_time} seconds.')
 
+  del lrt_model
+  del converter
+  gc.collect()
+
   # Quantization
   quantization_recipe_list = (
       quantization_recipe.split(',') if quantization_recipe else [None]
   )
   for recipe in quantization_recipe_list:
     model_path = maybe_quantize_model(model_path, recipe)
+    gc.collect()
   return model_path
 
 
@@ -327,6 +333,7 @@ def export_embedder_model(
   )
   for recipe in quantization_recipe_list:
     model_path = maybe_quantize_model(model_path, recipe)
+    gc.collect()
   return model_path
 
 
