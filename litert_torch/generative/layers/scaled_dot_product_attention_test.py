@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-from litert_torch import odml_torch
+from litert_torch import backend
 from litert_torch.generative.layers import scaled_dot_product_attention
 import torch
 
@@ -58,7 +58,7 @@ class ScaledDotProductAttentionTest(googletest.TestCase):
 
     def model_to_mlir(model, args):
       ep = torch.export.export(model, args)
-      mlir = odml_torch.export.exported_program_to_mlir(ep)
+      mlir = backend.export.exported_program_to_mlir(ep)
       return mlir.get_text()
 
     class SDPAModule(torch.nn.Module):

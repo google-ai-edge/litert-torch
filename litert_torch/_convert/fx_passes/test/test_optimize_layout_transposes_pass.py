@@ -17,8 +17,8 @@
 from typing import Callable, Union
 
 import litert_torch
+from litert_torch import backend
 from litert_torch import fx_infra
-from litert_torch import lowertools
 from litert_torch._convert import fx_passes
 import torch
 import torch.utils._pytree as pytree
@@ -159,7 +159,9 @@ class TestOptimizeLayoutTransposesPass(googletest.TestCase):
         model, exported_program.module(), forward_args()
     )
 
-    ir_text = lowertools.exported_program_to_mlir_text(exported_program)
+    ir_text = backend.export.exported_program_to_mlir(
+        exported_program
+    ).get_text()
     self.assertEqual(ir_text.count("stablehlo.custom_call @mark_tensor"), 4)
 
 

@@ -17,8 +17,8 @@
 import re
 from typing import Any, Callable, Union
 
+from litert_torch import backend
 from litert_torch import fx_infra
-from litert_torch import lowertools
 from litert_torch._convert import fx_passes
 import torch
 
@@ -53,7 +53,7 @@ def _export_to_stablehlo(
       ],
   )
 
-  return lowertools.exported_program_to_mlir_text(exported_program)
+  return backend.export.exported_program_to_mlir(exported_program).get_text()
 
 
 class TestRemoveNonUserOutputsPass(googletest.TestCase):

@@ -17,7 +17,7 @@
 import operator
 
 import litert_torch
-from litert_torch import lowertools
+from litert_torch import backend
 from litert_torch._convert.fx_passes.optimize_layout_transposes_pass import layout_mark
 from litert_torch._convert.fx_passes.optimize_layout_transposes_pass import op_func_registry
 from litert_torch._convert.fx_passes.optimize_layout_transposes_pass import utils
@@ -25,7 +25,7 @@ import torch
 import torch.utils._pytree as pytree
 
 aten = torch.ops.aten
-StableHLOCompositeBuilder = lowertools.StableHLOCompositeBuilder
+StableHLOCompositeBuilder = backend.composite.StableHLOCompositeBuilder
 
 __all__ = ["rewrite_nhwc_node", "has_nhwc_rewriter"]
 
@@ -67,6 +67,7 @@ def noop(node: torch.fx.Node):
 def _qdq_per_channel_rewriter(node: torch.fx.Node):
   new_args = []
   new_kwargs = {}
+  op = node.target
 
   def axis_nchw_to_nhwc(axis: int):
     axis = axis if axis >= 0 else 4 + axis
@@ -347,8 +348,14 @@ def _aten__native_batch_norm_legit_no_training(node):
 
 @rewriters.register(aten.group_norm.default)
 def _aten_group_norm(node):
+
   def group_norm(
-      input, num_groups: int, weight=None, bias=None, eps=1e-5, cudnn_enabled=True
+      input,
+      num_groups: int,
+      weight=None,
+      bias=None,
+      eps=1e-5,
+      cudnn_enabled=True,
   ):
     is_composite_supported = (
         litert_torch.config.enable_group_norm_composite

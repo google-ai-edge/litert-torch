@@ -13,9 +13,9 @@
 # limitations under the License.
 # ==============================================================================
 from litert_torch._config import config
-from litert_torch._convert.converter import convert
-from litert_torch._convert.converter import experimental_add_compilation_backend
-from litert_torch._convert.converter import signature
+from litert_torch._convert.interface import convert
+from litert_torch._convert.interface import experimental_add_compilation_backend
+from litert_torch._convert.interface import signature
 from litert_torch._convert.to_channel_last_io import to_channel_last_io
 from litert_torch.model import Model
 from litert_torch.version import __version__
