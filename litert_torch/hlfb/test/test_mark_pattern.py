@@ -14,8 +14,10 @@
 # ==============================================================================
 """Tests for mark_pattern."""
 
+import re
+
+from litert_torch import backend
 from litert_torch import fx_infra
-from litert_torch import lowertools
 from litert_torch.hlfb import mark_pattern
 from litert_torch.hlfb.mark_pattern import pattern as pattern_module
 import torch
@@ -30,7 +32,15 @@ def _export_and_decomp(mod, args):
 
 
 def _to_mlir(ep: torch.export.ExportedProgram):
-  return lowertools.exported_program_to_mlir_text(ep)
+  return backend.export.exported_program_to_mlir(ep).get_text()
+
+
+def _extract_backend_configs(mlir):
+  mlir = mlir.replace("\\22", '"')
+  configs = []
+  for match in re.finditer(r"backend_config\s*=\s*\"(\{.*\})\"", mlir):
+    configs.append(match.group(1))
+  return "\n".join(configs)
 
 
 class TestMarkPattern(googletest.TestCase):
@@ -54,12 +64,7 @@ class TestMarkPattern(googletest.TestCase):
     mark_pattern.mark_pattern(exported_program.graph_module, pattern)
     mlir = _to_mlir(exported_program)
 
-    lowertools.assert_string_count(
-        self,
-        mlir,
-        {'stablehlo.composite "test.add"': 2},
-        {"stablehlo.custom_call @mark_tensor": 6},
-    )
+    self.assertEqual(mlir.count("stablehlo.custom_call @mark_tensor"), 6)
 
   def test_mark_pattern_with_clone_inputs(self):
 
@@ -80,12 +85,7 @@ class TestMarkPattern(googletest.TestCase):
     mark_pattern.mark_pattern(exported_program.graph_module, pattern)
     mlir = _to_mlir(exported_program)
 
-    lowertools.assert_string_count(
-        self,
-        mlir,
-        {'stablehlo.composite "test.add"': 1},
-        {"stablehlo.custom_call @mark_tensor": 3},
-    )
+    self.assertEqual(mlir.count("stablehlo.custom_call @mark_tensor"), 3)
 
   def test_mark_pattern_with_attr_builder(self):
     class TestModel(torch.nn.Module):
@@ -106,16 +106,9 @@ class TestMarkPattern(googletest.TestCase):
     mark_pattern.mark_pattern(exported_program.graph_module, pattern)
     mlir = _to_mlir(exported_program)
 
-    lowertools.assert_string_count(
-        self,
-        mlir,
-        {
-            'stablehlo.composite "test.add"': 2,
-            'composite_attributes = {alias = "test.test_add"}': 2,
-        },
-        {"stablehlo.custom_call @mark_tensor": 6},
-        {'{"alias": "test.test_add"}': 2},
-    )
+    self.assertEqual(mlir.count("stablehlo.custom_call @mark_tensor"), 6)
+    backend_configs = _extract_backend_configs(mlir)
+    self.assertEqual(backend_configs.count('{"alias": "test.test_add"}'), 2)
 
   def test_mark_pattern_with_scalar_attr_tracker(self):
     class TestModel(torch.nn.Module):
@@ -144,17 +137,10 @@ class TestMarkPattern(googletest.TestCase):
     mark_pattern.mark_pattern(exported_program.graph_module, pattern)
     mlir = _to_mlir(exported_program)
 
-    lowertools.assert_string_count(
-        self,
-        mlir,
-        {
-            'stablehlo.composite "test.log_softmax"': 5,
-            "composite_attributes = {dim = 0 : i64}": 3,
-            "composite_attributes = {dim = 1 : i64}": 2,
-        },
-        {"stablehlo.custom_call @mark_tensor": 10},
-        {'{"dim": 0}': 3, '{"dim": 1}': 2},
-    )
+    self.assertEqual(mlir.count("stablehlo.custom_call @mark_tensor"), 10)
+    backend_configs = _extract_backend_configs(mlir)
+    self.assertEqual(backend_configs.count('{"dim": 0}'), 3)
+    self.assertEqual(backend_configs.count('{"dim": 1}'), 2)
 
   def test_mark_tangent_model_and_pattern_input(self):
     class TestModel(torch.nn.Module):
@@ -176,12 +162,7 @@ class TestMarkPattern(googletest.TestCase):
     mark_pattern.mark_pattern(exported_program.graph_module, pattern)
     mlir = _to_mlir(exported_program)
 
-    lowertools.assert_string_count(
-        self,
-        mlir,
-        {'stablehlo.composite "test.relu"': 1},
-        {"stablehlo.custom_call @mark_tensor": 2},
-    )
+    self.assertEqual(mlir.count("stablehlo.custom_call @mark_tensor"), 2)
 
 
 if __name__ == "__main__":

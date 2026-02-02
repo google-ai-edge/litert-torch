@@ -21,7 +21,8 @@ import time
 
 import huggingface_hub
 from litert_torch import fx_infra
-from litert_torch._convert import converter as converter_utils
+from litert_torch._convert import interface as converter_utils
+from litert_torch.backend.experimental import torch_tfl
 from litert_torch.generative.export_hf.core import attention as _
 from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.core import patches as _
@@ -33,7 +34,6 @@ from litert_torch.generative.export_hf.core.mu import mu_pass_lib
 from litert_torch.generative.export_hf.core.split_cache import attention as _
 from litert_torch.generative.export_hf.core.split_cache import exportable_module as split_cache_module
 from litert_torch.generative.tools import tokenizer_to_sentencepiece_lib as tokenizer_lib
-from litert_torch.odml_torch.experimental import torch_tfl
 import torch
 import transformers
 

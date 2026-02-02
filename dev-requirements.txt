@@ -6,3 +6,4 @@ parameterized
 pyink
 pytest
 pytest-xdist
+tf-nightly

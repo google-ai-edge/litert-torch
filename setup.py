@@ -52,9 +52,7 @@ if nightly_release_date := os.environ.get("NIGHTLY_RELEASE_DATE"):
 setup(
     name=name,
     version=version,
-    description=(
-        "Support PyTorch model conversion with LiteRT."
-    ),
+    description="Support PyTorch model conversion with LiteRT.",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/google-ai-edge/litert-torch",
@@ -92,8 +90,7 @@ setup(
         "kagglehub",
         "tabulate",
         "torch>=2.4.0,<2.10.0",
-        "tf-nightly>=2.21.0.dev20250818",
-        "ai-edge-litert-nightly",
+        "ai-edge-litert-nightly==2.2.0.dev20260210",  # with converter
         "ai-edge-quantizer-nightly",
         "torchao",
         "jax",

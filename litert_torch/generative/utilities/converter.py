@@ -21,7 +21,7 @@ import pathlib
 import tempfile
 from typing import Callable, Dict, Optional, Union
 from absl import flags
-from litert_torch._convert import converter as converter_utils
+from litert_torch._convert import interface as converter_utils
 from litert_torch.generative.layers import kv_cache as kv_utils
 from litert_torch.generative.layers import lora as lora_utils
 import litert_torch.generative.layers.model_config as cfg

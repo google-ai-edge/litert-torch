@@ -18,7 +18,6 @@ from typing import Sequence, Union
 from litert_torch._convert.fx_passes.build_aten_composite_pass import BuildAtenCompositePass
 from litert_torch._convert.fx_passes.cast_inputs_bf16_to_f32_pass import CastInputsBf16ToF32Pass
 from litert_torch._convert.fx_passes.eliminate_dead_code_pass import EliminateDeadCodePass
-from litert_torch._convert.fx_passes.inject_mlir_debuginfo_pass import InjectMlirDebuginfoPass
 from litert_torch._convert.fx_passes.optimize_layout_transposes_pass import OptimizeLayoutTransposesPass
 from litert_torch._convert.fx_passes.remove_non_user_outputs_pass import RemoveNonUserOutputsPass
 from litert_torch.fx_infra import CanonicalizePass

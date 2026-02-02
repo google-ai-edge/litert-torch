@@ -15,7 +15,7 @@
 # A toy example which has a single-layer transformer block.
 from absl import app
 import litert_torch
-from litert_torch import lowertools
+from litert_torch import backend
 from litert_torch.generative.examples.test_models import toy_model
 from litert_torch.generative.examples.test_models import toy_model_with_kv_cache
 from litert_torch.generative.layers import kv_cache as kv_utils
@@ -51,7 +51,7 @@ def convert_toy_model(_) -> None:
 
 def _export_stablehlo_mlir(model, args):
   ep = torch.export.export(model, args)
-  return lowertools.exported_program_to_mlir_text(ep)
+  return backend.export.exported_program_to_mlir(ep).get_text()
 
 
 def convert_toy_model_with_kv_cache(_) -> None:

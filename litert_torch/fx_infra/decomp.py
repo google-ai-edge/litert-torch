@@ -21,7 +21,7 @@ import torch
 _pre_convert_decomp = torch._decomp.core_aten_decompositions().copy()
 
 
-# Decompositions to be run after conversion before odml_torch passes and
+# Decompositions to be run after conversion before backend passes and
 # lowerings.
 _pre_lower_decomp = torch._decomp.core_aten_decompositions().copy()
 
@@ -39,7 +39,8 @@ def pre_convert_decomp():
 
 
 def pre_lower_decomp():
-  """Decompositions to be run after conversion before odml_torch passes and lowerings."""
+  """Decompositions to be run after conversion before backend passes and lowerings."""
+
   return _pre_lower_decomp.copy()
 
 
