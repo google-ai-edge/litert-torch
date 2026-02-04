@@ -326,7 +326,7 @@ def export_embedder_model(
         sample_kwargs=sample_inputs,
     )
   lrt_model = converter.convert(strict_export=False)
-  model_path = os.path.join(work_dir, 'model.tflite')
+  model_path = os.path.join(work_dir, 'embedder.tflite')
   lrt_model.export(model_path)
   quantization_recipe_list = (
       quantization_recipe.split(',') if quantization_recipe else [None]
@@ -359,7 +359,10 @@ def export_auxiliary_model(
         sample_kwargs=sample_input,
     )
   # Attention Mask
-  attention_mask_module = split_cache_module.SplitAttentionMaskBuilder(model)
+  attention_mask_module = split_cache_module.SplitAttentionMaskBuilder(
+      export_config.cache_length,
+      # TODO(weiyiw): Add sliding window sizes.
+  )
   sample_inputs = attention_mask_module.get_sample_inputs(
       text_model_config, export_config
   )
@@ -370,7 +373,7 @@ def export_auxiliary_model(
         sample_kwargs=sample_input,
     )
   # Cache Update
-  cache_update_module = split_cache_module.CacheUpdate(model)
+  cache_update_module = split_cache_module.CacheUpdate()
   sample_inputs = cache_update_module.get_sample_inputs(
       text_model_config, export_config
   )

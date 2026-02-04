@@ -31,6 +31,7 @@ def export(
     quantization_recipe: str = 'dynamic_wi8_afp32',
     enable_dynamic_shape: bool = False,
     externalize_embedder: bool = False,
+    single_token_embedder: bool = False,
     key_ts_idx: int = 2,
     value_ts_idx: int = 3,
     split_cache: bool = False,
@@ -62,6 +63,7 @@ def export(
       if enable_dynamic_shape
       else None,
       externalize_embedder=externalize_embedder,
+      single_token_embedder=single_token_embedder,
       k_ts_idx=key_ts_idx,
       v_ts_idx=value_ts_idx,
       split_cache=split_cache,

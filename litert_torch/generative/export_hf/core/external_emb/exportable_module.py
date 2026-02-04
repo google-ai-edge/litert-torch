@@ -94,3 +94,33 @@ class LiteRTExportableModuleForEmbedder(torch.nn.Module):
     token_ids = torch.maximum(token_ids, torch.tensor(0, dtype=torch.int32))
     output = self.model(token_ids)
     return {"embeddings": output}
+
+  @classmethod
+  def get_sample_inputs(
+      cls,
+      model_config,
+      export_config: base_exportable_module.ExportableModuleConfig,
+  ):
+    """Gets sample inputs."""
+    batch_size = export_config.batch_size
+    prefill_length = export_config.prefill_lengths[0]
+    prefill_length_dim = export_config.prefill_length_dim
+    del model_config  # Unused.
+    tokens = {"token_ids": torch.ones((batch_size, 1), dtype=torch.int32)}
+    tokens_dynamic_shape = {"token_ids": {1: 1}} if prefill_length_dim else {}
+    if export_config.single_token_embedder:
+      return {"embedder": (tokens, tokens_dynamic_shape)}
+    else:
+      ret = {}
+      ret["decode_embedder"] = (tokens, tokens_dynamic_shape)
+
+      tokens = {
+          "token_ids": torch.ones(
+              (batch_size, prefill_length), dtype=torch.int32
+          )
+      }
+      tokens_dynamic_shape = (
+          {"token_ids": {1: prefill_length_dim}} if prefill_length_dim else {}
+      )
+      ret[f"prefill_embedder_{prefill_length}"] = (tokens, tokens_dynamic_shape)
+      return ret

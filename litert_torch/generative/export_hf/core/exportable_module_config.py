@@ -31,6 +31,7 @@ class ExportableModuleConfig:
 
   # Export configs
   externalize_embedder: bool = False
+  single_token_embedder: bool = False
   externalize_rope: bool = False
 
   split_cache: bool = False
