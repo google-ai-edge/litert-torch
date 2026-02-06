@@ -225,52 +225,6 @@ class TestConvert(googletest.TestCase):
     )
     self.assertTrue(result)
 
-  def test_apply_tfl_converter_flags(self):
-    """Tests if _apply_tfl_converter_flags correctly sets the values in a Converter object."""
-
-    class MockConverterInternalObject:
-
-      def __init__(self):
-        self.subkey2 = "original_subvalue2"
-
-    class MockConverter:
-
-      def __init__(self):
-        self.key1 = "original_value1"
-        self.key2 = MockConverterInternalObject()
-
-    mock_converter = MockConverter()
-    flags = {"key1": "new_value1", "key2": {"subkey2": "new_subvalue2"}}
-    conversion_utils.apply_tfl_converter_flags(mock_converter, flags)
-
-    self.assertTrue(flags["key1"], "new_value1")
-    self.assertTrue(flags["key2"]["subkey2"], "new_subvalue2")
-
-  def test_convert_add_converter_flags(self):
-    """Tests conversion of an add module setting a tflite converter flag."""
-
-    class Add(nn.Module):
-
-      def forward(self, a, b):
-        return a + b
-
-    args = (
-        torch.randn((5, 10)),
-        torch.randn((5, 10)),
-    )
-    torch_module = Add().eval()
-
-    tmp_dir_path = self.create_tempdir()
-    ir_dump_path = os.path.join(
-        tmp_dir_path, "test_convert_add_converter_flags_mlir_dump"
-    )
-    litert_torch.convert(
-        torch_module,
-        args,
-        _ai_edge_converter_flags={"ir_dump_dir": ir_dump_path},
-    )
-    self.assertTrue(os.path.isdir(ir_dump_path))
-
   def test_convert_conv_transpose_batch_norm(self):
     """Tests conversion of a model with ConvTranspose2d and BatchNorm2d."""
 
@@ -294,7 +248,7 @@ class TestConvert(googletest.TestCase):
 
   @googletest.skipIf(
       not litert_torch.config.use_torch_xla,
-      reason="Shape polymorphism is not yet support with odml_torch.",
+      reason="Shape polymorphism is not yet support with backend.",
   )
   def test_convert_model_with_dynamic_batch(self):
     """Test converting a simple model with dynamic batch size."""

@@ -18,7 +18,7 @@ import dataclasses
 import operator
 
 import litert_torch
-from litert_torch import lowertools
+from litert_torch import backend
 from litert_torch._convert.fx_passes.optimize_layout_transposes_pass import layout_rewrite
 from litert_torch._convert.fx_passes.optimize_layout_transposes_pass import utils
 from litert_torch._convert.fx_passes.optimize_layout_transposes_pass.op_func_registry import OpFuncRegistry
@@ -225,7 +225,7 @@ def _aten_native_group_norm_checker(node):
 # ==== Ops must be NCHW
 
 
-@nhwcable_node_checkers.register(lowertools.mark_tensor_op)
+@nhwcable_node_checkers.register(backend.composite.mark_tensor_op)
 @nhwcable_node_checkers.register(utils.tensor_to_nchw)
 @nhwcable_node_checkers.register(utils.tensor_to_nhwc)
 @nhwcable_node_checkers.register("output")
