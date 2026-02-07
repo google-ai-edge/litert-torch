@@ -31,12 +31,26 @@ _MODEL_SIZE = flags.DEFINE_string(
 
 
 def main(_):
-  if _MODEL_SIZE.value == '1b':
+  model_size = _MODEL_SIZE.value
+  # Auto-detect model size if it's the default '1b' or if we want to be proactive.
+  # We only override if detection is successful.
+  detected_size = gemma3.detect_model_size(flags.FLAGS.checkpoint_path)
+  if detected_size and _MODEL_SIZE.present:
+    if detected_size != _MODEL_SIZE.value:
+      print(f"Note: User specified model_size={_MODEL_SIZE.value}, "
+            f"but detected {detected_size}. Using user specification.")
+  elif detected_size:
+    model_size = detected_size
+    print(f"Auto-detected model size: {model_size}")
+
+  if model_size == '1b':
     model_builder = gemma3.build_model_1b
-  elif _MODEL_SIZE.value == '270m':
+  elif model_size == '270m':
     model_builder = gemma3.build_model_270m
+  elif model_size == '4b':
+    model_builder = gemma3.build_model_4b
   else:
-    raise ValueError(f'Unsupported model size: {_MODEL_SIZE.value}')
+    raise ValueError(f'Unsupported model size: {model_size}')
 
   converter.build_and_convert_to_tflite_from_flags(model_builder)
 
