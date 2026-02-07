@@ -25,11 +25,43 @@ from litert_torch.generative.layers import kv_cache as kv_utils
 import litert_torch.generative.layers.model_config as cfg
 from litert_torch.generative.utilities import export_config as export_cfg
 import litert_torch.generative.utilities.loader as loading_utils
+import json
+import os
 import torch
 from torch import nn
 
 
 PROJECTION_TENSOR_NAME = "multi_modal_projector.linear"
+
+
+def detect_model_size(checkpoint_path: str) -> Optional[str]:
+  """Attempts to detect the model size from config.json in the checkpoint path.
+
+  Args:
+    checkpoint_path: Path to the checkpoint directory.
+
+  Returns:
+    '270m', '1b', or None if detection fails or config.json is missing.
+  """
+  config_path = os.path.join(checkpoint_path, "config.json")
+  if not os.path.exists(config_path):
+    return None
+
+  try:
+    with open(config_path, "r") as f:
+      config = json.load(f)
+
+    num_layers = config.get("num_hidden_layers")
+    hidden_size = config.get("hidden_size")
+
+    if num_layers == 18 or hidden_size == 640:
+      return "270m"
+    if num_layers == 26 or hidden_size == 1152:
+      return "1b"
+  except Exception:
+    return None
+
+  return None
 
 
 @dataclass
@@ -193,6 +225,24 @@ def build_model_270m(
     )
   else:
     config = decoder.get_decoder_config_270m()
+    model = decoder.Decoder(config, mask_cache_size)
+  # TODO: Load the parameters of decoder from checkpoint.
+  model.eval()
+  return model
+
+
+def build_model_4b(
+    checkpoint_path: str,
+    custom_loader: Callable[[str], Dict[str, torch.Tensor]] = None,
+    mask_cache_size: int = 0,
+) -> decoder.Decoder:
+  """Builds a Gemma3 4B model."""
+  if checkpoint_path:
+    model = decoder.build_model_4b(
+        checkpoint_path, custom_loader, mask_cache_size
+    )
+  else:
+    config = decoder.get_decoder_config_4b()
     model = decoder.Decoder(config, mask_cache_size)
   # TODO: Load the parameters of decoder from checkpoint.
   model.eval()
