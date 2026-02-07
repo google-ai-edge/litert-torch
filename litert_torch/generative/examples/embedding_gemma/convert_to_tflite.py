@@ -25,11 +25,18 @@ import torch
 flags = generative_converter.define_conversion_flags(
     model_name="embedding_gemma"
 )
+flags.DEFINE_bool(
+    "final_l2_norm",
+    True,
+    "Whether to apply final L2 normalization to the embeddings.",
+)
 FLAGS = flags.FLAGS
 
 
 def main(_):
-  model = embedding_gemma.build_model(FLAGS.checkpoint_path)
+  model = embedding_gemma.build_model(
+      FLAGS.checkpoint_path, final_l2_norm=FLAGS.final_l2_norm
+  )
   model.eval()
   seq_len = max(FLAGS.prefill_seq_lens)
 
