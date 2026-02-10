@@ -15,6 +15,7 @@
 """Export library for HF integration."""
 
 import gc
+import json
 import os
 import time
 
@@ -129,7 +130,10 @@ def load_model(
       else:
         template_file = os.path.join(model_path, 'chat_template.json')
       with open(template_file, 'rt') as f:
-        tokenizer.chat_template = f.read()
+        chat_template_str = f.read()
+      chat_template_dict = json.loads(chat_template_str)
+      if 'chat_template' in chat_template_dict:
+        tokenizer.chat_template = chat_template_dict['chat_template']
     except Exception as e:  # pylint: disable=broad-exception-caught
       print(f'Failed to load chat template: {e}')
 
