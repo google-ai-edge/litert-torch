@@ -21,7 +21,8 @@ import time
 
 import huggingface_hub
 from litert_torch import fx_infra
-from litert_torch._convert import converter as converter_utils
+from litert_torch._convert import interface as converter_utils
+from litert_torch.backend.experimental import torch_tfl
 from litert_torch.generative.export_hf.core import attention as _
 from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.core import patches as _
@@ -33,7 +34,6 @@ from litert_torch.generative.export_hf.core.mu import mu_pass_lib
 from litert_torch.generative.export_hf.core.split_cache import attention as _
 from litert_torch.generative.export_hf.core.split_cache import exportable_module as split_cache_module
 from litert_torch.generative.tools import tokenizer_to_sentencepiece_lib as tokenizer_lib
-from litert_torch.odml_torch.experimental import torch_tfl
 import torch
 import transformers
 
@@ -260,13 +260,15 @@ def export_text_prefill_decode_model(
   start_time = time.perf_counter()
 
   print('Converting model...')
-  lrt_model = converter.convert(strict_export=False)
+  lrt_model = converter.convert(
+      convert_with_lazy_constants=True, strict_export=False
+  )
   print('Converting model done.')
 
   model_path = os.path.join(work_dir, 'model.tflite')
   print(f'Exporting model to {model_path}...')
   lrt_model.export(model_path)
-  mu_pass_lib.update_model(model_path, model_path)
+  # mu_pass_lib.update_model(model_path, model_path)
   end_time = time.perf_counter()
   elapsed_time = end_time - start_time
   print(f'Model conversion executed in {elapsed_time} seconds.')
@@ -337,7 +339,9 @@ def export_embedder_model(
         embedder_module.eval(),
         sample_kwargs=sample_inputs,
     )
-  lrt_model = converter.convert(strict_export=False)
+  lrt_model = converter.convert(
+      convert_with_lazy_constants=True, strict_export=False
+  )
   model_path = os.path.join(work_dir, 'embedder.tflite')
   lrt_model.export(model_path)
   quantization_recipe_list = (
@@ -395,7 +399,9 @@ def export_auxiliary_model(
         cache_update_module.eval(),
         sample_kwargs=sample_input,
     )
-  lrt_model = converter.convert(strict_export=False)
+  lrt_model = converter.convert(
+      convert_with_lazy_constants=True, strict_export=False
+  )
   model_path = os.path.join(work_dir, 'auxiliary.tflite')
   lrt_model.export(model_path)
   return model_path

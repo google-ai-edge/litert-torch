@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+from litert_torch import backend
 from litert_torch import fx_infra
-from litert_torch import lowertools
 import torch
 
 fx_infra.decomp.remove_pre_convert_decomp(torch.ops.aten.zeros.default)
@@ -33,7 +33,7 @@ class RemoveSDPACompositeZeroMaskPass(fx_infra.ExportedProgramPassBase):
     for node in graph.nodes:
       if not (
           node.op == "call_function"
-          and node.target == lowertools.mark_tensor_op
+          and node.target == backend.composite.mark_tensor_op
       ):
         continue
 

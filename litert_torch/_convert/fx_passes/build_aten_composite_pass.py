@@ -14,9 +14,9 @@
 # ==============================================================================
 
 from typing import Any, Callable
+from litert_torch import backend
 from litert_torch import fx_infra
-from litert_torch import lowertools
-from litert_torch.odml_torch import optimization_barrier as optimization_barrier_lib
+from litert_torch.backend import optimization_barrier as optimization_barrier_lib
 import torch
 import torch.utils._pytree as pytree
 
@@ -121,7 +121,9 @@ def _aten_hardswish(_: torch.fx.GraphModule, node: torch.fx.Node):
 
   def hardswish(self: torch.Tensor):
     nonlocal op
-    builder = lowertools.StableHLOCompositeBuilder("aten.hardswish.default")
+    builder = backend.composite.StableHLOCompositeBuilder(
+        "aten.hardswish.default"
+    )
     self = builder.mark_inputs(self)
     output = op(self)
     output = builder.mark_outputs(output)
@@ -148,7 +150,7 @@ def _aten_gelu(_: torch.fx.GraphModule, node: torch.fx.Node):
     ):
       return op(*args, **kwargs)
 
-    builder = lowertools.StableHLOCompositeBuilder(
+    builder = backend.composite.StableHLOCompositeBuilder(
         "aten.gelu.default",
         attr=_tree_map_to_composite_attr_values({
             "approximate": full_kwargs["approximate"],
@@ -228,7 +230,7 @@ def _aten_avg_pool2d(_: torch.fx.GraphModule, node: torch.fx.Node):
     ):
       return op(*args, **kwargs)
 
-    builder = lowertools.StableHLOCompositeBuilder(
+    builder = backend.composite.StableHLOCompositeBuilder(
         "aten.avg_pool2d.default",
         attr=_tree_map_to_composite_attr_values({
             "kernel_size": full_kwargs["kernel_size"],
@@ -266,7 +268,9 @@ def _aten_embedding(gm: torch.fx.GraphModule, node: torch.fx.Node):
     # Explicitly reshape to 1D. This places the ReshapeOp outside of the HLFB.
     idx = torch.reshape(idx, (idx.numel(),))
 
-    builder = lowertools.StableHLOCompositeBuilder("odml.embedding_lookup")
+    builder = backend.composite.StableHLOCompositeBuilder(
+        "odml.embedding_lookup"
+    )
     full_kwargs["indices"], full_kwargs["weight"] = builder.mark_inputs(
         idx,
         full_kwargs["weight"],
@@ -297,7 +301,7 @@ def _aten_upsample_bilinear2d_vec(_, node: torch.fx.Node):
     nonlocal op, args_mapper
     full_kwargs = args_mapper.get_full_kwargs(args, kwargs)
 
-    builder = lowertools.StableHLOCompositeBuilder(
+    builder = backend.composite.StableHLOCompositeBuilder(
         name="odml.upsample_bilinear2d",
         attr={
             "size": (int(output_h), int(output_w)),
@@ -327,7 +331,7 @@ def _aten_upsample_nearest2d_vec(_, node: torch.fx.Node):
     nonlocal op, args_mapper
     full_kwargs = args_mapper.get_full_kwargs(args, kwargs)
 
-    builder = lowertools.StableHLOCompositeBuilder(
+    builder = backend.composite.StableHLOCompositeBuilder(
         name="tfl.resize_nearest_neighbor",
         attr={
             "size": (int(output_h), int(output_w)),

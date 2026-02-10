@@ -15,9 +15,9 @@
 # Dynamic update slice op for KV cache update.
 from dataclasses import dataclass
 from typing import Sequence
-from litert_torch.odml_torch import lowerings
-from jax._src.lib.mlir import ir
-from jax._src.lib.mlir.dialects import hlo as stablehlo
+from litert_torch.backend import lowerings
+from ai_edge_litert.mlir import ir
+from ai_edge_litert.mlir.dialects import stablehlo
 import torch
 
 

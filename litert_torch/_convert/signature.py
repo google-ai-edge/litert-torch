@@ -14,9 +14,9 @@
 # ==============================================================================
 
 import dataclasses
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
-from litert_torch import lowertools
+from litert_torch import backend
 import torch
 import torch.utils._pytree as pytree
 
@@ -54,7 +54,7 @@ class Signature:
     for i in range(args_spec.num_leaves):
       names.append(f"args_{i}")
 
-    kwargs_names = lowertools.flat_dict_names(
+    kwargs_names = backend.export_utils.flat_dict_names(
         kwargs_spec.children_specs, kwargs_spec.context
     )
     names.extend(kwargs_names)

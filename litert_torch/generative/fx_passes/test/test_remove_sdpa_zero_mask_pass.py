@@ -16,8 +16,8 @@ import re
 from typing import Callable, Union
 
 import litert_torch
+from litert_torch import backend
 from litert_torch import fx_infra
-from litert_torch import lowertools
 from litert_torch.generative.fx_passes import CanonicalizePass
 from litert_torch.generative.fx_passes import RemoveSDPACompositeZeroMaskPass
 from litert_torch.generative.layers.attention import SelfAttention
@@ -52,7 +52,7 @@ def _export_to_stablehlo(func: Union[torch.nn.Module, Callable], export_args):
       ],
   )
 
-  return lowertools.exported_program_to_mlir_text(exported_program)
+  return backend.export.exported_program_to_mlir(exported_program).get_text()
 
 
 class TestRemoveSDPAZeroMaskPass(googletest.TestCase):

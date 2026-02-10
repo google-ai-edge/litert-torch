@@ -83,7 +83,7 @@ TODO: fill in this part.
 
 With LiteRT Torch generative API, it adopts the same PyTorch to TF Lite conversion flow as traditional models. On a high level, it involves the following steps:
 1) PyTorch compiler (Dynamo). We leverage [Torch Dynamo](https://pytorch.org/docs/stable/torch.compiler_deepdive.html) which is the official graph compiler for PyTorch 2.0. It performs graph capturing and exports the PyTorch `nn.Module` to an FX graph with Aten operations.
-2) ODML torch. For the moment, we are using [ODML torch](https://github.com/google-ai-edge/litert-torch/tree/main/litert_torch/odml_torch) to compile the FX graph to Stable HLO graph. The converted graph will be stored as a Tensorflow SavedModel.
+2) ODML torch. For the moment, we are using [ODML torch](https://github.com/google-ai-edge/litert-torch/tree/main/litert_torch/backend) to compile the FX graph to Stable HLO graph. The converted graph will be stored as a Tensorflow SavedModel.
 3) TF Lite MLIR converter. The TF Lite converter will consume the SavedModel with StableHLO ops, and further lower it down to TF Lite ops.
 
 To convert a several billion parameters Generative AI model, it usually takes a lot of CPU and RAM resources on your machine, as the converter does all kinds of graph optimizations and transformations to ensure the converted model is highly optimized. Going forward, we will continue to improve the converter infrastructure to reduce its system overhead.

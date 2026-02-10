@@ -18,6 +18,7 @@
 PyTorch models can be converted to this representation through
 `litert_torch.convert`.
 """
+
 from __future__ import annotations
 
 import abc
@@ -26,11 +27,10 @@ import re
 from typing import Callable
 
 import numpy.typing as npt
-import tensorflow as tf
 
 from ai_edge_litert import interpreter as tfl_interpreter  # pylint: disable=g-direct-tensorflow-import
 
-DEFAULT_SIGNATURE_NAME = tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY
+DEFAULT_SIGNATURE_NAME = 'serving_default'
 
 
 class Model(abc.ABC):

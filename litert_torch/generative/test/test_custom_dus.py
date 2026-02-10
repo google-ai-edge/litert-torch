@@ -40,7 +40,7 @@ class DUSMod(nn.Module):
     return out
 
 
-@googletest.skip('Enable this when odml_torch is default b/373387583')
+@googletest.skip('Enable this when backend is default b/373387583')
 class TestCustomDUS(parameterized.TestCase):
 
   @parameterized.named_parameters(

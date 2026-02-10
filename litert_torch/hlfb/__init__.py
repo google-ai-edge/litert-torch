@@ -13,4 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 
-from litert_torch.lowertools import StableHLOCompositeBuilder
+from litert_torch.backend import composite as _composite
+
+StableHLOCompositeBuilder = _composite.StableHLOCompositeBuilder
