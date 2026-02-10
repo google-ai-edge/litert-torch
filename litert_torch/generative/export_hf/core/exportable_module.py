@@ -113,7 +113,14 @@ class LiteRTExportableModuleForDecoderOnlyLM(ExportableModuleBase):
     num_layers = model_config.num_hidden_layers
     kv_cache = kv_cache_lib.CACHE_REGISTRY[
         export_config.cache_implementation
-    ].create_from_config(model_config, export_config)
+    ].create_from_config(
+        model_config,
+        export_config,
+        k_ts_idx=export_config.k_ts_idx,
+        v_ts_idx=export_config.v_ts_idx,
+        batch_size=export_config.batch_size,
+        cache_length=export_config.cache_length,
+    )
     inputs = {"kv_cache": kv_cache}
     if export_config.cache_length_dim is not None:
       all_k_shapes = tuple(
