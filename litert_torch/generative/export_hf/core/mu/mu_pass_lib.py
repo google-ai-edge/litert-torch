@@ -14,9 +14,12 @@
 # ==============================================================================
 """Model optimization passes."""
 
-import copy
-
+from typing import Any, cast
+from litert_torch import model as model_lib
+from litert_torch._convert import litert_converter
 import numpy as np
+
+LazyModelExporter = litert_converter.LazyModelExporter
 
 try:
   # pylint: disable=g-import-not-at-top
@@ -28,6 +31,7 @@ try:
   # pylint: enable=g-import-not-at-top
 
   _is_mu_available = True
+  MuModuleOp = mu.dialect.mlir.ModuleOp
 
   class HFTransformersOptimize(core.RewritePatternPassBase):
     """Rewrite pass."""
@@ -43,12 +47,14 @@ try:
       reduction_axis = mm.op("arith.constant", None, [op.operands[1]])
       mul_op = mm.op("tfl.mul", [op.results[0], mm.ANY], None)
       reduction_x = mm.op("arith.constant", None, [mul_op.operands[1]])
-      reduction_elements = int(1.0 / reduction_x.numpy())
+
+      mm.match(np.prod(reduction_x.results[0].type.shape) == 1)
+      reduction_elements = int(1.0 / reduction_x.numpy().item())
 
       input_shape = op.operands[0].type.shape
-      infered_elements = np.prod(
-          np.take(input_shape, reduction_axis.numpy())
-      ).astype(int)
+      infered_elements = int(
+          np.prod(np.take(input_shape, reduction_axis.numpy()))
+      )
       if reduction_elements != infered_elements:
         return
       out = mul_op.results[0]
@@ -66,32 +72,49 @@ try:
 
 except ImportError:
   _is_mu_available = False
+  MuModuleOp = Any
 
 
 def is_mu_available() -> bool:
   return _is_mu_available
 
 
-def call_pass(input_model: bytes) -> bytes:
+def call_pass(mu_module: MuModuleOp) -> MuModuleOp:
   """Calls the pass to optimize the model."""
   if not is_mu_available():
-    return input_model
+    return mu_module
 
-  original_module, ctx = mu.read_flatbuffer(content=input_model)
-  module = copy.deepcopy(original_module)
+  # original_module = mu_module
+  # mu_module = copy.deepcopy(original_module)
 
   pass_to_call = HFTransformersOptimize
 
+  pass_to_call()(mu_module)
+
+  # Add verify when bug is fixed with xdsl.
+  mu_module.cleanup()
+  return mu_module
+
+
+def update_model(model: model_lib.LiteRTModel) -> model_lib.LiteRTModel:
+  """Updates the model with the optimization passes."""
+  if not is_mu_available():
+    return model
+
+  exporter = cast(model_lib.ModelExporter, model._exporter)
+  if isinstance(exporter, LazyModelExporter) and exporter.module is not None:
+    # Quick path: avoid serialization and deserialization.
+    ir_module = exporter.module
+    ctx = ir_module.context
+    with ctx:
+      mu_module = mu.transform.mlir_to_model_utils(ir_module)
+  else:
+    # Slow path: reconstruct the model from bytes.
+    mu_module, ctx = mu.read_flatbuffer(content=model.model_content())
+
   with ctx:
-    pass_to_call()(module)
-    # Add verify when bug is fixed with xdsl.
-    module.cleanup()
-    return mu.write_flatbuffer(module)
+    mu_module = call_pass(mu_module)
+    ir_module = mu.transform.model_utils_to_mlir(mu_module, ir_context=ctx)
 
-
-def update_model(input_model_path: str, output_model_path: str):
-  with open(input_model_path, "rb") as f:
-    input_model = f.read()
-  output_model = call_pass(input_model)
-  with open(output_model_path, "wb") as f:
-    f.write(output_model)
+  new_exporter = LazyModelExporter(module=ir_module)
+  return model_lib.LiteRTModel(new_exporter)

@@ -50,8 +50,8 @@ class TestModelConversion(googletest.TestCase):
   def setUp(self):
     super().setUp()
     self._interpreter_builder = (
-        lambda tflite_model: lambda: interpreter.Interpreter(
-            model_content=tflite_model,
+        lambda model_content: lambda: interpreter.Interpreter(
+            model_content=model_content,
             experimental_default_delegate_latest_features=True,
         )
     )
@@ -77,7 +77,7 @@ class TestModelConversion(googletest.TestCase):
         },
     ).convert()
     edge_model.set_interpreter_builder(
-        self._interpreter_builder(edge_model.tflite_model())
+        self._interpreter_builder(edge_model.model_content())
     )
 
     tokens = torch.arange(1, seq_len + 1, dtype=torch.int).unsqueeze(0)
@@ -191,7 +191,7 @@ class TestModelConversion(googletest.TestCase):
         },
     ).convert()
     edge_model.set_interpreter_builder(
-        self._interpreter_builder(edge_model.tflite_model())
+        self._interpreter_builder(edge_model.model_content())
     )
 
     tokens = torch.arange(1, seq_len + 1, dtype=torch.int).unsqueeze(0)
@@ -251,7 +251,7 @@ class TestModelConversion(googletest.TestCase):
         },
     ).convert()
     edge_model.set_interpreter_builder(
-        self._interpreter_builder(edge_model.tflite_model())
+        self._interpreter_builder(edge_model.model_content())
     )
 
     tokens = torch.arange(1, seq_len + 1, dtype=torch.int).unsqueeze(0)
@@ -283,7 +283,7 @@ class TestModelConversion(googletest.TestCase):
         "encode", pytorch_model, (prompt_tokens,)
     ).convert()
     edge_model.set_interpreter_builder(
-        self._interpreter_builder(edge_model.tflite_model())
+        self._interpreter_builder(edge_model.model_content())
     )
     edge_output = edge_model(
         prompt_tokens.numpy(),
@@ -320,7 +320,7 @@ class TestModelConversion(googletest.TestCase):
         "diffusion", pytorch_model, (latents, context, time_embedding)
     ).convert()
     edge_model.set_interpreter_builder(
-        self._interpreter_builder(edge_model.tflite_model())
+        self._interpreter_builder(edge_model.model_content())
     )
     edge_output = edge_model(
         latents.numpy(),
@@ -352,7 +352,7 @@ class TestModelConversion(googletest.TestCase):
         "decode", pytorch_model, (latents,)
     ).convert()
     edge_model.set_interpreter_builder(
-        self._interpreter_builder(edge_model.tflite_model())
+        self._interpreter_builder(edge_model.model_content())
     )
     edge_output = edge_model(
         latents.numpy(),

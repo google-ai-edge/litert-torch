@@ -244,40 +244,6 @@ class TestConvert(googletest.TestCase):
     )
     self.assertTrue(result)
 
-  @googletest.skipIf(
-      not litert_torch.config.use_torch_xla,
-      reason="Shape polymorphism is not yet support with backend.",
-  )
-  def test_convert_model_with_dynamic_batch(self):
-    """Test converting a simple model with dynamic batch size."""
-
-    class SampleModel(nn.Module):
-
-      def __init__(self):
-        super().__init__()
-        self.w = torch.ones((10, 10)) * 2.7
-
-      def forward(self, x, y):
-        return x + y + self.w
-
-    sample_input = (torch.randn(4, 3, 10, 10), torch.randn(4, 3, 10, 10))
-    batch = torch.export.Dim("batch")
-    dynamic_shapes = ({0: batch}, {0: batch})
-
-    model = SampleModel().eval()
-    edge_model = litert_torch.convert(
-        model, sample_input, dynamic_shapes=dynamic_shapes
-    )
-
-    for batch_size in [2, 4, 10]:
-      validate_input = (
-          torch.randn(batch_size, 3, 10, 10),
-          torch.randn(batch_size, 3, 10, 10),
-      )
-      self.assertTrue(
-          model_coverage.compare_tflite_torch(edge_model, model, validate_input)
-      )
-
   def test_convert_model_with_kwargs(self):
     """Test converting a simple model with sample_kwargs."""
 
@@ -422,7 +388,7 @@ class TestConvert(googletest.TestCase):
     np.testing.assert_almost_equal(edge_output["y_data_2_1"], args[2])
 
     interpreter = tfl_interpreter.Interpreter(
-        model_content=edge_model._tflite_model
+        model_content=edge_model.model_content()
     )
     runner = interpreter.get_signature_runner("serving_default")
     output_details = runner.get_output_details()
@@ -435,7 +401,7 @@ class TestConvert(googletest.TestCase):
     model.eval()
     edge_model = litert_torch.convert(model, args, kwargs)
     interpreter = tfl_interpreter.Interpreter(
-        model_content=edge_model._tflite_model
+        model_content=edge_model.model_content()
     )
     runner = interpreter.get_signature_runner("serving_default")
     input_details = runner.get_input_details()
@@ -628,7 +594,7 @@ class TestConvert(googletest.TestCase):
       litert_torch.config.in_oss,
       "wait until converter next is completely OSS ready.",
   )
-  def test_convert_large_model_with_lazy_constants(self):
+  def test_convert_large_model_with_lightweight_conversion(self):
     """Test converting a simple model with large lazy constants."""
 
     class SampleModel(nn.Module):
@@ -645,7 +611,7 @@ class TestConvert(googletest.TestCase):
     model = SampleModel().eval()
     args = (torch.randn(1),)
     try:
-      em = litert_torch.convert(model, args, convert_with_lazy_constants=True)
+      em = litert_torch.convert(model, args, lightweight_conversion=True)
     except Exception as err:
       self.fail(f"Conversion failed with large lazy constants: {err}")
 

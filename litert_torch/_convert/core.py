@@ -13,8 +13,10 @@
 # limitations under the License.
 # ==============================================================================
 
+from __future__ import annotations
+
 import logging
-from typing import Literal, Optional, Union
+from typing import Literal
 
 from litert_torch import fx_infra
 from litert_torch import model
@@ -71,11 +73,11 @@ def _warn_training_modules(signatures: list[signature.Signature]):
 def convert_signatures(
     signatures: list[signature.Signature],
     *,
-    strict_export: Union[Literal["auto"], bool] = False,
-    quant_config: Optional[qcfg.QuantConfig] = None,
-    convert_with_lazy_constants: bool = False,
-) -> model.TfLiteModel:
-  """Converts a list of `signature.Signature`s and embeds them into one `model.TfLiteModel`.
+    strict_export: Literal["auto"] | bool = False,
+    quant_config: qcfg.QuantConfig | None = None,
+    lightweight_conversion: bool = False,
+) -> model.LiteRTModel:
+  """Converts a list of `signature.Signature`s and embeds them into one `model.LiteRTModel`.
 
   Args:
       signatures: The list of 'signature.Signature' objects containing PyTorch
@@ -86,13 +88,15 @@ def convert_signatures(
         strict_export="auto", the function will try to export module in both
         modes and use the first one succeeds for downstream conversion.
       quant_config: User-defined quantization method and scheme of the model.
-      convert_with_lazy_constants: (Experimental) If true, holds constants
-        lazily during conversion. This can significantly reduce the memory usage
-        and conversion time when converting large models. However, some constant
-        folding and optimizations may be disabled.
+      lightweight_conversion: (Experimental) If True, prioritizes a faster
+        conversion process and a reduced memory footprint. This is achieved by
+        handling constants lazily during the conversion phase, making it ideal
+        for large models that might otherwise hit memory limits. Note that
+        enabling this mode may bypass certain graph optimizations, such as
+        constant folding, in the resulting model.
 
   Returns:
-    The converted `model.TfLiteModel` object.
+    The converted `model.LiteRTModel` object.
   """
   _warn_training_modules(signatures)
 
@@ -135,19 +139,20 @@ def convert_signatures(
 
   # Apply default fx passes
   exported_programs = list(map(_run_convert_passes, exported_programs))
-  tflite_model = litert_converter.exported_programs_to_flatbuffer(
+
+  exporter = litert_converter.exported_programs_to_flatbuffer(
       exported_programs,
       signatures,
       quant_config=quant_config,
-      convert_with_lazy_constants=convert_with_lazy_constants,
+      lightweight_conversion=lightweight_conversion,
   )
 
-  return model.TfLiteModel(tflite_model)
+  return model.LiteRTModel(exporter)
 
 
 def aot_compile(
     compilation_configs: list[litert_types.CompilationConfig],
-    cpu_model: model.TfLiteModel,
+    cpu_model: model.LiteRTModel,
 ) -> litert_types.CompilationResult:
   """Compiles the given CPU model.
 
@@ -158,7 +163,7 @@ def aot_compile(
   Returns:
     The compilation result.
   """
-  litert_model = litert_types.Model.create_from_bytes(cpu_model.tflite_model())
+  litert_model = litert_types.Model.create_from_bytes(cpu_model.model_content())
   return aot_compile_lib.aot_compile(
       litert_model,
       config=compilation_configs,

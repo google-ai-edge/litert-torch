@@ -15,7 +15,6 @@
 
 """Provides a configuration for the litert-torch."""
 
-import functools
 import logging
 import os
 
@@ -23,29 +22,29 @@ __all__ = ["config"]
 
 
 def _get_bool_env_var(name: str, default: bool) -> bool:
-  var = os.environ.get(name, "false")
+  var = os.environ.get(name, "y" if default else "n")
   var = var.lower().strip()
   if var in ("y", "yes", "t", "true", "on", "1"):
     return True
   elif var in ("n", "no", "f", "false", "off", "0"):
     return False
   else:
-    logging.warning("Invalid %s value is ignored: %s.", name, var)
+    logging.warning("Invalid %s value is ignored: %r.", name, var)
+    return default
+
+
+def _get_int_env_var(name: str, default: int) -> int:
+  var = os.environ.get(name, str(default))
+  var = var.strip()
+  if var.isdigit():
+    return int(var)
+  else:
+    logging.warning("Invalid %s value is ignored: %r.", name, var)
     return default
 
 
 class _Config:
   """litert-torch global configs."""
-
-  @property
-  @functools.cache  # pylint: disable=method-cache-max-size-none
-  def use_torch_xla(self) -> bool:
-    """True if using torch_xla to lower torch ops to StableHLO.
-
-    To use torch_xla as the lowering backend, set environment variable
-    `USE_TORCH_XLA` to "true".
-    """
-    return _get_bool_env_var("USE_TORCH_XLA", default=False)
 
   @property
   def in_oss(self) -> bool:
@@ -62,17 +61,37 @@ class _Config:
     return _get_bool_env_var("ENABLE_GROUP_NORM_COMPOSITE", default=False)
 
   @enable_group_norm_composite.setter
-  def enable_group_norm_composite(self, value: bool):
+  def enable_group_norm_composite(self, value: bool) -> None:
     os.environ["ENABLE_GROUP_NORM_COMPOSITE"] = "y" if value else "n"
 
   @property
   def layout_optimize_partitioner(self) -> str:
     """The algorithm to use for layout optimization."""
-    return os.environ.get("AIEDGETORCH_LAYOUT_OPTIMIZE_PARTITIONER", "DEFAULT")
+    return os.environ.get("LAYOUT_OPTIMIZE_PARTITIONER", "DEFAULT")
 
   @layout_optimize_partitioner.setter
-  def layout_optimize_partitioner(self, value: str):
-    os.environ["AIEDGETORCH_LAYOUT_OPTIMIZE_PARTITIONER"] = str(value).upper()
+  def layout_optimize_partitioner(self, value: str) -> None:
+    os.environ["LAYOUT_OPTIMIZE_PARTITIONER"] = str(value).upper()
+
+  @property
+  def lazy_constant_numel_threshold(self) -> int:
+    """The threshold for the number of elements in a constant to be eligible to be lazily loaded during lightweight conversion."""
+    default = 1024 * 1024  # 1MB
+    return _get_int_env_var("LAZY_CONSTANT_NUMEL_THRESHOLD", default=default)
+
+  @lazy_constant_numel_threshold.setter
+  def lazy_constant_numel_threshold(self, value: int) -> None:
+    os.environ["LAZY_CONSTANT_NUMEL_THRESHOLD"] = str(value)
+
+  @property
+  def lazy_constant_getter_chunk_size(self) -> int:
+    """The chunk size for the lazy constant getter during lightweight conversion."""
+    default = 32 * 1024 * 1024  # 32MB
+    return _get_int_env_var("LAZY_CONSTANT_GETTER_CHUNK_SIZE", default=default)
+
+  @lazy_constant_getter_chunk_size.setter
+  def lazy_constant_getter_chunk_size(self, value: int) -> None:
+    os.environ["LAZY_CONSTANT_GETTER_CHUNK_SIZE"] = str(value)
 
 
 config = _Config()

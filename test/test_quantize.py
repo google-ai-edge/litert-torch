@@ -14,9 +14,6 @@
 # ==============================================================================
 """Tests for the quantizer."""
 
-import os
-import tempfile
-
 import litert_torch
 from litert_torch.quantize import pt2e_quantizer
 from litert_torch.quantize import quant_config
@@ -60,8 +57,8 @@ class TestQuantizerSanityBasic(googletest.TestCase):
         quant_config=quant_config.QuantConfig(pt2e_quantizer=quantizer),
     )
 
-    without_quantizer_size = len(without_quantizer.tflite_model())
-    with_quantizer_size = len(with_quantizer.tflite_model())
+    without_quantizer_size = len(without_quantizer.model_content())
+    with_quantizer_size = len(with_quantizer.model_content())
 
     self.assertNotEqual(
         with_quantizer_size,

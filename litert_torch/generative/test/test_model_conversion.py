@@ -33,8 +33,8 @@ class TestModelConversion(googletest.TestCase):
   def setUp(self):
     super().setUp()
     self._interpreter_builder = (
-        lambda tflite_model: lambda: interpreter.Interpreter(
-            model_content=tflite_model,
+        lambda model_content: lambda: interpreter.Interpreter(
+            model_content=model_content,
             experimental_default_delegate_latest_features=True,
         )
     )
@@ -61,7 +61,7 @@ class TestModelConversion(googletest.TestCase):
         sample_kwargs=kwargs,
     )
     edge_model.set_interpreter_builder(
-        self._interpreter_builder(edge_model.tflite_model())
+        self._interpreter_builder(edge_model.model_content())
     )
     return pytorch_model, edge_model, kwargs
 
@@ -99,7 +99,7 @@ class TestModelConversion(googletest.TestCase):
     _, edge_model, _ = self._get_params(
         enable_hlfb=True, kv_layout=kv_cache.KV_LAYOUT_DEFAULT
     )
-    interpreter = self._interpreter_builder(edge_model.tflite_model())()
+    interpreter = self._interpreter_builder(edge_model.model_content())()
 
     # pylint: disable=protected-access
     op_names = [op["op_name"] for op in interpreter._get_ops_details()]
@@ -150,7 +150,7 @@ class TestModelConversion(googletest.TestCase):
         .convert()
     )
     edge_model.set_interpreter_builder(
-        self._interpreter_builder(edge_model.tflite_model())
+        self._interpreter_builder(edge_model.model_content())
     )
 
     self.assertTrue(

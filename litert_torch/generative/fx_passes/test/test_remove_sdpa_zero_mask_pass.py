@@ -12,10 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-import re
 from typing import Callable, Union
 
-import litert_torch
 from litert_torch import backend
 from litert_torch import fx_infra
 from litert_torch.generative.fx_passes import CanonicalizePass
@@ -114,16 +112,7 @@ class TestRemoveSDPAZeroMaskPass(googletest.TestCase):
         (torch.rand(1, 512, 64, 64),),
     )
 
-    if litert_torch.config.use_torch_xla:
-      self.assertTrue(
-          re.search(
-              'stablehlo\.composite "odml\.scaled_dot_product_attention" %\d+,'
-              ' %\d+, %\d+ {',
-              stablehlo,
-          )
-      )
-    else:
-      self.assertEqual(stablehlo.count('stablehlo.custom_call @mark_tensor'), 4)
+    self.assertEqual(stablehlo.count('stablehlo.custom_call @mark_tensor'), 4)
 
 
 if __name__ == '__main__':

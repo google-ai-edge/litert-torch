@@ -265,8 +265,8 @@ def export_text_prefill_decode_model(
 
   model_path = os.path.join(work_dir, 'model.tflite')
   print(f'Exporting model to {model_path}...')
+  lrt_model = mu_pass_lib.update_model(lrt_model)
   lrt_model.export(model_path)
-  mu_pass_lib.update_model(model_path, model_path)
   end_time = time.perf_counter()
   elapsed_time = end_time - start_time
   print(f'Model conversion executed in {elapsed_time} seconds.')
