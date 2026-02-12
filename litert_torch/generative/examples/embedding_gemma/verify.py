@@ -35,6 +35,11 @@ _LONG_INPUT_PROMPT_PATH = flags.DEFINE_string(
     None,
     "Whether to enable the long input test.",
 )
+_FINAL_L2_NORM = flags.DEFINE_bool(
+    "final_l2_norm",
+    True,
+    "Whether to apply final L2 normalization to the embeddings.",
+)
 
 
 def main(_):
@@ -42,6 +47,7 @@ def main(_):
       checkpoint_dir=_CHECKPOINT.value,
       prompts=_PROMPTS.value,
       long_input_prompt_path=_LONG_INPUT_PROMPT_PATH.value,
+      final_l2_norm=_FINAL_L2_NORM.value,
   ):
     exit(1)
 
