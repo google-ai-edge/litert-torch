@@ -43,7 +43,13 @@ try:
       reduction_axis = mm.op("arith.constant", None, [op.operands[1]])
       mul_op = mm.op("tfl.mul", [op.results[0], mm.ANY], None)
       reduction_x = mm.op("arith.constant", None, [mul_op.operands[1]])
-      reduction_elements = int(1.0 / reduction_x.numpy())
+      if len(reduction_x.numpy().shape) > 0:
+        if reduction_x.numpy().size != 1:
+          return
+        red_x = reduction_x.numpy().flatten()[0]
+      else:
+        red_x = reduction_x.numpy()
+      reduction_elements = int(1.0 / red_x)
 
       input_shape = op.operands[0].type.shape
       infered_elements = np.prod(
@@ -53,7 +59,7 @@ try:
         return
       out = mul_op.results[0]
 
-      print("[HFTransformersOptimize] Applying fuse_mean")
+      # print("[HFTransformersOptimize] Applying fuse_mean")
       with core.OpBuildingContext(mul_op):
         mean_op = mlir.MlirOp(
             name="tfl.mean",
@@ -90,8 +96,21 @@ def call_pass(input_model: bytes) -> bytes:
 
 
 def update_model(input_model_path: str, output_model_path: str):
+  """Updates the model."""
   with open(input_model_path, "rb") as f:
     input_model = f.read()
   output_model = call_pass(input_model)
+  with open(output_model_path, "wb") as f:
+    f.write(output_model)
+
+
+def apply_mixed_precision(model_path: str, output_model_path: str):
+  # TODO(weiyiw): Merge into call_pass.
+  from litert_torch.generative.export_hf.core.mu import mixed_precision  # pylint: disable=g-import-not-at-top
+
+  print("Applying mixed precision to model...")
+  output_model = mixed_precision.convert_model_to_fp16(
+      model_path, mixed_precision.fp32_predicate
+  )
   with open(output_model_path, "wb") as f:
     f.write(output_model)

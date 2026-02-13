@@ -167,6 +167,7 @@ def export_text_prefill_decode_model(
     export_config: exportable_module.ExportableModuleConfig,
     work_dir: str,
     quantization_recipe: str | None = None,
+    **kwargs,
 ):
   """Exports text model to tflite."""
   has_dynamic_shape = (
@@ -266,7 +267,6 @@ def export_text_prefill_decode_model(
   model_path = os.path.join(work_dir, 'model.tflite')
   print(f'Exporting model to {model_path}...')
   lrt_model.export(model_path)
-  mu_pass_lib.update_model(model_path, model_path)
   end_time = time.perf_counter()
   elapsed_time = end_time - start_time
   print(f'Model conversion executed in {elapsed_time} seconds.')
@@ -281,6 +281,12 @@ def export_text_prefill_decode_model(
   )
   for recipe in quantization_recipe_list:
     model_path = maybe_quantize_model(model_path, recipe)
+    gc.collect()
+
+  mu_pass_lib.update_model(model_path, model_path)
+  if kwargs.get('experimental_use_mixed_precision', False):
+    print('Applying mixed precision to model...')
+    mu_pass_lib.apply_mixed_precision(model_path, model_path)
     gc.collect()
   return model_path
 

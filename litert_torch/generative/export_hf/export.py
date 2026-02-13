@@ -41,6 +41,7 @@ def export(
     use_jinja_template: bool = False,
     task: str = 'text_generation',
     bundle_litert_lm: bool = True,
+    experimental_use_mixed_precision: bool = False,
 ):
   """Exports HuggingFace Transformers model to tflite."""
   # TODO(weiyiw): Use tmp dir for work_dir.
@@ -76,7 +77,12 @@ def export(
       else 'LiteRTLMCache',
   )
   export_lib.export_text_prefill_decode_model(
-      pt_model, text_model_config, export_config, work_dir, quantization_recipe
+      pt_model,
+      text_model_config,
+      export_config,
+      work_dir,
+      quantization_recipe,
+      experimental_use_mixed_precision=experimental_use_mixed_precision,
   )
   gc.collect()
   if externalize_embedder:
