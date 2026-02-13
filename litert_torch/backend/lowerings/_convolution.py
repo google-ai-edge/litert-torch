@@ -130,6 +130,13 @@ def _aten_convolution(
   lhs_type: ir.RankedTensorType = lhs.type
   output_type = ir.RankedTensorType.get(out_aval.shape, lhs_type.element_type)
 
+  num_spatial_dims = len(lhs_type.shape) - 2
+
+  # If the padding is a single value, we assume it is applied to all spatial
+  # dimensions.
+  if len(padding) == 1 and num_spatial_dims > 1:
+    padding = padding * num_spatial_dims
+
   if transposed:
     res = build_transpose_conv(
         lctx,
