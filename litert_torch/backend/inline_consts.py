@@ -14,7 +14,10 @@
 # ==============================================================================
 """The pre-lower pass to make exported program's constant inputs into MLIR ElementsAttrs."""
 
-from typing import Any
+import dataclasses
+import logging
+import math
+from litert_torch import _config
 from litert_torch.backend import lowerings
 from litert_torch.backend.lowerings import utils as lowering_utils
 from ai_edge_litert.mlir import ir
@@ -23,8 +26,29 @@ import numpy as np
 import torch
 from ai_edge_litert.mlir._mlir_libs import converter_api_ext
 
-LAZY_CONSTANTS_NUMEL_THRESHOLD = 512 * 1024  # 512KB
-LAZY_CONSTANTS_GETTER_CHUNK_SIZE = 1024 * 1024  # 1MB
+config = _config.config
+
+
+@dataclasses.dataclass
+class InlineConstsContext(lowerings.context.LoweringContextPlugin):
+  """The context object for inlining constants."""
+
+  enable_lazy_constants: bool = False
+  constant_cache: dict[int, ir.Attribute] = dataclasses.field(
+      default_factory=dict
+  )
+
+  @classmethod
+  def get(
+      cls, lctx: lowerings.context.LoweringContext
+  ) -> 'InlineConstsContext':
+    if not lctx.has_plugin(cls):
+      logging.warning(
+          'InlineConstsContext is not registered in the lowering context.'
+          ' Constants may not be shared between exported program lowerings.'
+      )
+      lctx.add_plugin(cls())
+    return lctx.get_plugin(cls)
 
 
 def _tensor_fingerprint(tensor: torch.Tensor) -> int:
@@ -73,35 +97,35 @@ def _tensor_to_mlir_compatible_array(tensor: torch.Tensor) -> np.ndarray:
 
 
 def _get_tensor_uniform_value(tensor: torch.Tensor):
-  """Returns the uniform value of a tensor in NumPy if uniform, else None."""
+  """Returns the uniform value of a tensor if it is uniform, otherwise None."""
+  flat = tensor.view(-1)
+  numel = flat.numel()
 
-  # Handle empty tensors
-  if tensor.numel() == 0:
+  if numel == 0:
     return None
 
-  # Handle single-element tensors (always uniform)
-  if tensor.numel() == 1:
-    return tensor.detach().cpu().numpy()
+  # Extract the first value as a Python scalar early
+  first_val = flat[0].item()
+  if numel == 1:
+    return first_val
 
-  # Handle types that don't support min/max (Complex numbers)
-  if tensor.is_complex():
-    first_val = tensor[0]
-    if (tensor == first_val).all():
-      return first_val.detach().cpu().numpy()
-    return None
+  # The Heuristic "Fast-Fail"
+  # If the tensor is large, check small chunks at the start and end.
+  # This catches most non-uniform cases in constant time O(1).
+  if numel > 128:
+    if not torch.all(flat[:64] == first_val):
+      return None
+    if not torch.all(flat[-64:] == first_val):
+      return None
 
-  # Fast path for most numeric types
-  mn, mx = tensor.min(), tensor.max()
+  # The Full Scan
+  if torch.all(flat == first_val):
+    return first_val
 
-  # Handle NaNs
-  if torch.isnan(mn) and torch.isnan(mx):
-    if torch.isnan(tensor).all():
-      return mn.detach().cpu().numpy()
-    return None
-
-  # Check equality and return as NumPy scalar
-  if (mn == mx).item():
-    return mn.detach().cpu().numpy()
+  # The NaN Edge Case
+  if isinstance(first_val, float) and math.isnan(first_val):
+    if torch.isnan(flat).all():
+      return first_val
 
   return None
 
@@ -118,86 +142,91 @@ def _build_const(attr: ir.Attribute, tensor_type: ir.RankedTensorType):
   return arith.ConstantOp(tensor_type, attr).results[0]
 
 
-def get_tensor_lowering_placeholder(
-    constant_cache: dict[Any, ir.Attribute],
-    enable_lazy_constants: bool,
+def tensor_lowering_placeholder(*args, **kwargs):  # pylint: disable=g-doc-args
+  """The placeholder function to be plugged into the exported program to be lowered to a constant op.
+
+  Raises:
+    RuntimeError: This function should not be called directly.
+  """
+  del args, kwargs
+  raise RuntimeError(
+      'tensor_lowering_placeholder should not be called directly.'
+  )
+
+
+@lowerings.lower(tensor_lowering_placeholder)
+def tensor_lowering_placeholder_lowering(
+    lctx: lowerings.context.LoweringContext,
+    x: torch.Tensor,
 ):
-  """Returns a placeholder that will be lowered to elements attr."""
+  """Lower the placeholder function to a constant op."""
+  const_ctx = InlineConstsContext.get(lctx)
 
-  def placeholder(x: torch.Tensor):
-    return x
+  x_fingerprint = _tensor_fingerprint(x)
+  elty = lowering_utils.torch_dtype_to_ir_element_type(x.dtype)
+  tensor_type = ir.RankedTensorType.get(x.shape, elty)
 
-  @lowerings.lower(placeholder)
-  def tensor_lowering(lctx, x: torch.Tensor):
-    del lctx
-    x_fingerprint = _tensor_fingerprint(x)
-    elty = lowering_utils.torch_dtype_to_ir_element_type(x.dtype)
-    tensor_type = ir.RankedTensorType.get(x.shape, elty)
+  # If the tensor is already in the cache, return it.
+  cached_attr = const_ctx.constant_cache.get(x_fingerprint)
+  if cached_attr is not None:
+    return _build_const(cached_attr, tensor_type)
 
-    # If the tensor is already in the cache, return it.
-    cached_attr = constant_cache.get(x_fingerprint)
-    if cached_attr is not None:
-      return _build_const(cached_attr, tensor_type)
+  use_lazy_attr = const_ctx.enable_lazy_constants
+  if x.dtype not in [torch.float32]:
+    use_lazy_attr = False
 
-    use_lazy_attr = enable_lazy_constants
-    if x.dtype not in [torch.float32]:
-      use_lazy_attr = False
+  # If the tensor is too small, just use a dense elements attr.
+  if x.numel() * x.element_size() < config.lazy_constant_numel_threshold:
+    use_lazy_attr = False
 
-    # 512KB as the threshold for using custom dense elements attr.
-    if x.numel() * x.element_size() < LAZY_CONSTANTS_NUMEL_THRESHOLD:
-      use_lazy_attr = False
+  # If not using lazy attr, clamp inf values to the min/max value of the
+  # tensor's dtype. Otherwise, rely on the bytes getter to clamp values
+  # lazily.
+  if not use_lazy_attr:
+    x = _clamp_inf_values(x)
 
-    # If not using lazy attr, clamp inf values to the min/max value of the
-    # tensor's dtype. Otherwise, rely on the bytes getter to clamp values
-    # lazily.
-    if not use_lazy_attr:
-      x = _clamp_inf_values(x)
+  # If the tensor is uniform, use a splat constant.
+  uniform_value = _get_tensor_uniform_value(x)
+  if uniform_value is not None:
+    use_lazy_attr = False
 
-    # If the tensor is uniform, use a splat constant.
-    uniform_value = _get_tensor_uniform_value(x)
-    if uniform_value is not None:
-      use_lazy_attr = False
+  if uniform_value is not None:
+    attr = lowering_utils.splat_attr(
+        uniform_value,
+        tensor_type.element_type,
+        tensor_type.shape,
+    )
+  elif use_lazy_attr:
 
-    if uniform_value is not None:
-      attr = lowering_utils.splat_attr(
-          uniform_value.item(),
-          tensor_type.element_type,
-          tensor_type.shape,
+    def chunk_iterator_factory():
+      nonlocal x
+      element_size = x.element_size()
+      elements_per_chunk = (
+          config.lazy_constant_getter_chunk_size // element_size
       )
-    elif use_lazy_attr:
 
-      def chunk_iterator_factory():
-        nonlocal x
-        element_size = x.element_size()
-        elements_per_chunk = LAZY_CONSTANTS_GETTER_CHUNK_SIZE // element_size
+      # x.view(-1) is a metadata-only operation (0 bytes allocated)
+      flat_x = x.view(-1)
+      numel = flat_x.numel()
 
-        # x.view(-1) is a metadata-only operation (0 bytes allocated)
-        flat_x = x.view(-1)
-        numel = flat_x.numel()
+      for i in range(0, numel, elements_per_chunk):
+        chunk = flat_x[i : i + elements_per_chunk]
+        chunk = _clamp_inf_values(chunk)
+        chunk_data = _tensor_to_mlir_compatible_array(chunk).tobytes()
+        yield chunk_data
 
-        for i in range(0, numel, elements_per_chunk):
-          chunk_view = flat_x[i : i + elements_per_chunk]
-          chunk_data = _tensor_to_mlir_compatible_array(chunk_view)
-          yield chunk_data.tobytes()
+    attr = converter_api_ext.get_py_chunked_callback_resource_attr(
+        tensor_type, chunk_iterator_factory
+    )
+  else:
+    arr = _tensor_to_mlir_compatible_array(x)
+    attr = ir.DenseElementsAttr.get(arr, type=tensor_type)
 
-      attr = converter_api_ext.get_py_chunked_callback_resource_attr(
-          tensor_type, chunk_iterator_factory
-      )
-    else:
-      arr = _tensor_to_mlir_compatible_array(x)
-      attr = ir.DenseElementsAttr.get(arr, type=tensor_type)
-
-    constant_cache[x_fingerprint] = attr
-    return _build_const(attr, tensor_type)
-
-  return placeholder
+  const_ctx.constant_cache[x_fingerprint] = attr
+  return _build_const(attr, tensor_type)
 
 
-def inline_consts(
-    exported_program: torch.export.ExportedProgram,
-    constant_cache: dict[Any, ir.Attribute] | None = None,
-    enable_lazy_constants: bool = False,
-):
+def inline_consts(exported_program: torch.export.ExportedProgram) -> None:
   """Inlines exported program's constant inputs by replacing with lazy_tensor_placeholder."""
   flat_user_inputs, _ = exported_program._get_flat_args_with_check(
       *exported_program.example_inputs
@@ -210,19 +239,6 @@ def inline_consts(
   else:
     flat_consts = flat_inputs
 
-  if constant_cache is None:
-    if enable_lazy_constants:
-      raise ValueError(
-          'constant_cache must be provided when enable_lazy_constants is True'
-          ' to enforce constant deduplication.'
-      )
-    constant_cache = {}
-
-  lowering_placeholder = get_tensor_lowering_placeholder(
-      constant_cache=constant_cache,
-      enable_lazy_constants=enable_lazy_constants,
-  )
-
   for i, (tensor, node) in enumerate(
       zip(flat_consts, exported_program.graph.nodes)
   ):
@@ -232,7 +248,7 @@ def inline_consts(
           f'{i}-th node: {node}'
       )
     node.op = 'call_function'
-    node.target = lowering_placeholder
+    node.target = tensor_lowering_placeholder
     node.args = (tensor,)
 
   exported_program.graph_signature.input_specs = (

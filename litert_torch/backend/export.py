@@ -320,6 +320,9 @@ def exported_program_to_mlir(
     exported_program: torch.export.ExportedProgram,
     *,
     ir_context: ir.Context | None = None,
+    lowering_context_plugins: (
+        list[lowerings.context.LoweringContextPlugin] | None
+    ) = None,
     _pre_lower_pass: (
         Callable[[torch.export.ExportedProgram], None] | None
     ) = None,
@@ -330,6 +333,7 @@ def exported_program_to_mlir(
     exported_program: The exported program to lower.
     ir_context: The MLIR context to use. If not provided, a new context will be
       created.
+    lowering_context_plugins: A list of plugins to add to the lowering context.
     _pre_lower_pass: A function to run on exported program before lowering,
       after all run_decompositions calls.
 
@@ -361,10 +365,10 @@ def exported_program_to_mlir(
 
   # Passes below modify the exported program to a state not executable by torch.
   # Do not call run_decompositions after applying the passes.
-  _convert_q_dq_per_channel_args_to_list(exported_program)
-
   if _pre_lower_pass:
     _pre_lower_pass(exported_program)
+
+  _convert_q_dq_per_channel_args_to_list(exported_program)
   inline_consts_lib.inline_consts(exported_program)
 
   # Begin of lowering.
@@ -375,6 +379,11 @@ def exported_program_to_mlir(
 
     module = ir.Module.create()
     lctx = LoweringContext(ir_context, module)
+
+    if lowering_context_plugins:
+      for plugin in lowering_context_plugins:
+        lctx.add_plugin(plugin)
+
     interpreter = LoweringInterpreter(exported_program.graph_module, lctx)
     ir_flat_inputs, export_flat_args, tensor_metas = _build_flat_inputs(
         exported_program

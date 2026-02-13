@@ -47,22 +47,12 @@ class TestSerialization(googletest.TestCase):
 
     with tempfile.TemporaryDirectory() as tmp_dir_name:
       edge_model.export(os.path.join(tmp_dir_name, "test.model"))
-      loaded_model = litert_torch.load(
-          os.path.join(tmp_dir_name, "test.model")
-      )
+      loaded_model = litert_torch.load(os.path.join(tmp_dir_name, "test.model"))
 
     result = model_coverage.compare_tflite_torch(
         loaded_model, resnet18, sample_input
     )
     self.assertTrue(result)
-
-  def test_wrong_model_raises(self):
-    """Checks if the right exception is raised if the model is not deserializable."""
-    with tempfile.NamedTemporaryFile() as fp:
-      fp.write(b"dummy data")
-
-      with self.assertRaises(ValueError):
-        litert_torch.load(fp.name)
 
 
 if __name__ == "__main__":

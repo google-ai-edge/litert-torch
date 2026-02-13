@@ -137,8 +137,8 @@ class TestQuantizeConvert(parameterized.TestCase):
     )
     float_model = litert_torch.convert(pytorch_model, (idx, input_pos))
     self.assertLess(
-        len(quantized_model._tflite_model),
-        len(float_model._tflite_model),
+        len(quantized_model.model_content()),
+        len(float_model.model_content()),
         "Quantized model isn't smaller than F32 model.",
     )
 
@@ -154,8 +154,8 @@ class TestQuantizeConvert(parameterized.TestCase):
     )
     float_model = litert_torch.convert(pytorch_model, (idx, input_pos))
     self.assertLess(
-        len(quantized_model._tflite_model),
-        len(float_model._tflite_model),
+        len(quantized_model.model_content()),
+        len(float_model.model_content()),
         "Quantized model isn't smaller than F32 model.",
     )
 
@@ -172,8 +172,8 @@ class TestQuantizeConvert(parameterized.TestCase):
     )
     float_model = litert_torch.convert(pytorch_model, (idx, input_pos))
     self.assertLess(
-        len(quantized_model._tflite_model),
-        len(float_model._tflite_model),
+        len(quantized_model.model_content()),
+        len(float_model.model_content()),
         "Quantized model isn't smaller than F32 model.",
     )
 
@@ -192,7 +192,7 @@ class TestQuantizeConvert(parameterized.TestCase):
     float_model = litert_torch.convert(pytorch_model, (idx, input_pos))
 
     self.assertLess(
-        len(quantized_model._tflite_model), len(float_model._tflite_model)
+        len(quantized_model.model_content()), len(float_model.model_content())
     )
     self.assertTrue(
         model_coverage.compare_tflite_torch(

@@ -14,11 +14,15 @@
 # ==============================================================================
 """LiteRT converter integrations: MLIR to flatbuffer conversions."""
 
+import dataclasses
+
 from litert_torch import backend
+from litert_torch import model as model_lib
 from litert_torch._convert import signature
 from litert_torch.backend import inline_consts as inline_consts_lib
 from litert_torch.quantize import quant_config as qcfg
 from litert_torch.quantize import translate_recipe
+from ai_edge_litert.mlir import ir
 from ai_edge_litert.mlir import passmanager
 import torch
 
@@ -45,14 +49,53 @@ def _get_output_names(
   return flat_names
 
 
+@dataclasses.dataclass
+class LazyModelExporter(model_lib.ModelExporter):
+  """A model exporter that exports the module lazily.
+
+  The lazy exporter reduces the export time and memory usage when user does not
+  mean to load the model in memory but just to save it to a file.
+  """
+
+  module: ir.Module | ir.Operation | None = None
+  content: bytes | None = None
+
+  @property
+  def _module_op(self) -> ir.Operation | None:
+    if isinstance(self.module, ir.Module):
+      return self.module.operation
+    return self.module
+
+  def to_file(self, path: str):
+    """Exports the module to a flatbuffer file."""
+    path = str(path)
+
+    if self.content is not None:
+      with open(path, "wb") as f:
+        f.write(self.content)
+      return
+
+    converter_api_ext.export_flatbuffer_to_file(self._module_op, path)
+
+  def to_bytes(self) -> bytes:
+    """Returns the flatbuffer bytes of the module."""
+    if self.content is None:
+      self.content = converter_api_ext.export_flatbuffer_to_bytes(
+          self._module_op
+      )
+      self.module = None
+
+    return self.content
+
+
 def exported_programs_to_flatbuffer(
     exported_programs: list[torch.export.ExportedProgram],
     signatures: list[signature.Signature],
     *,
     quant_config: qcfg.QuantConfig | None = None,
-    convert_with_lazy_constants: bool = False,
-):
-  """Converts ExportedPrograms to a LiteRT model."""
+    lightweight_conversion: bool = False,
+) -> LazyModelExporter:
+  """Convert ExportedPrograms to a LiteRT model."""
   if not exported_programs:
     raise ValueError("The number of exported programs must be greater than 0.")
   if len(exported_programs) != len(signatures):
@@ -62,18 +105,9 @@ def exported_programs_to_flatbuffer(
 
   ir_context = backend.export_utils.create_ir_context()
 
-  constant_cache = {}
-
-  def pre_lower_pass(exported_program: torch.export.ExportedProgram):
-    nonlocal constant_cache
-    # Call inline_consts explicitly here to enforce cross-exported-program
-    # constant cache. This reduces the time to convert torch tensors into
-    # attributes when converting multi signatures with shared subgraphs.
-    inline_consts_lib.inline_consts(
-        exported_program,
-        constant_cache=constant_cache,
-        enable_lazy_constants=convert_with_lazy_constants,
-    )
+  cross_program_inline_consts_ctx = inline_consts_lib.InlineConstsContext(
+      enable_lazy_constants=lightweight_conversion,
+  )
 
   lowered_programs = []
   for exported_program, sig in zip(exported_programs, signatures):
@@ -81,7 +115,7 @@ def exported_programs_to_flatbuffer(
     lowered = backend.export.exported_program_to_mlir(
         exported_program,
         ir_context=ir_context,
-        _pre_lower_pass=pre_lower_pass,
+        lowering_context_plugins=[cross_program_inline_consts_ctx],
     )
 
     # Set signature.
@@ -132,13 +166,14 @@ def exported_programs_to_flatbuffer(
         merged_module, pass_manager, config
     )
 
-  # Convert module to flatbuffer.
-  tflite_model = converter_api_ext.export_flatbuffer_to_bytes(merged_module)
+  # Creates the lazy flatbuffer exporter.
+  exporter = LazyModelExporter(module=merged_module)
 
   # Quantize the model if needed.
   if translated_recipe:
-    tflite_model = translate_recipe.quantize_model(
-        tflite_model, translated_recipe
+    model_bytes = translate_recipe.quantize_model(
+        exporter.to_bytes(), translated_recipe
     )
+    exporter = LazyModelExporter(content=model_bytes)
 
-  return tflite_model
+  return exporter
