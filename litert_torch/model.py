@@ -22,6 +22,7 @@ PyTorch models can be converted to this representation through
 from __future__ import annotations
 
 import abc
+import dataclasses
 import os
 import re
 from typing import Callable
@@ -31,6 +32,29 @@ import numpy.typing as npt
 from ai_edge_litert import interpreter as tfl_interpreter  # pylint: disable=g-direct-tensorflow-import
 
 DEFAULT_SIGNATURE_NAME = 'serving_default'
+
+
+class ModelExporter(abc.ABC):
+
+  @abc.abstractmethod
+  def to_file(self, path: str):
+    raise NotImplementedError()
+
+  @abc.abstractmethod
+  def to_bytes(self) -> bytes:
+    raise NotImplementedError()
+
+
+@dataclasses.dataclass(frozen=True)
+class BytesExporter(ModelExporter):
+  content: bytes
+
+  def to_file(self, path: str):
+    with open(path, 'wb') as f:
+      f.write(self.content)
+
+  def to_bytes(self) -> bytes:
+    return self.content
 
 
 class Model(abc.ABC):
@@ -61,21 +85,19 @@ class Model(abc.ABC):
 class TfLiteModel(Model):
   """An edge model which uses tflite under-the-hood."""
 
-  def __init__(self, tflite_model):
-    """Initializes the TfLiteModel instance using a TFLite serialized object.
+  def __init__(self, exporter: ModelExporter | bytes):
+    if isinstance(exporter, bytes):
+      exporter = BytesExporter(exporter)
 
-    Args:
-      tflite_model: A TFlite serialized object.
-    """
-    self._tflite_model = tflite_model
+    self._exporter = exporter
     self._interpreter_builder = lambda: tfl_interpreter.Interpreter(
-        model_content=self._tflite_model,
+        model_content=exporter.to_bytes(),
         experimental_default_delegate_latest_features=True,
     )
 
   def tflite_model(self) -> bytes:
     """Returns the wrapped tflite model."""
-    return self._tflite_model
+    return self._exporter.to_bytes()
 
   def set_interpreter_builder(
       self, builder: Callable[[], tfl_interpreter.Interpreter]
@@ -102,6 +124,10 @@ class TfLiteModel(Model):
         inference.
       signature_name: The name of the signature to be used for inference. The
         default signature is used if not provided.
+
+    Returns:
+      The output of the model. If the model has only one output, the output is
+      returned directly.
     """
     interpreter = self._interpreter_builder()
     interpreter.allocate_tensors()
@@ -157,18 +183,17 @@ class TfLiteModel(Model):
     """
     if os.path.dirname(path):
       os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'wb') as file_handle:
-      file_handle.write(self._tflite_model)
+    self._exporter.to_file(path)
 
   @staticmethod
   def load(path: str) -> TfLiteModel | None:
     """Returns an edge (tflite) model by reading it from the disk.
 
     Args:
-      str: The path to the model.
+      path: The path to the model.
     """
-    with open(path, 'rb') as file_handle:
-      model_content = file_handle.read()
+    with open(path, 'rb') as f:
+      model_content = f.read()
 
     # Check if this is indeed a tflite model:
     try:

@@ -14,6 +14,7 @@
 # ==============================================================================
 """The pre-lower pass to make exported program's constant inputs into MLIR ElementsAttrs."""
 
+import math
 from typing import Any
 from litert_torch.backend import lowerings
 from litert_torch.backend.lowerings import utils as lowering_utils
@@ -23,8 +24,8 @@ import numpy as np
 import torch
 from ai_edge_litert.mlir._mlir_libs import converter_api_ext
 
-LAZY_CONSTANTS_NUMEL_THRESHOLD = 512 * 1024  # 512KB
-LAZY_CONSTANTS_GETTER_CHUNK_SIZE = 1024 * 1024  # 1MB
+LAZY_CONSTANTS_NUMEL_THRESHOLD = 1024 * 1024  # 1MB
+LAZY_CONSTANTS_GETTER_CHUNK_SIZE = 64 * 1024 * 1024  # 64MB
 
 
 def _tensor_fingerprint(tensor: torch.Tensor) -> int:
@@ -73,35 +74,35 @@ def _tensor_to_mlir_compatible_array(tensor: torch.Tensor) -> np.ndarray:
 
 
 def _get_tensor_uniform_value(tensor: torch.Tensor):
-  """Returns the uniform value of a tensor in NumPy if uniform, else None."""
+  """Returns the uniform value of a tensor if it is uniform, otherwise None."""
+  flat = tensor.view(-1)
+  numel = flat.numel()
 
-  # Handle empty tensors
-  if tensor.numel() == 0:
+  if numel == 0:
     return None
 
-  # Handle single-element tensors (always uniform)
-  if tensor.numel() == 1:
-    return tensor.detach().cpu().numpy()
+  # Extract the first value as a Python scalar early
+  first_val = flat[0].item()
+  if numel == 1:
+    return first_val
 
-  # Handle types that don't support min/max (Complex numbers)
-  if tensor.is_complex():
-    first_val = tensor[0]
-    if (tensor == first_val).all():
-      return first_val.detach().cpu().numpy()
-    return None
+  # The Heuristic "Fast-Fail"
+  # If the tensor is large, check small chunks at the start and end.
+  # This catches most non-uniform cases in constant time O(1).
+  if numel > 128:
+    if not torch.all(flat[:64] == first_val):
+      return None
+    if not torch.all(flat[-64:] == first_val):
+      return None
 
-  # Fast path for most numeric types
-  mn, mx = tensor.min(), tensor.max()
+  # The Full Scan
+  if torch.all(flat == first_val):
+    return first_val
 
-  # Handle NaNs
-  if torch.isnan(mn) and torch.isnan(mx):
-    if torch.isnan(tensor).all():
-      return mn.detach().cpu().numpy()
-    return None
-
-  # Check equality and return as NumPy scalar
-  if (mn == mx).item():
-    return mn.detach().cpu().numpy()
+  # The NaN Edge Case
+  if isinstance(first_val, float) and math.isnan(first_val):
+    if torch.isnan(flat).all():
+      return first_val
 
   return None
 
@@ -143,7 +144,7 @@ def get_tensor_lowering_placeholder(
     if x.dtype not in [torch.float32]:
       use_lazy_attr = False
 
-    # 512KB as the threshold for using custom dense elements attr.
+    # If the tensor is too small, just use a dense elements attr.
     if x.numel() * x.element_size() < LAZY_CONSTANTS_NUMEL_THRESHOLD:
       use_lazy_attr = False
 
@@ -160,7 +161,7 @@ def get_tensor_lowering_placeholder(
 
     if uniform_value is not None:
       attr = lowering_utils.splat_attr(
-          uniform_value.item(),
+          uniform_value,
           tensor_type.element_type,
           tensor_type.shape,
       )
@@ -176,9 +177,10 @@ def get_tensor_lowering_placeholder(
         numel = flat_x.numel()
 
         for i in range(0, numel, elements_per_chunk):
-          chunk_view = flat_x[i : i + elements_per_chunk]
-          chunk_data = _tensor_to_mlir_compatible_array(chunk_view)
-          yield chunk_data.tobytes()
+          chunk = flat_x[i : i + elements_per_chunk]
+          chunk = _clamp_inf_values(chunk)
+          chunk_data = _tensor_to_mlir_compatible_array(chunk).tobytes()
+          yield chunk_data
 
       attr = converter_api_ext.get_py_chunked_callback_resource_attr(
           tensor_type, chunk_iterator_factory

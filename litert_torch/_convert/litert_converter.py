@@ -14,11 +14,15 @@
 # ==============================================================================
 """LiteRT converter integrations: MLIR to flatbuffer conversions."""
 
+import dataclasses
+
 from litert_torch import backend
+from litert_torch import model as model_lib
 from litert_torch._convert import signature
 from litert_torch.backend import inline_consts as inline_consts_lib
 from litert_torch.quantize import quant_config as qcfg
 from litert_torch.quantize import translate_recipe
+from ai_edge_litert.mlir import ir
 from ai_edge_litert.mlir import passmanager
 import torch
 
@@ -45,14 +49,45 @@ def _get_output_names(
   return flat_names
 
 
+@dataclasses.dataclass
+class LazyModelExporter(model_lib.ModelExporter):
+  """A model exporter that exports the module lazily.
+
+  The lazy exporter reduces the export time and memory usage when user does not
+  mean to load the model in memory but just to save it to a file.
+  """
+
+  module: ir.Module | None = None
+  content: bytes | None = None
+
+  def to_file(self, path: str):
+    """Exports the module to a flatbuffer file."""
+    path = str(path)
+
+    if self.content is not None:
+      with open(path, "wb") as f:
+        f.write(self.content)
+      return
+
+    converter_api_ext.export_flatbuffer_to_file(self.module, path)
+
+  def to_bytes(self) -> bytes:
+    """Returns the flatbuffer bytes of the module."""
+    if self.content is None:
+      self.content = converter_api_ext.export_flatbuffer_to_bytes(self.module)
+      self.module = None
+
+    return self.content
+
+
 def exported_programs_to_flatbuffer(
     exported_programs: list[torch.export.ExportedProgram],
     signatures: list[signature.Signature],
     *,
     quant_config: qcfg.QuantConfig | None = None,
     convert_with_lazy_constants: bool = False,
-):
-  """Converts ExportedPrograms to a LiteRT model."""
+) -> LazyModelExporter:
+  """Convert ExportedPrograms to a LiteRT model."""
   if not exported_programs:
     raise ValueError("The number of exported programs must be greater than 0.")
   if len(exported_programs) != len(signatures):
@@ -132,13 +167,14 @@ def exported_programs_to_flatbuffer(
         merged_module, pass_manager, config
     )
 
-  # Convert module to flatbuffer.
-  tflite_model = converter_api_ext.export_flatbuffer_to_bytes(merged_module)
+  # Creates the lazy flatbuffer exporter.
+  exporter = LazyModelExporter(module=merged_module)
 
   # Quantize the model if needed.
   if translated_recipe:
-    tflite_model = translate_recipe.quantize_model(
-        tflite_model, translated_recipe
+    model_bytes = translate_recipe.quantize_model(
+        exporter.to_bytes(), translated_recipe
     )
+    exporter = LazyModelExporter(content=model_bytes)
 
-  return tflite_model
+  return exporter

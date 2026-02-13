@@ -135,14 +135,15 @@ def convert_signatures(
 
   # Apply default fx passes
   exported_programs = list(map(_run_convert_passes, exported_programs))
-  tflite_model = litert_converter.exported_programs_to_flatbuffer(
+
+  exporter = litert_converter.exported_programs_to_flatbuffer(
       exported_programs,
       signatures,
       quant_config=quant_config,
       convert_with_lazy_constants=convert_with_lazy_constants,
   )
 
-  return model.TfLiteModel(tflite_model)
+  return model.TfLiteModel(exporter)
 
 
 def aot_compile(
