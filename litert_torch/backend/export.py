@@ -21,15 +21,14 @@ import operator
 from typing import Any, Callable, Optional
 
 from litert_torch import fx_infra
-from litert_torch.backend import _inline_consts
 from litert_torch.backend import _torch_future
 from litert_torch.backend import debuginfo
 from litert_torch.backend import export_utils
+from litert_torch.backend import inline_consts as inline_consts_lib
 from litert_torch.backend import lowerings
 from litert_torch.backend.experimental import torch_tfl
 from ai_edge_litert.mlir import ir
 from ai_edge_litert.mlir.dialects import func
-from ai_edge_litert.mlir.dialects import stablehlo
 import torch
 import torch.utils._pytree as pytree
 
@@ -362,11 +361,11 @@ def exported_program_to_mlir(
 
   # Passes below modify the exported program to a state not executable by torch.
   # Do not call run_decompositions after applying the passes.
+  _convert_q_dq_per_channel_args_to_list(exported_program)
+
   if _pre_lower_pass:
     _pre_lower_pass(exported_program)
-
-  _convert_q_dq_per_channel_args_to_list(exported_program)
-  _inline_consts.inline_consts(exported_program)
+  inline_consts_lib.inline_consts(exported_program)
 
   # Begin of lowering.
   if not ir_context:

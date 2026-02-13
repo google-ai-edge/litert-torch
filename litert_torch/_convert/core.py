@@ -14,7 +14,7 @@
 # ==============================================================================
 
 import logging
-from typing import Any, Literal, Optional, Union
+from typing import Literal, Optional, Union
 
 from litert_torch import fx_infra
 from litert_torch import model
@@ -73,8 +73,7 @@ def convert_signatures(
     *,
     strict_export: Union[Literal["auto"], bool] = False,
     quant_config: Optional[qcfg.QuantConfig] = None,
-    _tfl_converter_flags: Optional[dict[str, Any]] = None,
-    _saved_model_dir: Optional[str] = None,
+    convert_with_lazy_constants: bool = False,
 ) -> model.TfLiteModel:
   """Converts a list of `signature.Signature`s and embeds them into one `model.TfLiteModel`.
 
@@ -87,17 +86,14 @@ def convert_signatures(
         strict_export="auto", the function will try to export module in both
         modes and use the first one succeeds for downstream conversion.
       quant_config: User-defined quantization method and scheme of the model.
-      _tfl_converter_flags: A nested dictionary allowing setting flags for the
-        underlying tflite converter.
-      _saved_model_dir: Directory for the intermediate saved model. If not
-        specified, a random temporary directory would be used.
+      convert_with_lazy_constants: (Experimental) If true, holds constants
+        lazily during conversion. This can significantly reduce the memory usage
+        and conversion time when converting large models. However, some constant
+        folding and optimizations may be disabled.
 
   Returns:
     The converted `model.TfLiteModel` object.
   """
-  # TODO: b/478909085 - Deprecate old converter flags.
-  del _tfl_converter_flags, _saved_model_dir
-
   _warn_training_modules(signatures)
 
   def export(**kwargs):
@@ -143,6 +139,7 @@ def convert_signatures(
       exported_programs,
       signatures,
       quant_config=quant_config,
+      convert_with_lazy_constants=convert_with_lazy_constants,
   )
 
   return model.TfLiteModel(tflite_model)

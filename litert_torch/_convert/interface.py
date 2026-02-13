@@ -134,8 +134,7 @@ class Converter:
       strict_export: Union[Literal["auto"], bool] = False,
       quant_config: Optional[qcfg.QuantConfig] = None,
       dynamic_shapes: Optional[Union[dict[str, Any], Tuple[Any, ...]]] = None,
-      _ai_edge_converter_flags: Optional[dict[str, Any]] = None,
-      _saved_model_dir: Optional[str] = None,
+      convert_with_lazy_constants: bool = False,
   ) -> model.TfLiteModel | litert_types.CompilationResult:
     """Finalizes the conversion and produces an edge model.
 
@@ -164,13 +163,10 @@ class Converter:
         specifications for each input in original order. See
         https://pytorch.org/docs/stable/export.html#expressing-dynamism for more
           details.
-      _ai_edge_converter_flags: A nested dictionary allowing setting flags for
-        the underlying converter. This gives access to an implementation detail
-        of this function and so needs to be treated as such. Please do not rely
-        on this parameter except for local debugging as this can be removed in a
-        future release.
-      _saved_model_dir: Directory for the intermediate saved model. If not
-        specified, a random temporary directory would be used.
+      convert_with_lazy_constants: (Experimental) If true, holds constants
+        lazily during conversion. This can significantly reduce the memory usage
+        and conversion time when converting large models. However, some constant
+        folding and optimizations may be disabled.
 
     Returns:
       The converted edge model. If compilation configs are provided, returns the
@@ -181,9 +177,6 @@ class Converter:
       ValueError: If the arguments are not provided as expected. See the example
       in this functions's comment.
     """
-    if _ai_edge_converter_flags is None:
-      _ai_edge_converter_flags = {}
-
     if module is not None:
       if (
           sample_args is not None or sample_kwargs is not None
@@ -204,8 +197,7 @@ class Converter:
         self._signatures,
         strict_export=strict_export,
         quant_config=quant_config,
-        _tfl_converter_flags=_ai_edge_converter_flags,
-        _saved_model_dir=_saved_model_dir,
+        convert_with_lazy_constants=convert_with_lazy_constants,
     )
     if self._compilation_configs:
       return core.aot_compile(self._compilation_configs, converted_model)
@@ -273,8 +265,7 @@ def convert(
     strict_export: Union[Literal["auto"], bool] = False,
     quant_config: Optional[qcfg.QuantConfig] = None,
     dynamic_shapes: Optional[Union[dict[str, Any], Tuple[Any, ...]]] = None,
-    _ai_edge_converter_flags: Optional[dict[str, Any]] = None,
-    _saved_model_dir: Optional[str] = None,
+    convert_with_lazy_constants: bool = False,
 ) -> model.TfLiteModel:
   """Converts a PyTorch model to an edge model with a default signature.
 
@@ -294,13 +285,10 @@ def convert(
       specifications for each input in original order. See
       https://pytorch.org/docs/stable/export.html#expressing-dynamism for more
         details.
-    _ai_edge_converter_flags: A nested dictionary allowing setting flags for the
-      underlying converter. This gives access to an implementation detail of
-      this function and so needs to be treated as such. Please do not rely on
-      this parameter except for local debugging as this can be removed in a
-      future release.
-    _saved_model_dir: Directory for the intermediate saved model. If not
-      specified, a random temporary directory would be used.
+    convert_with_lazy_constants: (Experimental) If true, holds constants lazily
+      during conversion. This can significantly reduce the memory usage and
+      conversion time when converting large models. However, some constant
+      folding and optimizations may be disabled.
 
   Returns:
     The converted edge model.
@@ -309,9 +297,6 @@ def convert(
     edge_model = litert_torch.convert(module, args)
   """
 
-  if _ai_edge_converter_flags is None:
-    _ai_edge_converter_flags = {}
-
   return Converter().convert(
       module,
       sample_args,
@@ -319,6 +304,5 @@ def convert(
       strict_export=strict_export,
       quant_config=quant_config,
       dynamic_shapes=dynamic_shapes,
-      _ai_edge_converter_flags=_ai_edge_converter_flags,
-      _saved_model_dir=_saved_model_dir,
+      convert_with_lazy_constants=convert_with_lazy_constants,
   )

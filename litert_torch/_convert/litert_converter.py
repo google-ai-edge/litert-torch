@@ -16,6 +16,7 @@
 
 from litert_torch import backend
 from litert_torch._convert import signature
+from litert_torch.backend import inline_consts as inline_consts_lib
 from litert_torch.quantize import quant_config as qcfg
 from litert_torch.quantize import translate_recipe
 from ai_edge_litert.mlir import passmanager
@@ -49,17 +50,9 @@ def exported_programs_to_flatbuffer(
     signatures: list[signature.Signature],
     *,
     quant_config: qcfg.QuantConfig | None = None,
+    convert_with_lazy_constants: bool = False,
 ):
-  """Convert ExportedPrograms to a LiteRT model.
-
-  Args:
-    exported_programs: A list of ExportedProgram.
-    signatures: A list of Signature.
-    quant_config: A QuantConfig.
-
-  Returns:
-    A LiteRT model.
-  """
+  """Converts ExportedPrograms to a LiteRT model."""
   if not exported_programs:
     raise ValueError("The number of exported programs must be greater than 0.")
   if len(exported_programs) != len(signatures):
@@ -69,12 +62,26 @@ def exported_programs_to_flatbuffer(
 
   ir_context = backend.export_utils.create_ir_context()
 
+  constant_cache = {}
+
+  def pre_lower_pass(exported_program: torch.export.ExportedProgram):
+    nonlocal constant_cache
+    # Call inline_consts explicitly here to enforce cross-exported-program
+    # constant cache. This reduces the time to convert torch tensors into
+    # attributes when converting multi signatures with shared subgraphs.
+    inline_consts_lib.inline_consts(
+        exported_program,
+        constant_cache=constant_cache,
+        enable_lazy_constants=convert_with_lazy_constants,
+    )
+
   lowered_programs = []
   for exported_program, sig in zip(exported_programs, signatures):
     # Convert ExportedProgram to Mlir Module.
     lowered = backend.export.exported_program_to_mlir(
         exported_program,
         ir_context=ir_context,
+        _pre_lower_pass=pre_lower_pass,
     )
 
     # Set signature.

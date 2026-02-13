@@ -624,6 +624,37 @@ class TestConvert(googletest.TestCase):
       self.fail(f"Conversion failed with 6d inputs for strided_slice: {err}")
     # pylint: enable=broad-except
 
+  @googletest.skipIf(
+      litert_torch.config.in_oss,
+      "wait until converter next is completely OSS ready.",
+  )
+  def test_convert_large_model_with_lazy_constants(self):
+    """Test converting a simple model with large lazy constants."""
+
+    class SampleModel(nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.weights = [torch.randn(32 * 1024 * 1024) for _ in range(3)]
+
+      def forward(self, x):
+        for w in self.weights:
+          x = torch.sin(x * w)
+        return x
+
+    model = SampleModel().eval()
+    args = (torch.randn(1),)
+    try:
+      em = litert_torch.convert(model, args, convert_with_lazy_constants=True)
+    except Exception as err:
+      self.fail(f"Conversion failed with large lazy constants: {err}")
+
+    np.testing.assert_allclose(
+        em(args[0]),
+        model(args[0]).detach().numpy(),
+        atol=1e-4,
+    )
+
   def test_compile_model(self):
     """Tests AOT compilation of a simple Add module."""
 

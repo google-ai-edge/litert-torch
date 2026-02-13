@@ -63,7 +63,7 @@ def node_meta_to_ir_types(node: torch.fx.Node) -> list[ir.Type]:
   return results
 
 
-def splat(val, ty, shape=tuple(), *, loc: Optional[Any] = None):
+def splat_attr(val, ty, shape=tuple()) -> ir.Attribute:
   if isinstance(ty, ir.IntegerType):
     if ty.width == 1:
       attr = ir.BoolAttr.get(bool(val))
@@ -72,13 +72,17 @@ def splat(val, ty, shape=tuple(), *, loc: Optional[Any] = None):
   elif isinstance(ty, ir.FloatType):
     attr = ir.FloatAttr.get(ty, val)
   else:
-    raise ValueError("Unsupported type: %s" % str(ty))
+    raise ValueError("Unsupported type: %s" % ty)
 
+  return ir.DenseElementsAttr.get_splat(
+      ir.RankedTensorType.get(shape, ty),
+      attr,
+  )
+
+
+def splat(val, ty, shape=tuple(), *, loc: Optional[Any] = None):
   return stablehlo.constant(
-      ir.DenseElementsAttr.get_splat(
-          ir.RankedTensorType.get(shape, ty),
-          attr,
-      ),
+      splat_attr(val, ty, shape),
       loc=loc,
   )
 
