@@ -98,6 +98,7 @@ def build_llm_metadata(
     tokenizer,
     chat_templates: tuple[tuple, tuple, tuple] | str,  # pylint: disable=g-bare-generic,
     context_length: int,
+    litert_lm_model_type_override: str | None = None,
 ):
   """Builds LLM metadata."""
 
@@ -159,11 +160,45 @@ def build_llm_metadata(
 
   llm_metadata.max_num_tokens = context_length
 
-  llm_metadata.llm_model_type.CopyFrom(
-      llm_model_type_pb2.LlmModelType(
-          generic_model=llm_model_type_pb2.GenericModel()
+  model_type = litert_lm_model_type_override or model.config.model_type
+
+  match (model_type):
+    case 'qwen3':
+      llm_metadata.llm_model_type.CopyFrom(
+          llm_model_type_pb2.LlmModelType(
+              qwen3=llm_model_type_pb2.Qwen3()
+          )
       )
-  )
+    case ('qwen2' | 'qwen2p5'):
+      llm_metadata.llm_model_type.CopyFrom(
+          llm_model_type_pb2.LlmModelType(
+              qwen2p5=llm_model_type_pb2.Qwen2p5()
+          )
+      )
+    case 'gemma3':
+      llm_metadata.llm_model_type.CopyFrom(
+          llm_model_type_pb2.LlmModelType(
+              gemma3=llm_model_type_pb2.Gemma3()
+          )
+      )
+    case 'function_gemma':
+      llm_metadata.llm_model_type.CopyFrom(
+          llm_model_type_pb2.LlmModelType(
+              function_gemma=llm_model_type_pb2.FunctionGemma()
+          )
+      )
+    case 'gemma3n':
+      llm_metadata.llm_model_type.CopyFrom(
+          llm_model_type_pb2.LlmModelType(
+              gemma3n=llm_model_type_pb2.Gemma3N()
+          )
+      )
+    case _:
+      llm_metadata.llm_model_type.CopyFrom(
+          llm_model_type_pb2.LlmModelType(
+              generic_model=llm_model_type_pb2.GenericModel()
+          )
+      )
 
   return llm_metadata
 
@@ -177,6 +212,7 @@ def pack_to_litert_lm(
     work_dir: str,
     output_dir: str,
     use_jinja_template: bool = False,
+    litert_lm_model_type_override: str | None = None,
 ):
   """Packs models to LiteRT LM."""
   if use_jinja_template:
@@ -186,7 +222,8 @@ def pack_to_litert_lm(
   if not chat_templates:
     print('WARNING: Chat template is not found. Using empty template.')
   llm_metadata = build_llm_metadata(
-      model, tokenizer, chat_templates, cache_length
+      model, tokenizer, chat_templates, cache_length,
+      litert_lm_model_type_override,
   )
   llm_metadata_path = os.path.join(work_dir, 'llm_metadata.pb')
   with open(llm_metadata_path, 'wb') as f:
@@ -221,6 +258,7 @@ def package_model(
     work_dir: str,
     output_dir: str,
     use_jinja_template: bool,
+    litert_lm_model_type_override: str | None = None,
 ):
   """Packs models."""
   pack_to_litert_lm(
@@ -232,4 +270,5 @@ def package_model(
       work_dir,
       output_dir,
       use_jinja_template,
+      litert_lm_model_type_override,
   )

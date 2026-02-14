@@ -42,6 +42,7 @@ def export(
     task: str = 'text_generation',
     bundle_litert_lm: bool = True,
     experimental_use_mixed_precision: bool = False,
+    litert_lm_model_type_override: str | None = None,
 ):
   """Exports HuggingFace Transformers model to tflite."""
   # TODO(weiyiw): Use tmp dir for work_dir.
@@ -121,4 +122,5 @@ def export(
         work_dir,
         output_dir,
         use_jinja_template,
+        litert_lm_model_type_override,
     )
