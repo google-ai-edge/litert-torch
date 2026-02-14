@@ -97,18 +97,9 @@ def exported_programs_to_flatbuffer(
 
   ir_context = backend.export_utils.create_ir_context()
 
-  constant_cache = {}
-
-  def pre_lower_pass(exported_program: torch.export.ExportedProgram):
-    nonlocal constant_cache
-    # Call inline_consts explicitly here to enforce cross-exported-program
-    # constant cache. This reduces the time to convert torch tensors into
-    # attributes when converting multi signatures with shared subgraphs.
-    inline_consts_lib.inline_consts(
-        exported_program,
-        constant_cache=constant_cache,
-        enable_lazy_constants=lightweight_conversion,
-    )
+  cross_program_inline_consts_ctx = inline_consts_lib.InlineConstsContext(
+      enable_lazy_constants=lightweight_conversion,
+  )
 
   lowered_programs = []
   for exported_program, sig in zip(exported_programs, signatures):
@@ -116,7 +107,7 @@ def exported_programs_to_flatbuffer(
     lowered = backend.export.exported_program_to_mlir(
         exported_program,
         ir_context=ir_context,
-        _pre_lower_pass=pre_lower_pass,
+        lowering_context_plugins=[cross_program_inline_consts_ctx],
     )
 
     # Set signature.
