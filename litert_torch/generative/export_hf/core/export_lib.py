@@ -261,7 +261,7 @@ def export_text_prefill_decode_model(
   start_time = time.perf_counter()
 
   print('Converting model...')
-  lrt_model = converter.convert(strict_export=False)
+  lrt_model = converter.convert(lightweight_conversion=True, strict_export=False)
   print('Converting model done.')
 
   lrt_model = mu_pass_lib.update_model(lrt_model)

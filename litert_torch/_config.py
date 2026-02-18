@@ -74,24 +74,16 @@ class _Config:
     os.environ["LAYOUT_OPTIMIZE_PARTITIONER"] = str(value).upper()
 
   @property
-  def lazy_constant_numel_threshold(self) -> int:
+  def resource_constant_numel_threshold(self) -> int:
     """The threshold for the number of elements in a constant to be eligible to be lazily loaded during lightweight conversion."""
     default = 1024 * 1024  # 1MB
-    return _get_int_env_var("LAZY_CONSTANT_NUMEL_THRESHOLD", default=default)
+    return _get_int_env_var(
+        "RESOURCE_CONSTANT_NUMEL_THRESHOLD", default=default
+    )
 
-  @lazy_constant_numel_threshold.setter
-  def lazy_constant_numel_threshold(self, value: int) -> None:
-    os.environ["LAZY_CONSTANT_NUMEL_THRESHOLD"] = str(value)
-
-  @property
-  def lazy_constant_getter_chunk_size(self) -> int:
-    """The chunk size for the lazy constant getter during lightweight conversion."""
-    default = 32 * 1024 * 1024  # 32MB
-    return _get_int_env_var("LAZY_CONSTANT_GETTER_CHUNK_SIZE", default=default)
-
-  @lazy_constant_getter_chunk_size.setter
-  def lazy_constant_getter_chunk_size(self, value: int) -> None:
-    os.environ["LAZY_CONSTANT_GETTER_CHUNK_SIZE"] = str(value)
+  @resource_constant_numel_threshold.setter
+  def resource_constant_numel_threshold(self, value: int) -> None:
+    os.environ["RESOURCE_CONSTANT_NUMEL_THRESHOLD"] = str(value)
 
   @property
   def show_progress(self) -> bool:

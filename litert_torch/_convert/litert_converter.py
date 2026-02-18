@@ -120,7 +120,7 @@ def exported_programs_to_flatbuffer(
 
   ir_context = backend.export_utils.create_ir_context()
   cross_program_inline_consts_ctx = inline_consts_lib.InlineConstsContext(
-      enable_lazy_constants=lightweight_conversion,
+      enable_resource_constants=lightweight_conversion,
   )
 
   lowered_programs = []
