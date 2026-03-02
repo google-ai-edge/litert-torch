@@ -51,7 +51,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
       pos_emb_local_sin = None
     sliding_window = getattr(self.model.config, 'sliding_window', None)
 
-    if sliding_window is not None and self.experimental_pass_mask_dict:
+    if sliding_window is not None:
       masks = {
           'full_attention': mask_global,
       }
