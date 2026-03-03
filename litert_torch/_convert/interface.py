@@ -135,6 +135,7 @@ class Converter:
       quant_config: qcfg.QuantConfig | None = None,
       dynamic_shapes: dict[str, Any] | tuple[Any, ...] | None = None,
       lightweight_conversion: bool = False,
+      enable_x64: bool = True,
   ) -> model.LiteRTModel | litert_types.CompilationResult:
     """Finalizes the conversion and produces an edge model.
 
@@ -169,6 +170,7 @@ class Converter:
         for large models that might otherwise hit memory limits. Note that
         enabling this mode may bypass certain graph optimizations, such as
         constant folding, in the resulting model.
+      enable_x64: If False, downcast x64 tensors and inputs to x32.
 
     Returns:
       The converted edge model. If compilation configs are provided, returns the
@@ -200,6 +202,7 @@ class Converter:
         strict_export=strict_export,
         quant_config=quant_config,
         lightweight_conversion=lightweight_conversion,
+        enable_x64=enable_x64,
     )
     if self._compilation_configs:
       return core.aot_compile(self._compilation_configs, converted_model)
@@ -268,6 +271,7 @@ def convert(
     quant_config: qcfg.QuantConfig | None = None,
     dynamic_shapes: dict[str, Any] | tuple[Any, ...] | None = None,
     lightweight_conversion: bool = False,
+    enable_x64: bool = True,
 ) -> model.LiteRTModel:
   """Converts a PyTorch model to an edge model with a default signature.
 
@@ -293,6 +297,7 @@ def convert(
       large models that might otherwise hit memory limits. Note that enabling
       this mode may bypass certain graph optimizations, such as constant
       folding, in the resulting model.
+    enable_x64: If False, downcast x64 tensors and inputs to x32.
 
   Returns:
     The converted edge model.
@@ -309,4 +314,5 @@ def convert(
       quant_config=quant_config,
       dynamic_shapes=dynamic_shapes,
       lightweight_conversion=lightweight_conversion,
+      enable_x64=enable_x64,
   )

@@ -78,6 +78,7 @@ def convert_signatures(
     strict_export: Literal["auto"] | bool = False,
     quant_config: qcfg.QuantConfig | None = None,
     lightweight_conversion: bool = False,
+    enable_x64: bool = True,
 ) -> model.LiteRTModel:
   """Converts a list of `signature.Signature`s and embeds them into one `model.LiteRTModel`.
 
@@ -96,6 +97,7 @@ def convert_signatures(
         for large models that might otherwise hit memory limits. Note that
         enabling this mode may bypass certain graph optimizations, such as
         constant folding, in the resulting model.
+      enable_x64: If False, downcast x64 tensors and inputs to x32.
 
   Returns:
     The converted `model.LiteRTModel` object.
@@ -147,6 +149,7 @@ def convert_signatures(
   exporter = litert_converter.exported_programs_to_flatbuffer(
       exported_programs,
       signatures,
+      enable_x64=enable_x64,
       quant_config=quant_config,
       lightweight_conversion=lightweight_conversion,
   )

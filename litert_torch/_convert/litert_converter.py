@@ -109,6 +109,7 @@ def exported_programs_to_flatbuffer(
     *,
     quant_config: qcfg.QuantConfig | None = None,
     lightweight_conversion: bool = False,
+    enable_x64: bool = True,
 ) -> LazyModelExporter:
   """Convert ExportedPrograms to a LiteRT model."""
   if not exported_programs:
@@ -164,6 +165,11 @@ def exported_programs_to_flatbuffer(
 
   # Prepare LiteRT converter config.
   config = converter_api_ext.ConvertToTFLConfig()
+
+  def safe_set_config(attr_name: str, value):
+    if hasattr(config, attr_name):
+      setattr(config, attr_name, value)
+
   config.model_origin_framework = "PYTORCH"
   if quant_config is not None:
     quantizer_mode = quant_config._quantizer_mode
@@ -174,6 +180,7 @@ def exported_programs_to_flatbuffer(
   config.unsafe_fuse_dynamic_shaped_broadcast = True
   # litert-torch handles inf clamping before the MLIR conversion.
   config.canonicalizing_inf_as_min_max_float = False
+  safe_set_config("enable_x64", enable_x64)
 
   # Run LiteRT converter passes.
   with ir_context, progress.task("Run LiteRT Converter Passes"):
