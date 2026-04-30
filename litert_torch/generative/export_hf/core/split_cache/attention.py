@@ -19,9 +19,9 @@ from typing import Optional
 
 from litert_torch.generative.custom_ops import bmm_4d as bmm_lib
 from litert_torch.generative.export_hf.core.split_cache import cache as kv_cache_lib
+import transformers
 import torch
 import torch.nn.functional as F
-import transformers
 
 
 def _scaled_dot_product_attention(
@@ -145,6 +145,6 @@ def split_cache_attention(
   return sdpa_out, None
 
 
-transformers.AttentionInterface.register(
+transformers.modeling_utils.AttentionInterface.register(  # pytype: disable=module-attr
     "lrt_split_cache_attention", split_cache_attention
 )

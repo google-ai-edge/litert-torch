@@ -16,9 +16,11 @@
 
 import contextlib
 from litert_torch.generative.export_hf.model_ext import patches as patches_lib
+import transformers
 from litert_torch.generative.layers import normalization
 import torch
-from transformers.models.gemma3 import modeling_gemma3
+
+modeling_gemma3 = transformers.models.gemma3.modeling_gemma3
 
 
 class Gemma3RMSNorm(torch.nn.Module):

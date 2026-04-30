@@ -56,7 +56,9 @@ class Gemma4RMSNorm(torch.nn.Module):
 def gemma4_litert_patch():
   """Gemma4 patch."""
   print("Gemma4 patch applied.")
-  from transformers.models.gemma4 import modeling_gemma4  # pylint: disable=g-import-not-at-top
+  import transformers
+
+  modeling_gemma4 = transformers.models.gemma4.modeling_gemma4
 
   original_norm = modeling_gemma4.Gemma4RMSNorm
   modeling_gemma4.Gemma4RMSNorm = Gemma4RMSNorm
@@ -65,4 +67,6 @@ def gemma4_litert_patch():
     yield
   finally:
     modeling_gemma4.Gemma4RMSNorm = original_norm
+
+
 # pytype: enable=import-error

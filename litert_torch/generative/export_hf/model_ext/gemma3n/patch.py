@@ -16,10 +16,13 @@
 
 import contextlib
 from litert_torch.generative.export_hf.model_ext import patches as patches_lib
+import transformers
+
 # from litert_torch.generative.layers import normalization
 import torch
 from torch import nn
-from transformers.models.gemma3n import modeling_gemma3n
+
+modeling_gemma3n = transformers.models.gemma3n.modeling_gemma3n
 
 
 # https://github.com/huggingface/transformers/issues/43412

@@ -18,9 +18,9 @@ import math
 from typing import Optional
 import jaxtyping as jt
 from litert_torch.generative.custom_ops import bmm_4d as bmm_lib
+import transformers
 import torch
 import torch.nn.functional as F
-import transformers
 
 
 def scaled_dot_product_attention_transposed(
@@ -154,6 +154,6 @@ def transposed_attention(
   return sdpa_out, None
 
 
-transformers.AttentionInterface.register(
+transformers.modeling_utils.AttentionInterface.register(  # pytype: disable=module-attr
     "lrt_transposed_attention", transposed_attention
 )

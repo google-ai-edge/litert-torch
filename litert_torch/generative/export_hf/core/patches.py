@@ -14,10 +14,9 @@
 # ==============================================================================
 """Patches for transformers."""
 
-
+import transformers
 from litert_torch.generative.layers import normalization
 import torch
-import transformers
 
 
 class RMSNorm(torch.nn.Module):

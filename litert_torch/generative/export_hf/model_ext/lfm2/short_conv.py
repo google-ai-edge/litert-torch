@@ -15,8 +15,10 @@
 """Short convolutions for LFM2."""
 
 from typing import Optional
+import transformers
 import torch
-from transformers.models.lfm2 import modeling_lfm2
+
+modeling_lfm2 = transformers.models.lfm2.modeling_lfm2
 
 
 class Lfm2ShortConv(modeling_lfm2.Lfm2ShortConv):

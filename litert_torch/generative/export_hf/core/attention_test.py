@@ -17,11 +17,12 @@
 import itertools
 
 from absl.testing import parameterized
+
 # Not directly used but to register the attention implementation.
 import litert_torch.generative.export_hf.core.attention  # pylint: disable=unused-import
 import numpy as np
 import torch
-from transformers import modeling_utils
+import transformers
 
 from absl.testing import absltest as googletest
 
@@ -72,7 +73,7 @@ class DummyAttentionModule(torch.nn.Module):
     self.softcap = softcap
 
   def forward(self, query, key, value, attention_mask, **kwargs):
-    attention_interface = modeling_utils.ALL_ATTENTION_FUNCTIONS[
+    attention_interface = transformers.modeling_utils.ALL_ATTENTION_FUNCTIONS[
         self.attention_implementation
     ]
     key, value = _adapt_inputs(self.attention_implementation, key, value)

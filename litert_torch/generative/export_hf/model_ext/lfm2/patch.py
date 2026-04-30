@@ -17,7 +17,9 @@
 import contextlib
 from litert_torch.generative.export_hf.model_ext import patches as patches_lib
 from litert_torch.generative.export_hf.model_ext.lfm2 import short_conv as short_conv_lib
-from transformers.models.lfm2 import modeling_lfm2
+import transformers
+
+modeling_lfm2 = transformers.models.lfm2.modeling_lfm2
 
 
 @patches_lib.register_patch(["lfm2"])
