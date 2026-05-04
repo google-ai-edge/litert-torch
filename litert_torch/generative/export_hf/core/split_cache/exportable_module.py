@@ -250,7 +250,9 @@ class SplitAttentionMaskBuilder(nn.Module):
     if sliding_window_sizes is None:
       sliding_window_sizes = [None]
     local_masks = {}
-    self.global_mask = None
+    self.global_mask = attention_mask.SplitAttentionMask(
+        context_size, None, pad_token
+    )
     for sliding_window_size in sliding_window_sizes:
       if sliding_window_size is not None:
         local_masks[sliding_window_size] = attention_mask.SplitAttentionMask(

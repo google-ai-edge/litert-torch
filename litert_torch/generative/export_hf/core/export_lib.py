@@ -630,7 +630,7 @@ def export_tokenizer(
   """Exports tokenizer."""
   tokenizer = source_model_artifacts.tokenizer
   work_dir = export_config.work_dir
-  if hasattr(tokenizer, 'vocab_file'):
+  if hasattr(tokenizer, 'vocab_file') and tokenizer.vocab_file:
     tokenizer_path = tokenizer.vocab_file
     if tokenizer_path.endswith('tokenizer.model'):
       with open(tokenizer_path, 'rb') as f:
