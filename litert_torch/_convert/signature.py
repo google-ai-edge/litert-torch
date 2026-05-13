@@ -49,16 +49,16 @@ class Signature:
   @property
   def flat_arg_names(self) -> list[str]:
     spec = pytree.tree_flatten(self._normalized_sample_args_kwargs)[1]
-    args_spec, kwargs_spec = spec.children_specs
-    names = []
-    for i in range(args_spec.num_leaves):
-      names.append(f"args_{i}")
+    args_spec, kwargs_spec = spec.children()
+    args_names = backend.export_utils.flat_dict_names(
+        args_spec.children(), args_spec.context
+    )
+    args_names = [f"args_{name}" for name in args_names]
 
     kwargs_names = backend.export_utils.flat_dict_names(
-        kwargs_spec.children_specs, kwargs_spec.context
+        kwargs_spec.children(), kwargs_spec.context
     )
-    names.extend(kwargs_names)
-    return names
+    return args_names + kwargs_names
 
   @property
   def flat_args(self) -> tuple[Any, ...]:

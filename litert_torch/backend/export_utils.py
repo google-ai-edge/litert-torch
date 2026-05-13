@@ -28,7 +28,7 @@ IR_DYNAMIC = -9223372036854775808
 
 
 def flat_dict_names(
-    tree_spec: pytree.TreeSpec, context: pytree.Context
+    tree_spec: list[pytree.TreeSpec], context: pytree.Context
 ) -> list[str]:
   """Given a TreeSpec, this produces a list of names for the leaves.
 
@@ -59,17 +59,17 @@ def flat_dict_names(
   flat_names = []
   if context is None:
     for i, spec in enumerate(tree_spec):
-      if spec.children_specs:
+      if spec.children():
         flat_names.extend([
             f"{i}_{name}"
-            for name in flat_dict_names(spec.children_specs, spec.context)
+            for name in flat_dict_names(spec.children(), spec.context)
         ])
       else:
         flat_names.append(f"{i}")
   else:
     flat_ctx = _flatten_list(context)
     for prefix, spec in zip(flat_ctx, tree_spec):
-      leaf_flat_names = flat_dict_names(spec.children_specs, spec.context)
+      leaf_flat_names = flat_dict_names(spec.children(), spec.context)
       if leaf_flat_names:
         flat_names.extend([f"{prefix}_{name}" for name in leaf_flat_names])
       else:
