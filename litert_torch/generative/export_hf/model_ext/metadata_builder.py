@@ -31,6 +31,8 @@ def get_metadata_builder(
       model_config.model_type == 'gemma4'
   ):
     return gemma4_metadata_builder.build_llm_metadata
+  elif model_config.model_type == 'gemma4_unified':
+    return gemma4_metadata_builder.build_llm_metadata
   else:
     return (
         lambda source_model_artifacts, export_config, exported_model_artifacts, llm_metadata: llm_metadata

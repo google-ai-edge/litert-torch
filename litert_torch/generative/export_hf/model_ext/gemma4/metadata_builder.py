@@ -28,10 +28,6 @@ def build_llm_metadata(
     llm_metadata: llm_metadata_pb2.LlmMetadata,
 ) -> llm_metadata_pb2.LlmMetadata:
   """Builds LLM metadata."""
-  if export_config.task != 'image_text_to_text':
-    return llm_metadata
-  if not export_config.export_vision_encoder:
-    return llm_metadata
   llm_metadata.llm_model_type.CopyFrom(
       llm_model_type_pb2.LlmModelType(gemma4=llm_model_type_pb2.Gemma4())
   )
