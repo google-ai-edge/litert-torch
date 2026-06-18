@@ -29,6 +29,22 @@ from litert_lm_builder.runtime.proto import sampler_params_pb2
 
 _PH = 'KIMAIRA'
 
+_STOP_TOKEN_PREFIXES = [
+    ' ',
+    '.',
+    ',',
+    '?',
+    '!',
+    ':',
+    ';',
+    '"',
+    "'",
+    ')',
+    ']',
+    '}',
+    '*',
+]
+
 
 def parse_chat_template(tokenizer):
   """Parses chat template."""
@@ -150,7 +166,17 @@ def build_llm_metadata(
       if model_prompt_parts[1]:
         stop_tokens.add(model_prompt_parts[1])
 
+  expanded_stop_tokens = set()
   for stop_token in stop_tokens:
+    if isinstance(stop_token, str):
+      expanded_stop_tokens.add(stop_token)
+      # Generates punctuation-prefixed variations to handle SentencePiece greedy token merging.
+      for prefix in _STOP_TOKEN_PREFIXES:
+        expanded_stop_tokens.add(prefix + stop_token)
+    else:
+      expanded_stop_tokens.add(stop_token)
+
+  for stop_token in expanded_stop_tokens:
     if isinstance(stop_token, int):
       tu = llm_metadata.stop_tokens.add()
       tu.token_ids.ids.append(stop_token)
