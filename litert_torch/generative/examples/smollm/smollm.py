@@ -119,3 +119,78 @@ def build_model_v2(
       custom_loader=custom_loader,
       mask_cache_size=mask_cache_size,
   )
+
+
+class SmolLM3(model_builder.DecoderOnlyModel):
+  """A SmolLM3 model built from the Edge Generative API layers."""
+  pass
+
+
+def get_model_config_v3() -> cfg.ModelConfig:
+  """Returns the model config for a SmolLM3 3B model.
+
+  SmolLM3 is Llama-style (GQA, GATED SiLU MLP, RMSNorm) with NoPE: RoPE is
+  disabled on every 4th layer (layers 3, 7, ..., 35). See
+  https://huggingface.co/HuggingFaceTB/SmolLM3-3B.
+  """
+  norm_config = cfg.NormalizationConfig(type=cfg.NormalizationType.RMS_NORM)
+  ff_config = cfg.FeedForwardConfig(
+      type=cfg.FeedForwardType.GATED,
+      activation=cfg.ActivationConfig(cfg.ActivationType.SILU),
+      intermediate_size=11008,
+  )
+  num_layers = 36
+  # SmolLM3 disables RoPE on every 4th layer (NoPE). True = apply RoPE,
+  # False = NoPE. Layers 3, 7, ..., 35 are NoPE.
+  use_rope = [(i + 1) % 4 != 0 for i in range(num_layers)]
+
+  def block_config(idx: int) -> cfg.TransformerBlockConfig:
+    attn_config = cfg.AttentionConfig(
+        num_heads=16,
+        head_dim=128,
+        num_query_groups=4,
+        rotary_base=5000000,
+        rotary_percentage=1.0,
+        enable_rope=use_rope[idx],
+    )
+    return cfg.TransformerBlockConfig(
+        attn_config=attn_config,
+        ff_config=ff_config,
+        pre_attention_norm_config=norm_config,
+        post_attention_norm_config=norm_config,
+    )
+
+  return cfg.ModelConfig(
+      vocab_size=128256,
+      num_layers=num_layers,
+      max_seq_len=65536,
+      embedding_dim=2048,
+      block_configs=[block_config(i) for i in range(num_layers)],
+      final_norm_config=norm_config,
+  )
+
+
+def get_fake_model_config_v3() -> cfg.ModelConfig:
+  config = get_model_config_v3()
+  config.vocab_size = 128
+  # Keep a full NoPE period (layers 0-3; layer 3 is a NoPE layer).
+  config.num_layers = 4
+  config.block_configs = config.block_configs[:4]
+  for i in range(config.num_layers):
+    config.block_config(i).ff_config.intermediate_size = 64
+  return config
+
+
+def build_model_v3(
+    checkpoint_path: str,
+    custom_loader: Callable[[str], Dict[str, torch.Tensor]] = None,
+    mask_cache_size: int = 0,
+) -> nn.Module:
+  return model_builder.build_decoder_only_model(
+      checkpoint_path=checkpoint_path,
+      config=get_model_config_v3(),
+      tensor_names=TENSOR_NAMES,
+      model_class=SmolLM3,
+      custom_loader=custom_loader,
+      mask_cache_size=mask_cache_size,
+  )
