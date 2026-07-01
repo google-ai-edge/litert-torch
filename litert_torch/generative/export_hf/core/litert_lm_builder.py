@@ -20,6 +20,7 @@ import os
 from litert_torch import progress
 from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module
+from litert_torch.generative.export_hf.experimental.minijinja_transpile import transpile as transpile_lib
 from litert_torch.generative.export_hf.model_ext import metadata_builder as metadata_builder_lib
 
 import litert_lm_builder as litertlm_builder
@@ -28,6 +29,22 @@ from litert_lm_builder.runtime.proto import llm_model_type_pb2
 from litert_lm_builder.runtime.proto import sampler_params_pb2
 
 _PH = 'KIMAIRA'
+
+_STOP_TOKEN_PREFIXES = [
+    ' ',
+    '.',
+    ',',
+    '?',
+    '!',
+    ':',
+    ';',
+    '"',
+    "'",
+    ')',
+    ']',
+    '}',
+    '*',
+]
 
 
 def parse_chat_template(tokenizer):
@@ -150,7 +167,18 @@ def build_llm_metadata(
       if model_prompt_parts[1]:
         stop_tokens.add(model_prompt_parts[1])
 
+  expanded_stop_tokens = set()
   for stop_token in stop_tokens:
+    if isinstance(stop_token, str):
+      expanded_stop_tokens.add(stop_token)
+      # Generates punctuation-prefixed variations to handle SentencePiece
+      # greedy token merging.
+      for prefix in _STOP_TOKEN_PREFIXES:
+        expanded_stop_tokens.add(prefix + stop_token)
+    else:
+      expanded_stop_tokens.add(stop_token)
+
+  for stop_token in expanded_stop_tokens:
     if isinstance(stop_token, int):
       tu = llm_metadata.stop_tokens.add()
       tu.token_ids.ids.append(stop_token)
@@ -158,19 +186,55 @@ def build_llm_metadata(
       tu = llm_metadata.stop_tokens.add()
       tu.token_str = stop_token
 
-    if gen_config and gen_config.do_sample:
+    sampler_top_k = export_config.sampler_top_k
+    sampler_top_p = export_config.sampler_top_p
+    sampler_temperature = export_config.sampler_temperature
+
+    has_custom_sampler = (
+        sampler_top_k is not None
+        or sampler_top_p is not None
+        or sampler_temperature is not None
+    )
+
+    if has_custom_sampler or (gen_config and getattr(gen_config, 'do_sample', False)):
       sampler_params = llm_metadata.sampler_params
-      if gen_config.top_k:
-        sampler_params.type = sampler_params_pb2.SamplerParameters.TOP_K
-        sampler_params.k = gen_config.top_k
-      if gen_config.top_p:
+
+      final_top_k = (
+          sampler_top_k
+          if sampler_top_k is not None
+          else (getattr(gen_config, 'top_k', None) if gen_config else None)
+      )
+      final_top_p = (
+          sampler_top_p
+          if sampler_top_p is not None
+          else (getattr(gen_config, 'top_p', None) if gen_config else None)
+      )
+      final_temperature = (
+          sampler_temperature
+          if sampler_temperature is not None
+          else (getattr(gen_config, 'temperature', None) if gen_config else None)
+      )
+
+      if final_top_k is not None:
+        sampler_params.k = final_top_k
+      if final_top_p is not None:
+        sampler_params.p = final_top_p
+      if final_temperature is not None:
+        sampler_params.temperature = final_temperature
+
+      if final_top_k == 1:
+        sampler_params.type = sampler_params_pb2.SamplerParameters.GREEDY
+      elif final_top_p is not None:
         sampler_params.type = sampler_params_pb2.SamplerParameters.TOP_P
-        sampler_params.p = gen_config.top_p
-      if gen_config.temperature:
-        sampler_params.temperature = gen_config.temperature
+      elif final_top_k is not None:
+        sampler_params.type = sampler_params_pb2.SamplerParameters.TOP_K
+      else:
+        sampler_params.type = sampler_params_pb2.SamplerParameters.TOP_P
 
   if chat_templates is not None:
     if isinstance(chat_templates, str):
+      if export_config.experimental_transpile_chat_template_for_minijinja:
+        chat_templates = transpile_lib.transpile_jinja2(chat_templates)
       llm_metadata.jinja_prompt_template = chat_templates
     else:
       sys_prompt_parts, user_prompt_parts, model_prompt_parts = chat_templates
@@ -218,6 +282,7 @@ def build_llm_metadata(
               generic_model=llm_model_type_pb2.GenericModel()
           )
       )
+
   # Model specific metadata builders.
   if not litert_lm_model_type_override:
     metadata_builder = metadata_builder_lib.get_metadata_builder(model.config)
@@ -227,6 +292,13 @@ def build_llm_metadata(
         exported_model_artifacts,
         llm_metadata,
     )
+  # Check thinking channel is properly set up.
+  if isinstance(chat_templates, str):
+    if '<think>' in chat_templates and not llm_metadata.channels:
+      channel = llm_metadata.channels.add()
+      channel.channel_name = 'thought'
+      channel.start = '<think>'
+      channel.end = '</think>'
 
   return llm_metadata
 

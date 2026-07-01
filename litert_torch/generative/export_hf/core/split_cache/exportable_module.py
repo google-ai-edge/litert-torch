@@ -269,35 +269,33 @@ class SplitAttentionMaskBuilder(nn.Module):
       self,
       context_size: int,
       sliding_window_sizes: list[int | None] | None = None,
-      pad_token: int = 0,
   ):
     super().__init__()
     if sliding_window_sizes is None:
       sliding_window_sizes = [None]
     local_masks = {}
-    self.global_mask = attention_mask.SplitAttentionMask(
-        context_size, None, pad_token
-    )
+    self.global_mask = attention_mask.SplitAttentionMask(context_size, None)
     for sliding_window_size in sliding_window_sizes:
       if sliding_window_size is not None:
         local_masks[sliding_window_size] = attention_mask.SplitAttentionMask(
-            context_size, sliding_window_size, pad_token
+            context_size, sliding_window_size
         )
       else:
-        self.global_mask = attention_mask.SplitAttentionMask(
-            context_size, None, pad_token
-        )
+        self.global_mask = attention_mask.SplitAttentionMask(context_size, None)
     self.local_masks = local_masks
 
   def forward(
-      self, input_tokens: torch.Tensor, time_step: torch.Tensor
+      self,
+      input_tokens: torch.Tensor,
+      time_step: torch.Tensor,
+      valid_mask: torch.Tensor,
   ) -> dict[str, attention_mask.SplitMask]:
     if self.global_mask is None:
       global_mask = None
     else:
-      global_mask = self.global_mask(input_tokens, time_step)
+      global_mask = self.global_mask(input_tokens, time_step, valid_mask)
     local_masks = {
-        window_size: builder(input_tokens, time_step)
+        window_size: builder(input_tokens, time_step, valid_mask)
         for window_size, builder in self.local_masks.items()
     }
 
@@ -324,11 +322,13 @@ class SplitAttentionMaskBuilder(nn.Module):
       inputs = {
           'input_tokens': torch.full((1, prefill_length), 0, dtype=torch.int32),
           'time_step': torch.tensor(1, dtype=torch.int32),
+          'valid_mask': torch.ones((1, prefill_length), dtype=torch.bool),
       }
       sample_inputs[f'prefill_mask_{prefill_length}'] = (inputs, {})
     decode_inputs = {
         'input_tokens': torch.full((1, 1), 0, dtype=torch.int32),
         'time_step': torch.tensor(1, dtype=torch.int32),
+        'valid_mask': torch.ones((1, 1), dtype=torch.bool),
     }
     sample_inputs['decode_mask'] = (decode_inputs, {})
     return sample_inputs

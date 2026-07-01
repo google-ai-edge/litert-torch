@@ -100,10 +100,14 @@ def export(
     vision_encoder_quantization_recipe: str | None = None,
     litert_lm_model_type_override: str | None = None,
     litert_lm_llm_metadata_override: str | None = None,
+    sampler_top_p: float | None = None,
+    sampler_temperature: float | None = None,
+    sampler_top_k: int | None = None,
     aot_backend: str | None = None,
     aot_soc_model: str | None = None,
     aot_compilation_config_dict: dict[str, Any] | None = None,
     experimental_lightweight_conversion: bool = False,
+    experimental_transpile_chat_template_for_minijinja: bool = False,
     # pylint: enable=unused-argument
     **kwargs,
 ):
