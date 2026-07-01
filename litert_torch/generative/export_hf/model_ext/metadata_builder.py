@@ -27,7 +27,9 @@ def get_metadata_builder(
     return gemma3_metadata_builder.build_llm_metadata
   elif model_config.model_type == 'gemma3n':
     return gemma3_metadata_builder.build_llm_metadata
-  elif model_config.model_type == 'gemma4':
+  elif (
+      model_config.model_type == 'gemma4'
+  ):
     return gemma4_metadata_builder.build_llm_metadata
   else:
     return (

@@ -430,11 +430,19 @@ class Executor:
           decode_state.token_ids[:, time_step:],
           ((0, 0), (0, input_size - remaining_input_size)),
       )
+      valid_mask = np.array(
+          [
+              [1] * remaining_input_size
+              + [0] * (input_size - remaining_input_size)
+          ],
+          dtype=np.bool,
+      )
     else:
       input_size = max(x for x in self.prefill_runners.keys())
       padded_tokens = decode_state.token_ids[
           :, time_step : time_step + input_size
       ]
+      valid_mask = np.ones((1, input_size), dtype=np.bool)
 
     if time_step + input_size > self.cache_length:
       raise ValueError('Prefill chunk exceeds the cache length.')
@@ -444,6 +452,7 @@ class Executor:
     prefill_masks = self.prefill_mask_runners[input_size](
         time_step=np.asarray(time_step, dtype=np.int32),
         input_tokens=padded_tokens,
+        valid_mask=valid_mask,
     )
 
     input_embeds = decode_state.processed_embeds[
@@ -527,6 +536,7 @@ class Executor:
     decode_masks = self.decode_mask_runner(
         time_step=np.asarray(time_step, dtype=np.int32),
         input_tokens=input_tokens,
+        valid_mask=np.ones((1, 1), dtype=np.bool),
     )
 
     input_embeds = try_run_signature_with_quant_dequant(

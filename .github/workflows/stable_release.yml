@@ -1,0 +1,134 @@
+# Helpful YAML parser to clarify YAML syntax:
+# https://yaml-online-parser.appspot.com/
+
+name: Build and Release (stable)
+
+on:
+  workflow_dispatch:  # Allow manual triggers for stable releases
+    inputs:
+      dry_run:
+        description: 'When true, wheels will not be published to PyPI.'
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  run-unittests-python:
+    name: Unit Tests Python
+    uses: ./.github/workflows/unittests_python.yml
+    with:
+      trigger-sha: ${{ github.sha }}
+
+  build-stable:
+    needs: run-unittests-python
+    name: Build and Release litert-torch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install python-build and twine
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine wheel
+          python -m pip list
+
+      - name: Build the wheel
+        run: |
+          python setup.py bdist_wheel
+
+      - name: Verify the distribution
+        run: twine check --strict dist/*
+
+      - name: List the contents of litert_torch wheel
+        run: python -m zipfile --list dist/*.whl
+
+      - name: Upload Stable Wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: litert-torch-wheel
+          path: dist/*.whl
+
+  test-before-publish:
+    needs: build-stable
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    name: Test Install and Import litert-torch
+    runs-on:
+      labels: linux-x86-n2-16
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+    steps:
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - run: |
+          python -m pip cache purge
+          python -m pip install --upgrade pip
+
+      - name: Download Stable Wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: litert-torch-wheel
+          path: ./dist
+
+      - name: Install litert-torch
+        run: |
+          python -m pip install dist/*.whl
+
+      - name: Import litert-torch
+        run: |
+          python -c "import litert_torch"
+
+  publish-stable:
+    name: Publish to PyPI
+    needs: test-before-publish
+    if: success() && inputs.dry_run == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Stable Wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: litert-torch-wheel
+          path: ./dist
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_UPLOAD_TOKEN }}
+        run: twine upload --skip-existing --non-interactive --verbose dist/*.whl
+
+  test-after-publish:
+    needs: publish-stable
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    name: Test Install and Import litert-torch from PyPI
+    runs-on:
+      labels: linux-x86-n2-16
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+    steps:
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - run: |
+          python -m pip cache purge
+          python -m pip install --upgrade pip
+
+      - name: Install litert-torch from PyPI
+        run: |
+          python -m pip install litert-torch
+
+      - name: Import litert-torch
+        run: |
+          python -c "import litert_torch"

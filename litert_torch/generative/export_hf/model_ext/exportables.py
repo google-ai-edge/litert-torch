@@ -41,7 +41,9 @@ def get_prefill_decode_exportables(
         gemma3n_exportable.LiteRTExportableModuleForDecoderOnlyLMPrefillExternalEmbedder,
         gemma3n_exportable.LiteRTExportableModuleForDecoderOnlyLMGenerateExternalEmbedder,
     )
-  elif model_config.model_type == 'gemma4':
+  elif (
+      model_config.model_type == 'gemma4'
+  ):
     if model_config.get_text_config().hidden_size_per_layer_input:
       assert (
           export_config.externalize_embedder
@@ -97,7 +99,9 @@ def get_additional_exportables(
             gemma3n_exportable.LiteRTExportableModuleForPerLayerEmbedder
         ),
     }
-  elif model_config.model_type == 'gemma4':
+  elif (
+      model_config.model_type == 'gemma4'
+  ):
     if not model_config.text_config.hidden_size_per_layer_input:
       return {}
     return {

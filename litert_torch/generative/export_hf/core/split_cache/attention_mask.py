@@ -130,7 +130,7 @@ pytree.register_pytree_node(
 
 
 def generate_causal_right(
-    input_tokens, W: int | None, pad_token: int  # pylint: disable=invalid-name
+    input_tokens, W: int | None, valid_mask: torch.Tensor  # pylint: disable=invalid-name
 ) -> torch.Tensor:
   """Generates causal mask for right."""
 
@@ -145,7 +145,7 @@ def generate_causal_right(
   # Query at 'i' only attends to keys at 'j' that are at or before 'i'.
   causal_mask = col_indices <= row_indices  # [L, L]
 
-  pads = input_tokens[0] != pad_token
+  pads = valid_mask[0]
   mask_rows = pads.unsqueeze(1)
   mask_cols = pads.unsqueeze(0)
   padding_mask = mask_rows & mask_cols
@@ -194,11 +194,11 @@ def build_full_mask(
     W: int | None,  # pylint: disable=invalid-name
     S: int,  # pylint: disable=invalid-name
     time_step: torch.Tensor,
-    pad_token: int,
+    valid_mask: torch.Tensor,
 ):
   """Builds full attention mask."""
   left_mask = generate_causal_left(input_tokens, W, S, time_step)
-  right_mask = generate_causal_right(input_tokens, W, pad_token)
+  right_mask = generate_causal_right(input_tokens, W, valid_mask)
 
   mask = torch.cat([left_mask, right_mask], dim=-1)
   mask = torch.logical_not(mask.unsqueeze(0).unsqueeze(0)) * -100.0
@@ -212,21 +212,19 @@ class SplitAttentionMask(nn.Module):
       self,
       context_size: int,
       sliding_window_size: int | None = None,
-      pad_token: int = 0,
   ):
     super().__init__()
     self.context_size = context_size
-    self.pad_token = pad_token
     self.sliding_window_size = sliding_window_size
 
-  def forward(self, input_tokens, time_step):
+  def forward(self, input_tokens, time_step, valid_mask):
     # input_tokens: [1, T]
+    # valid_mask: [1, T]
     # time_step: []
     return build_full_mask(
         input_tokens,
         self.sliding_window_size,
         self.context_size,
         time_step,
-        pad_token=self.pad_token,
+        valid_mask,
     )
-
