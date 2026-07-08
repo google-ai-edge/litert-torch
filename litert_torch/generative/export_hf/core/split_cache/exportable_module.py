@@ -29,7 +29,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
 ):
   """Exportable module for decoder only LM."""
 
-  def adapt_inputs(
+  def adapt_inputs(  # pyrefly: ignore[bad-override]
       self,
       embeddings,
       pos_emb,
@@ -87,7 +87,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
       language_model = self.model.model.language_model
 
     assert language_model.original_rotary_emb is not None
-    language_model.rotary_emb.data = (
+    language_model.rotary_emb.data = (  # pyrefly: ignore[missing-attribute]
         pos_emb_cos.permute(0, 2, 1, 3).squeeze(0),
         pos_emb_sin.permute(0, 2, 1, 3).squeeze(0),
     )
@@ -101,7 +101,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
               pos_emb_local_sin.permute(0, 2, 1, 3).squeeze(0),
           ),
       }
-      language_model.rotary_emb.data = rope_data
+      language_model.rotary_emb.data = rope_data  # pyrefly: ignore[missing-attribute]
 
     return ret
 
@@ -110,8 +110,8 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
     k_slices = []
     v_slices = []
     for layer in output_cache.layers:
-      k_slices.append(layer.keys[1])
-      v_slices.append(layer.values[1])
+      k_slices.append(layer.keys[1])  # pyrefly: ignore[missing-attribute]
+      v_slices.append(layer.values[1])  # pyrefly: ignore[missing-attribute]
     assert all(x is not None for x in k_slices)
     assert all(x is not None for x in v_slices)
     return {'kv_slice_k': k_slices, 'kv_slice_v': v_slices}
@@ -123,7 +123,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
       model_config = model_config.text_config
     embed_size_per_head = (
         getattr(model_config, 'head_dim', None)
-        or model_config.hidden_size // model_config.num_attention_heads
+        or model_config.hidden_size // model_config.num_attention_heads  # pyrefly: ignore[unsupported-operation]
     )
     if hasattr(model_config, 'global_head_dim'):
       global_embed_size_per_head = (
@@ -133,17 +133,17 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
       global_embed_size_per_head = embed_size_per_head
 
     sample_inputs = {
-        'embeddings': torch.ones(
+        'embeddings': torch.ones(  # pyrefly: ignore[no-matching-overload]
             (batch_size, input_length, model_config.hidden_size),
             dtype=torch.float32,
         ),
     }
     pos_emb = {
-        'cos': torch.ones(
+        'cos': torch.ones(  # pyrefly: ignore[no-matching-overload]
             (1, input_length, 1, global_embed_size_per_head),
             dtype=torch.float32,
         ),
-        'sin': torch.ones(
+        'sin': torch.ones(  # pyrefly: ignore[no-matching-overload]
             (1, input_length, 1, global_embed_size_per_head),
             dtype=torch.float32,
         ),
@@ -353,8 +353,8 @@ class CacheUpdate(torch.nn.Module):
       # TODO(weiyiw): Fix for linear attention layers.
       assert hasattr(kv_slice.layers[i], 'keys')
       assert hasattr(kv_slice.layers[i], 'values')
-      k_slice = kv_slice.layers[i].keys
-      v_slice = kv_slice.layers[i].values
+      k_slice = kv_slice.layers[i].keys  # pyrefly: ignore[missing-attribute]
+      v_slice = kv_slice.layers[i].values  # pyrefly: ignore[missing-attribute]
       kv_cache.update(k_slice, v_slice, i)
 
     return {'kv_cache': kv_cache}

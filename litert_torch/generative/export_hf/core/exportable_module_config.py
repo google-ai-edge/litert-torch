@@ -25,6 +25,7 @@ import torch
 class ExportTask(str, enum.Enum):
   TEXT_GENERATION = "text_generation"
   IMAGE_TEXT_TO_TEXT = "image_text_to_text"
+  AUTOMATIC_SPEECH_RECOGNITION = "automatic_speech_recognition"
 
 
 @dataclasses.dataclass
@@ -55,6 +56,10 @@ class ExportableModuleConfig:
   # Experimental configs
   experimental_use_mixed_precision: bool = False
   export_vision_encoder: bool = True
+  export_audio_encoder: bool = True
+  input_sec: float = 1.0
+  # If >= 0, the model runs in stateful mode after this many tokens.
+  stateful_after: int = -1
   # TODO(weiyiw): Update when b/481323182 is fixed.
   # For now, for vision encoder, if there's conv op, set weight_only_wi8_afp32
   # if you intend to run on CPU, and set dynamic_wi8_afp32 if you intend to run
@@ -87,19 +92,26 @@ class ExportableModuleConfig:
   def __post_init__(self):
     """Refines configuration based on task-specific rules."""
     # pylint: disable=g-bool-id-comparison
-    if self.split_cache:
-      self.externalize_embedder = True
-      self.externalize_rope = True
-      if self.cache_implementation is None:
-        self.cache_implementation = "LiteRTLMSplitCache"
-
     match self.task:
       case ExportTask.IMAGE_TEXT_TO_TEXT:
         if self.export_vision_encoder:
           self.externalize_embedder = True
           self.single_token_embedder = True
+        self.export_audio_encoder = False
+      case ExportTask.AUTOMATIC_SPEECH_RECOGNITION:
+        self.export_vision_encoder = False
+        self.split_cache = False
+        self.externalize_embedder = False
+        self.externalize_rope = False
       case _:
         self.export_vision_encoder = False
+        self.export_audio_encoder = False
+
+    if self.split_cache:
+      self.externalize_embedder = True
+      self.externalize_rope = True
+      if self.cache_implementation is None:
+        self.cache_implementation = "LiteRTLMSplitCache"
 
     if self.enable_dynamic_shape:
       self.prefill_length_dim = torch.export.Dim(

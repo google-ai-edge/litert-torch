@@ -40,26 +40,26 @@ def build_llm_metadata(
     raise ValueError('Tokenizer does not have special_tokens_map.')
   token_map = tokenizer.special_tokens_map
   assert token_map is not None, 'Tokenizer does not have special_tokens_map.'
-  llm_metadata.llm_model_type.gemma4.code_fence_start = token_map.get(
+  llm_metadata.llm_model_type.gemma4.code_fence_start = token_map.get(  # pyrefly: ignore[bad-assignment]
       'stc_token', ''
   )
-  llm_metadata.llm_model_type.gemma4.code_fence_end = token_map.get(
+  llm_metadata.llm_model_type.gemma4.code_fence_end = token_map.get(  # pyrefly: ignore[bad-assignment]
       'etc_token', ''
   )
-  llm_metadata.llm_model_type.gemma4.open_quote = token_map.get(
+  llm_metadata.llm_model_type.gemma4.open_quote = token_map.get(  # pyrefly: ignore[bad-assignment]
       'escape_token', ''
   )
-  llm_metadata.llm_model_type.gemma4.close_quote = token_map.get(
+  llm_metadata.llm_model_type.gemma4.close_quote = token_map.get(  # pyrefly: ignore[bad-assignment]
       'escape_token', ''
   )
-  llm_metadata.llm_model_type.gemma4.function_response_start = token_map.get(
+  llm_metadata.llm_model_type.gemma4.function_response_start = token_map.get(  # pyrefly: ignore[bad-assignment]
       'str_token', ''
   )
   llm_metadata.llm_model_type.gemma4.use_template_for_fc_format = True
   think_channel = llm_metadata.channels.add()
   think_channel.channel_name = 'thought'
   think_channel.start = f"{token_map.get('soc_token', '<|channel>')}thought\n"
-  think_channel.end = token_map.get('eoc_token', '<channel|>')
+  think_channel.end = token_map.get('eoc_token', '<channel|>')  # pyrefly: ignore[bad-assignment]
   if exported_model_artifacts.vision_encoder_model_path:
     image_processor = source_model_artifacts.image_processor
     assert (
@@ -68,11 +68,11 @@ def build_llm_metadata(
     boi_token = token_map.get('boi_token', '')
     eoi_token = token_map.get('eoi_token', '')
     llm_metadata.llm_model_type.gemma4.start_of_image_token.token_str = (
-        boi_token
+        boi_token  # pyrefly: ignore[bad-assignment]
     )
-    llm_metadata.llm_model_type.gemma4.end_of_image_token.token_str = eoi_token
-    llm_metadata.llm_model_type.gemma4.patch_width = image_processor.patch_size
-    llm_metadata.llm_model_type.gemma4.patch_height = image_processor.patch_size
+    llm_metadata.llm_model_type.gemma4.end_of_image_token.token_str = eoi_token  # pyrefly: ignore[bad-assignment]
+    llm_metadata.llm_model_type.gemma4.patch_width = image_processor.patch_size  # pyrefly: ignore[missing-attribute]
+    llm_metadata.llm_model_type.gemma4.patch_height = image_processor.patch_size  # pyrefly: ignore[missing-attribute]
     # TODO(weiyiw): Update the max_num_patches to the actual value.
     # This is is hardcoded to 140 soft tokens for now.
     llm_metadata.llm_model_type.gemma4.max_num_patches = (

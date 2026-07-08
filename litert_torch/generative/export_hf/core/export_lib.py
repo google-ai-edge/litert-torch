@@ -216,7 +216,7 @@ def load_model(
         chat_template_str = f.read()
       chat_template_dict = json.loads(chat_template_str)
       if 'chat_template' in chat_template_dict:
-        tokenizer.chat_template = chat_template_dict['chat_template']
+        tokenizer.chat_template = chat_template_dict['chat_template']  # pyrefly: ignore[missing-attribute]
     except Exception as e:  # pylint: disable=broad-exception-caught
       print(f'Failed to load chat template: {e}')
 
@@ -224,7 +224,7 @@ def load_model(
       model=model,
       model_config=config,
       text_model_config=text_model_config,
-      tokenizer=tokenizer,
+      tokenizer=tokenizer,  # pyrefly: ignore[bad-argument-type]
       image_processor=image_processor,
   )
 
@@ -292,6 +292,8 @@ def export_text_prefill_decode_model(
         not has_dynamic_shape
     ), 'Dynamic shape is not supported for split cache.'
     model.set_attn_implementation('lrt_split_cache_attention')
+    # In case of the attn_implementation is not set.
+    model.config._attn_implementation = 'lrt_split_cache_attention'  # pylint: disable=protected-access
   else:
     model.set_attn_implementation('lrt_transposed_attention')
 
@@ -368,12 +370,12 @@ def export_text_prefill_decode_model(
         strict_export=False,
     )
 
-  lrt_model = mu_pass_lib.update_model(lrt_model)
+  lrt_model = mu_pass_lib.update_model(lrt_model)  # pyrefly: ignore[bad-argument-type]
   if export_config.experimental_use_mixed_precision:
     print('Applying mixed precision to model...')
     lrt_model = mu_pass_lib.apply_mixed_precision(lrt_model)
 
-  model_path = os.path.join(work_dir, 'model.tflite')
+  model_path = os.path.join(work_dir, 'model.tflite')  # pyrefly: ignore[no-matching-overload]
   lrt_model.export(model_path)
 
   del lrt_model
@@ -458,7 +460,7 @@ def export_embedder_model(
       lightweight_conversion=export_config.experimental_lightweight_conversion,
       strict_export=False,
   )
-  model_path = os.path.join(work_dir, 'embedder.tflite')
+  model_path = os.path.join(work_dir, 'embedder.tflite')  # pyrefly: ignore[no-matching-overload]
   lrt_model.export(model_path)
   quantization_recipe_list = (
       quantization_recipe.split(',') if quantization_recipe else [None]
@@ -508,7 +510,7 @@ def export_vision_encoder_models(
         sample_kwargs=sample_inputs,
     )
   lrt_model = converter.convert(strict_export=False)
-  vision_encoder_path = os.path.join(work_dir, 'vision_encoder.tflite')
+  vision_encoder_path = os.path.join(work_dir, 'vision_encoder.tflite')  # pyrefly: ignore[no-matching-overload]
   lrt_model.export(vision_encoder_path)
   quantization_recipe_list = (
       quantization_recipe.split(',') if quantization_recipe else [None]
@@ -530,7 +532,7 @@ def export_vision_encoder_models(
         sample_kwargs=sample_inputs,
     )
   lrt_model = converter.convert(strict_export=False)
-  adapter_path = os.path.join(work_dir, 'vision_adapter.tflite')
+  adapter_path = os.path.join(work_dir, 'vision_adapter.tflite')  # pyrefly: ignore[no-matching-overload]
   lrt_model.export(adapter_path)
   quantization_recipe_list = (
       quantization_recipe.split(',') if quantization_recipe else [None]
@@ -594,7 +596,7 @@ def export_auxiliary_model(
         sample_kwargs=sample_input,
     )
   lrt_model = converter.convert(strict_export=False)
-  model_path = os.path.join(work_dir, 'auxiliary.tflite')
+  model_path = os.path.join(work_dir, 'auxiliary.tflite')  # pyrefly: ignore[no-matching-overload]
   lrt_model.export(model_path)
   return dataclasses.replace(
       exported_model_artifacts,
@@ -626,7 +628,7 @@ def export_additional_models_impl(
         sample_kwargs=sample_inputs,
     )
   lrt_model = converter.convert(strict_export=False)
-  model_path = os.path.join(work_dir, f'{name}.tflite')
+  model_path = os.path.join(work_dir, f'{name}.tflite')  # pyrefly: ignore[no-matching-overload]
   lrt_model.export(model_path)
   quantization_recipe_list = (
       quantization_recipe.split(',') if quantization_recipe else [None]
@@ -713,15 +715,15 @@ def export_tokenizer(
     tokenizer_path = tokenizer.vocab_file
     if tokenizer_path.endswith('tokenizer.model'):
       with open(tokenizer_path, 'rb') as f:
-        with open(os.path.join(work_dir, 'tokenizer.model'), 'wb') as f_out:
+        with open(os.path.join(work_dir, 'tokenizer.model'), 'wb') as f_out:  # pyrefly: ignore[no-matching-overload]
           f_out.write(f.read())
-      tokenizer_path = os.path.join(work_dir, 'tokenizer.model')
+      tokenizer_path = os.path.join(work_dir, 'tokenizer.model')  # pyrefly: ignore[no-matching-overload]
       return dataclasses.replace(
           exported_model_artifacts,
           tokenizer_model_path=tokenizer_path,
       )
   try:
-    tokenizer_path = tokenizer.save_pretrained(work_dir, legacy_format=False)
+    tokenizer_path = tokenizer.save_pretrained(work_dir, legacy_format=False)  # pyrefly: ignore[bad-argument-type]
     # TODO(weiyiw): This is rough... polish it.
     if isinstance(tokenizer_path, tuple):
       tokenizer_path = [
@@ -738,7 +740,7 @@ def export_tokenizer(
     # Fallback to convert tokenizer to sentencepiece.
     print('Failed to export tokenizer. Converting to sentencepiece.')
     spm_serialized = tokenizer_lib.convert(tokenizer)
-    tokenizer_path = os.path.join(work_dir, 'tokenizer.spiece')
+    tokenizer_path = os.path.join(work_dir, 'tokenizer.spiece')  # pyrefly: ignore[no-matching-overload]
     with open(tokenizer_path, 'wb') as f:
       f.write(spm_serialized)
   return dataclasses.replace(
@@ -762,7 +764,7 @@ def aot_compile_model(
       'soc_model': export_config.aot_soc_model,
   }
   if export_config.aot_compilation_config_dict is not None:
-    config['compilation_config'] = export_config.aot_compilation_config_dict
+    config['compilation_config'] = export_config.aot_compilation_config_dict  # pyrefly: ignore[bad-assignment]
 
   backend_class = import_vendor.import_vendor(export_config.aot_backend)
   backend = backend_class.create(config)

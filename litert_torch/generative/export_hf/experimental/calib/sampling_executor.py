@@ -16,6 +16,7 @@
 
 import copy
 import dataclasses
+import functools
 import os
 from typing import Sequence
 
@@ -80,6 +81,9 @@ class TflSamplingExecutorConfig:
   stop_token: int | None = None
   enable_calibration: bool = False
   enable_min_max_calibration_update: bool = True
+  ema_smoothing_factor: float = 0.95
+  use_profiler_based_calibration: bool = False
+
 
 
 def load_model(
@@ -226,12 +230,27 @@ class Executor:
       if self.config.enable_min_max_calibration_update:
         qsv_update_func = qsu.min_max_update
       else:
-        qsv_update_func = qsu.moving_average_update
+        qsv_update_func = functools.partial(
+            qsu.moving_average_update,
+            smoothing_factor=self.config.ema_smoothing_factor,
+        )
+
+      if enable_calibration:
+        if self.config.use_profiler_based_calibration:
+          if not self.config.enable_min_max_calibration_update:
+            raise ValueError(
+                "Profiler-based calibration only supports min-max update. "
+                "Set enable_min_max_calibration_update=True."
+            )
+          mode = calibrator.CalibrationMode.CALIBRATION_PROFILER_BASED
+        else:
+          mode = calibrator.CalibrationMode.CALIBRATION
+      else:
+        mode = calibrator.CalibrationMode.INFERENCE
+
       self.interpreters[path] = calibrator.CalibrationInterpreter(
           path,
-          mode=calibrator.CalibrationMode.CALIBRATION
-          if enable_calibration
-          else calibrator.CalibrationMode.INFERENCE,
+          mode=mode,
           qsv_update_func=qsv_update_func,
       )
     return self.interpreters[path]
@@ -383,11 +402,11 @@ class Executor:
     mm_embedding = None
     for i in range(num_images):
       img = decode_state.images[i]
-      img_features = self.mm_encoder_runner(
+      img_features = self.mm_encoder_runner(  # pyrefly: ignore[not-callable]
           **img,
       )
       img_features = img_features['features']
-      mm_embedding = self.mm_adapter_runner(
+      mm_embedding = self.mm_adapter_runner(  # pyrefly: ignore[not-callable]
           soft_tokens=img_features,
       )['mm_embedding']
       mm_embs.append(mm_embedding)
@@ -400,7 +419,7 @@ class Executor:
           input_embeddings,
           decode_state.index_media,
           decode_state.index_feat_in_media,
-          mm_embedding[None, ...],
+          mm_embedding[None, ...],  # pyrefly: ignore[unsupported-operation]
       )
     else:
       interleaved_embeddings = input_embeddings
@@ -447,15 +466,21 @@ class Executor:
     if time_step + input_size > self.cache_length:
       raise ValueError('Prefill chunk exceeds the cache length.')
 
-    positions = np.arange(time_step, time_step + input_size, dtype=np.int32)
+    positions = np.arange(time_step, time_step + input_size, dtype=np.int32)  # pyrefly: ignore[no-matching-overload]
 
-    prefill_masks = self.prefill_mask_runners[input_size](
-        time_step=np.asarray(time_step, dtype=np.int32),
-        input_tokens=padded_tokens,
-        valid_mask=valid_mask,
-    )
+    prefill_mask_inputs = {
+        'time_step': np.asarray(time_step, dtype=np.int32),
+        'input_tokens': padded_tokens,
+    }
+    if (
+        'valid_mask'
+        in self.prefill_mask_runners[input_size].get_input_details()
+    ):
+      prefill_mask_inputs['valid_mask'] = valid_mask
 
-    input_embeds = decode_state.processed_embeds[
+    prefill_masks = self.prefill_mask_runners[input_size](**prefill_mask_inputs)
+
+    input_embeds = decode_state.processed_embeds[  # pyrefly: ignore[unsupported-operation]
         :, time_step : time_step + input_size
     ]
     rope_runner = self.prefill_rope_runners[input_size]
@@ -533,11 +558,14 @@ class Executor:
     input_tokens = decode_state.next_decode_token
     positions = np.asarray([time_step], dtype=np.int32)
 
-    decode_masks = self.decode_mask_runner(
-        time_step=np.asarray(time_step, dtype=np.int32),
-        input_tokens=input_tokens,
-        valid_mask=np.ones((1, 1), dtype=np.bool),
-    )
+    decode_mask_inputs = {
+        'time_step': np.asarray(time_step, dtype=np.int32),
+        'input_tokens': input_tokens,
+    }
+    if 'valid_mask' in self.decode_mask_runner.get_input_details():
+      decode_mask_inputs['valid_mask'] = np.ones((1, 1), dtype=np.bool)
+
+    decode_masks = self.decode_mask_runner(**decode_mask_inputs)
 
     input_embeds = try_run_signature_with_quant_dequant(
         {'token_ids': input_tokens},
@@ -547,7 +575,7 @@ class Executor:
     if time_step < len(decode_state.token_ids[0]):
       processed_embeds = decode_state.processed_embeds
     else:
-      processed_embeds = np.concatenate(
+      processed_embeds = np.concatenate(  # pyrefly: ignore[no-matching-overload]
           [decode_state.processed_embeds, input_embeds], axis=1
       )
 
@@ -738,7 +766,7 @@ class ConversationExecutor(Executor):
           time_step=self.decode_state.time_step,
           generate=False,
           done=False,
-          processed_embeds=self.decode_state.processed_embeds[
+          processed_embeds=self.decode_state.processed_embeds[  # pyrefly: ignore[unsupported-operation]
               :, : self.decode_state.time_step, :
           ],
           images=self.decode_state.images,

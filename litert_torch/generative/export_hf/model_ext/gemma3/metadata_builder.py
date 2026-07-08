@@ -44,9 +44,9 @@ def build_llm_metadata(
         llm_model_type_pb2.LlmModelType(gemma3n=llm_model_type_pb2.Gemma3N())
     )
     llm_metadata.llm_model_type.gemma3n.start_of_image_token.token_str = (
-        boi_token
+        boi_token  # pyrefly: ignore[bad-assignment]
     )
-    llm_metadata.llm_model_type.gemma3n.end_of_image_token.token_str = eoi_token
+    llm_metadata.llm_model_type.gemma3n.end_of_image_token.token_str = eoi_token  # pyrefly: ignore[bad-assignment]
     llm_metadata.llm_model_type.gemma3n.image_tensor_height = (
         image_processor.size['height']
     )

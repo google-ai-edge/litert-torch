@@ -37,7 +37,7 @@ class Lfm2ShortConv(modeling_lfm2.Lfm2ShortConv):
         padding=0,  # Padding is done in forward as part of state management.
     )
 
-  def forward(
+  def forward(  # pyrefly: ignore[bad-override]
       self,
       hidden_states: torch.Tensor,
       past_key_values=None,
@@ -71,7 +71,7 @@ class Lfm2ShortConv(modeling_lfm2.Lfm2ShortConv):
     b, c, x_proj = self.in_proj(hidden_states).chunk(3, dim=-1)
     conv_input = b * x_proj
     conv_input_t = conv_input.transpose(1, 2)
-    state = past_key_values.layers[self.layer_idx].conv_states
+    state = past_key_values.layers[self.layer_idx].conv_states  # pyrefly: ignore[missing-attribute]
     padded_input = torch.cat([state, conv_input_t], dim=-1)
 
     if seq_len > 1:  # Prefill
@@ -103,5 +103,5 @@ class Lfm2ShortConv(modeling_lfm2.Lfm2ShortConv):
     conv_out = conv_out.transpose(1, 2)
     y = c * conv_out
     y = self.out_proj(y)
-    past_key_values.layers[self.layer_idx].conv_states = next_state
+    past_key_values.layers[self.layer_idx].conv_states = next_state  # pyrefly: ignore[missing-attribute]
     return y

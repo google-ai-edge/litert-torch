@@ -123,7 +123,7 @@ class FullVisionEncoder(nn.Module):
     self.encoder_config = encoder_config
     self.connector_config = connector_config
 
-  @torch.inference_mode
+  @torch.inference_mode  # pyrefly: ignore[bad-argument-type]
   def forward(
       self,
       pixel_values: torch.Tensor,
@@ -213,7 +213,7 @@ def build_image_encoder(
   connector_config = get_connector_config()
   encoder = FullVisionEncoder(encoder_config, connector_config)
   loader = loading_utils.ModelLoader(
-      checkpoint_path, TENSOR_NAMES, custom_loader
+      checkpoint_path, TENSOR_NAMES, custom_loader  # pyrefly: ignore[bad-argument-type]
   )
   loader.load(encoder.siglip_encoder, strict=False)
 

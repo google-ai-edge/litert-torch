@@ -107,7 +107,7 @@ def _flatten_mask_with_keys(
     mask: Mask,
 ) -> tuple[list[tuple[pytree.KeyEntry, Any]], Any]:
   flattened, (flat_names, _) = _flatten_mask(mask)
-  return [
+  return [  # pyrefly: ignore[bad-return]
       (pytree.MappingKey(k), v) for k, v in zip(flat_names, flattened)
   ], flat_names
 
@@ -115,7 +115,7 @@ def _flatten_mask_with_keys(
 pytree.register_pytree_node(
     Mask,
     _flatten_mask,
-    _unflatten_mask,
+    _unflatten_mask,  # pyrefly: ignore[bad-argument-type]
     flatten_with_keys_fn=_flatten_mask_with_keys,
     serialized_type_name='',
 )
@@ -123,7 +123,7 @@ pytree.register_pytree_node(
 pytree.register_pytree_node(
     SplitMask,
     _flatten_mask,
-    _unflatten_mask,
+    _unflatten_mask,  # pyrefly: ignore[bad-argument-type]
     flatten_with_keys_fn=_flatten_mask_with_keys,
     serialized_type_name='',
 )

@@ -336,8 +336,9 @@ def tfl_slice_tensor(
     begin: torch.Tensor,
     size: torch.Tensor,
     *,
-    shape: str = "",
+    shape: str | None = None,
 ) -> torch.Tensor:
+  shape = shape or ""
   assert begin.ndim == size.ndim == 1
   assert begin.numel() == size.numel() == input.ndim
   assert begin.dtype == torch.int32 and size.dtype == torch.int32

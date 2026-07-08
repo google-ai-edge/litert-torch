@@ -38,7 +38,7 @@ class LiteRTExportableModuleForGemma4VisionEncoder(
 
     pooling_kernel_size = vision_tower.config.pooling_kernel_size
     output_length = pixel_values.shape[-2] // (
-        pooling_kernel_size * pooling_kernel_size
+        pooling_kernel_size * pooling_kernel_size  # pyrefly: ignore[unsupported-operation]
     )
 
     padding_positions = (pixel_position_ids == -1).all(dim=-1)

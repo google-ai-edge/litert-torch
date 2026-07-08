@@ -231,6 +231,11 @@ def build_llm_metadata(
       else:
         sampler_params.type = sampler_params_pb2.SamplerParameters.TOP_P
 
+  if gen_config and getattr(gen_config, 'suppress_tokens', None):
+    suppress_tokens = gen_config.suppress_tokens
+    for s_token in suppress_tokens:
+      llm_metadata.suppress_tokens.ids.append(s_token)
+
   if chat_templates is not None:
     if isinstance(chat_templates, str):
       if export_config.experimental_transpile_chat_template_for_minijinja:
@@ -285,7 +290,7 @@ def build_llm_metadata(
 
   # Model specific metadata builders.
   if not litert_lm_model_type_override:
-    metadata_builder = metadata_builder_lib.get_metadata_builder(model.config)
+    metadata_builder = metadata_builder_lib.get_metadata_builder(model.config)  # pyrefly: ignore[bad-argument-type]
     llm_metadata = metadata_builder(
         source_model_artifacts,
         export_config,
@@ -344,7 +349,7 @@ def package_model(
     if os.path.exists(export_config.litert_lm_llm_metadata_override):
       llm_metadata_path = export_config.litert_lm_llm_metadata_override
     else:
-      llm_metadata_path = os.path.join(work_dir, 'llm_metadata.pbtext')
+      llm_metadata_path = os.path.join(work_dir, 'llm_metadata.pbtext')  # pyrefly: ignore[no-matching-overload]
       with open(llm_metadata_path, 'w') as f:
         f.write(export_config.litert_lm_llm_metadata_override)
   else:
@@ -355,7 +360,7 @@ def package_model(
         exported_model_artifacts,
         litert_lm_model_type_override,
     )
-    llm_metadata_path = os.path.join(work_dir, 'llm_metadata.pb')
+    llm_metadata_path = os.path.join(work_dir, 'llm_metadata.pb')  # pyrefly: ignore[no-matching-overload]
     with open(llm_metadata_path, 'wb') as f:
       f.write(llm_metadata.SerializeToString())
 
@@ -376,7 +381,7 @@ def package_model(
   else:
     builder.add_sentencepiece_tokenizer(tokenizer_model_path)
   builder.add_tflite_model(
-      exported_model_artifacts.prefill_decode_model_path,
+      exported_model_artifacts.prefill_decode_model_path,  # pyrefly: ignore[bad-argument-type]
       litertlm_builder.TfLiteModelType.PREFILL_DECODE,
   )
   if exported_model_artifacts.embedder_model_path:
@@ -412,7 +417,7 @@ def package_model(
           model_path,
           model_type,
       )
-  model_path = os.path.join(output_dir, 'model.litertlm')
+  model_path = os.path.join(output_dir, 'model.litertlm')  # pyrefly: ignore[no-matching-overload]
   with open(model_path, 'wb') as f:
     builder.build(f)
   return dataclasses.replace(

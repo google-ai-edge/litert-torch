@@ -128,6 +128,12 @@ _ENABLE_MIN_MAX_CALIBRATION_UPDATE = flags.DEFINE_bool(
     ' model is already heavily quantized. Using min/max will help us to find'
     ' the true range for k/v cache and rope signals.',
 )
+_USE_PROFILER_BASED_CALIBRATION = flags.DEFINE_bool(
+    'use_profiler_based_calibration',
+    False,
+    'Use profiler-based calibration.',
+)
+
 
 _ENABLE_FORMATTING = flags.DEFINE_bool(
     'enable_formatting',
@@ -166,7 +172,7 @@ def main(argv: Sequence[str]) -> None:
   print('--- Configuring executor...')
   config = loader.load_models(
       max_kv_cache_size=_KV_CACHE_MAX_LEN.value,
-      model_path=(_MODEL_PATH.value, _DECODE_MODEL_PATH.value),
+      model_path=(_MODEL_PATH.value, _DECODE_MODEL_PATH.value),  # pyrefly: ignore[bad-argument-type]
       embedder_model_path=_EMBEDDER_MODEL_PATH.value,
       spm_path=_SPM_PATH.value,
       transformers_model_path=_TRANSFORMERS_MODEL_PATH.value,
@@ -176,15 +182,19 @@ def main(argv: Sequence[str]) -> None:
       mm_adapter_model_path=_MM_ADAPTER_MODEL_PATH.value,
       enable_calibration=_ENABLE_CALIBRATION.value,
       enable_min_max_calibration_update=_ENABLE_MIN_MAX_CALIBRATION_UPDATE.value,
+      use_profiler_based_calibration=_USE_PROFILER_BASED_CALIBRATION.value,
   )
 
   if _ENABLE_FORMATTING.value:
     assert (
         _TRANSFORMERS_MODEL_PATH.value is not None
     ), 'Transformers model path is required for formatting.'
-    messages = [{'role': 'user', 'content': prompt}]
+    if isinstance(prompt, list) and all(isinstance(m, dict) for m in prompt):
+      messages = prompt
+    else:
+      messages = [{'role': 'user', 'content': prompt}]
     tokenizer = config.tokenizer_config.make().tx_tokenizer
-    prompt = tokenizer.apply_chat_template(
+    prompt = tokenizer.apply_chat_template(  # pyrefly: ignore[missing-attribute]
         messages,
         tokenize=False,
         add_generation_prompt=True,
@@ -238,7 +248,7 @@ def main(argv: Sequence[str]) -> None:
     print('\n--- Processing prompt ---')
     print(f'Prompt:\n{prompt}')
     response = executor.sample_text(
-        prompt, max_sample_step=_MAX_DECODE_STEPS.value
+        prompt, max_sample_step=_MAX_DECODE_STEPS.value  # pyrefly: ignore[bad-argument-type]
     )
     print(f'Response:\n{response}')
 
@@ -250,13 +260,13 @@ def main(argv: Sequence[str]) -> None:
       ), 'Transformers model path is required for formatting.'
       messages = [{'role': 'user', 'content': second_prompt}]
       tokenizer = config.tokenizer_config.make().tx_tokenizer
-      second_prompt = tokenizer.apply_chat_template(
+      second_prompt = tokenizer.apply_chat_template(  # pyrefly: ignore[missing-attribute]
           messages,
           tokenize=False,
           add_generation_prompt=True,
       )
-      if tokenizer.special_tokens_map.get('bos_token', None):
-        bos_token = tokenizer.special_tokens_map['bos_token']
+      if tokenizer.special_tokens_map.get('bos_token', None):  # pyrefly: ignore[missing-attribute]
+        bos_token = tokenizer.special_tokens_map['bos_token']  # pyrefly: ignore[missing-attribute]
         second_prompt = '\n' + second_prompt.removeprefix(bos_token)
       print(f'--- Formatted second prompt:\n\n{second_prompt}')
     print('\n--- Processing second prompt ---')

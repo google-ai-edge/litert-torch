@@ -48,7 +48,7 @@ class Gemma3RMSNorm(torch.nn.Module):
 def gemma3_litert_patch():
   print("Gemma3 patch applied.")
   original_norm = modeling_gemma3.Gemma3RMSNorm
-  modeling_gemma3.Gemma3RMSNorm = Gemma3RMSNorm
+  modeling_gemma3.Gemma3RMSNorm = Gemma3RMSNorm  # pyrefly: ignore[bad-assignment]
 
   try:
     yield

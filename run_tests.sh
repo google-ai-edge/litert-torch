@@ -16,7 +16,7 @@
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-IGNORE_LARGE_TESTS="--ignore-glob=*_large.py"
+IGNORE_LARGE_TESTS="--ignore-glob=*_large.py --ignore-glob=*equivalence_test.py"
 if [[ "$RUN_LARGE_TESTS" == "true" ]]; then
   IGNORE_LARGE_TESTS=""
 fi

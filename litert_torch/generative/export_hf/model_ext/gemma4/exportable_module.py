@@ -40,7 +40,7 @@ class LiteRTExportableModuleForDecoderOnlyLMPrefillExternalEmbedder(
     return inputs
 
   # pylint: disable=arguments-renamed
-  def forward(
+  def forward(  # pyrefly: ignore[bad-override]
       self,
       embeddings,
       per_layer_embeddings,
@@ -123,7 +123,7 @@ class LiteRTExportableModuleForDecoderOnlyLMGenerateExternalEmbedder(
     return inputs
 
   # pylint: disable=arguments-renamed
-  def forward(
+  def forward(  # pyrefly: ignore[bad-override]
       self,
       embeddings,
       per_layer_embeddings,

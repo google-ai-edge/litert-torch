@@ -107,21 +107,21 @@ def run_transformers(
       model_id, torch_dtype=torch.float32
   )
 
-  has_template = tokenizer.chat_template is not None
+  has_template = tokenizer.chat_template is not None  # pyrefly: ignore[missing-attribute]
   responses = []
   chat = []
   history_str = ''
   for prompt in prompts:
     if has_template:
       chat.append({'role': 'user', 'content': prompt})
-      formatted_prompt = tokenizer.apply_chat_template(
+      formatted_prompt = tokenizer.apply_chat_template(  # pyrefly: ignore[missing-attribute]
           chat, tokenize=False, add_generation_prompt=True
       )
     else:
       history_str += prompt
       formatted_prompt = history_str
 
-    inputs = tokenizer(
+    inputs = tokenizer(  # pyrefly: ignore[not-callable]
         formatted_prompt,
         return_tensors='pt',
         add_special_tokens=not has_template,
@@ -134,7 +134,7 @@ def run_transformers(
       )
     input_length = inputs.input_ids.shape[-1]
     generated_tokens = outputs[0][input_length:]
-    output_text = tokenizer.decode(
+    output_text = tokenizer.decode(  # pyrefly: ignore[missing-attribute]
         generated_tokens, skip_special_tokens=True
     ).strip()
     responses.append(output_text)
@@ -156,9 +156,9 @@ def run_litert_lm(
 ) -> list[str]:
   print('Running litert_lm...')
   if backend_str == 'npu':
-    backend = litert_lm.Backend.NPU(litert_dispatch_lib_dir='')
+    backend = litert_lm.Backend.NPU(litert_dispatch_lib_dir='')  # pyrefly: ignore[missing-attribute]
   else:
-    backend = litert_lm.Backend.CPU()
+    backend = litert_lm.Backend.CPU()  # pyrefly: ignore[missing-attribute]
   engine = litert_lm.Engine(
       model_path,
       backend,

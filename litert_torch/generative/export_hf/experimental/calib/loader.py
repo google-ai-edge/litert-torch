@@ -56,6 +56,8 @@ def load_models(
     mm_adapter_model_path: str | None = None,
     enable_calibration: bool = False,
     enable_min_max_calibration_update: bool = True,
+    ema_smoothing_factor: float = 0.95,
+    use_profiler_based_calibration: bool = False,
 ) -> tfl_sampling_executor.TflSamplingExecutorConfig:
   """Loads the models."""
   if isinstance(model_path, tuple):
@@ -119,39 +121,39 @@ def load_models(
   mask_model_path = mask_model_path or auxiliary_model_path
   prefill_mask_model_entries = {
       i: tfl_sampling_executor.TFLModelEntry(
-          path=mask_model_path,
+          path=mask_model_path,  # pyrefly: ignore[bad-argument-type]
           signature_name=f'prefill_mask_{i}',
       )
       for i in prefill_lengths
   }
   decode_mask_model_entry = tfl_sampling_executor.TFLModelEntry(
-      path=mask_model_path,
+      path=mask_model_path,  # pyrefly: ignore[bad-argument-type]
       signature_name='decode_mask',
   )
 
   rope_model_path = rope_model_path or auxiliary_model_path
   prefill_rope_model_entries = {
       i: tfl_sampling_executor.TFLModelEntry(
-          path=rope_model_path,
+          path=rope_model_path,  # pyrefly: ignore[bad-argument-type]
           signature_name=f'prefill_rope_{i}',
       )
       for i in prefill_lengths
   }
   decode_rope_model_entry = tfl_sampling_executor.TFLModelEntry(
-      path=rope_model_path,
+      path=rope_model_path,  # pyrefly: ignore[bad-argument-type]
       signature_name='decode_rope',
   )
 
   cache_update_model_path = cache_update_model_path or auxiliary_model_path
   prefill_cache_update_model_entries = {
       i: tfl_sampling_executor.TFLModelEntry(
-          path=cache_update_model_path,
+          path=cache_update_model_path,  # pyrefly: ignore[bad-argument-type]
           signature_name=f'prefill_cache_update_{i}',
       )
       for i in prefill_lengths
   }
   decode_cache_update_model_entry = tfl_sampling_executor.TFLModelEntry(
-      path=cache_update_model_path,
+      path=cache_update_model_path,  # pyrefly: ignore[bad-argument-type]
       signature_name='decode_cache_update',
   )
   tokenizer_config = tokenizer_lib.TokenizerConfig(
@@ -161,7 +163,7 @@ def load_models(
   return tfl_sampling_executor.TflSamplingExecutorConfig(
       prefill_model_entries=prefill_model_entries,
       decode_model_entry=decode_model_entry,
-      max_kv_cache_size=max_kv_cache_size,
+      max_kv_cache_size=max_kv_cache_size,  # pyrefly: ignore[bad-argument-type]
       prefill_mask_model_entries=prefill_mask_model_entries,
       decode_mask_model_entry=decode_mask_model_entry,
       prefill_rope_model_entries=prefill_rope_model_entries,
@@ -177,4 +179,6 @@ def load_models(
       mm_adapter_model_entry=mm_adapter_model_entry,
       enable_calibration=enable_calibration,
       enable_min_max_calibration_update=enable_min_max_calibration_update,
+      ema_smoothing_factor=ema_smoothing_factor,
+      use_profiler_based_calibration=use_profiler_based_calibration,
   )

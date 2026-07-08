@@ -134,7 +134,7 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
   def get_v_ts_idx(self) -> int:
     return self.v_ts_idx
 
-  def lazy_initialization(self, key_states: torch.Tensor):
+  def lazy_initialization(self, key_states: torch.Tensor):  # pyrefly: ignore[bad-override]
     # Since we don't support real lazy initialization, this function could only
     # be called by Cache.early_initialization, where uses a standard cache
     # layout [batch_size, num_heads, ?, head_dim].
@@ -143,7 +143,7 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
         "Lazy initialization is not supported in LiteRTLMCacheLayer."
     )
 
-  def update(
+  def update(  # pyrefly: ignore[bad-override]
       self,
       key_states: torch.Tensor,
       value_states: torch.Tensor,
@@ -153,9 +153,9 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
     seq_len = key_states.shape[2]
     self.cumulative_length += seq_len
 
-    key_states = key_states.to(self.keys[0].dtype)
+    key_states = key_states.to(self.keys[0].dtype)  # pyrefly: ignore[unsupported-operation]
 
-    value_states = value_states.to(self.values[0].dtype)
+    value_states = value_states.to(self.values[0].dtype)  # pyrefly: ignore[unsupported-operation]
 
     if self.k_ts_idx == 2:
       key_states = key_states.reshape(
@@ -177,8 +177,8 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
           1, -1, self.head_dim, seq_len
       )  # 1, bk, h, s
 
-    self.keys = (self.keys[0], key_states)
-    self.values = (self.values[0], value_states)
+    self.keys = (self.keys[0], key_states)  # pyrefly: ignore[unsupported-operation]
+    self.values = (self.values[0], value_states)  # pyrefly: ignore[unsupported-operation]
 
     return SplitCacheTuple([self.keys, self.values])
 
@@ -189,9 +189,12 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
     return kv_length, kv_offset
 
   def get_seq_length(self) -> int:
-    return (self.keys[0][0, 0].any(dim=-1)).sum() if self.is_initialized else 0
+    return (self.keys[0][0, 0].any(dim=-1)).sum() if self.is_initialized else 0  # pyrefly: ignore[unsupported-operation]
 
   def get_max_cache_shape(self) -> int:
+    return self.max_cache_len
+
+  def get_max_length(self) -> int:
     return self.max_cache_len
 
   @classmethod
@@ -334,15 +337,15 @@ def _flatten_kvc_t(
   k_ts_idx = layer_0.get_k_ts_idx()
   v_ts_idx = layer_0.get_v_ts_idx()
   for i, cache_layer in enumerate(kvc.layers):
-    flattened.append(cache_layer.keys[0])
+    flattened.append(cache_layer.keys[0])  # pyrefly: ignore[missing-attribute]
     flat_names.append(f"k_{i}")
-    flattened.append(cache_layer.values[0])
+    flattened.append(cache_layer.values[0])  # pyrefly: ignore[missing-attribute]
     flat_names.append(f"v_{i}")
-    if cache_layer.keys[1] is not None:
-      assert cache_layer.values[1] is not None
-      flattened.append(cache_layer.keys[1])
+    if cache_layer.keys[1] is not None:  # pyrefly: ignore[missing-attribute]
+      assert cache_layer.values[1] is not None  # pyrefly: ignore[missing-attribute]
+      flattened.append(cache_layer.keys[1])  # pyrefly: ignore[missing-attribute]
       flat_names.append(f"k_{i}_slice")
-      flattened.append(cache_layer.values[1])
+      flattened.append(cache_layer.values[1])  # pyrefly: ignore[missing-attribute]
       flat_names.append(f"v_{i}_slice")
   return flattened, (flat_names, (batch_size, num_layers, k_ts_idx, v_ts_idx))
 
@@ -398,7 +401,7 @@ def _flatten_kvc_t_with_keys(
 pytree.register_pytree_node(
     LiteRTLMSplitCache,
     _flatten_kvc_t,
-    _unflatten_kvc_t,
+    _unflatten_kvc_t,  # pyrefly: ignore[bad-argument-type]
     flatten_with_keys_fn=_flatten_kvc_t_with_keys,
     serialized_type_name="",
 )

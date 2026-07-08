@@ -154,7 +154,7 @@ class LiteRTLMCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
   def get_v_ts_idx(self) -> int:
     return self.v_ts_idx
 
-  def lazy_initialization(self, key_states: torch.Tensor):
+  def lazy_initialization(self, key_states: torch.Tensor):  # pyrefly: ignore[bad-override]
     # Since we don't support real lazy initialization, this function could only
     # be called by Cache.early_initialization, where uses a standard cache
     # layout [batch_size, num_heads, ?, head_dim].
@@ -174,9 +174,9 @@ class LiteRTLMCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
     seq_len = key_states.shape[2]
     self.cumulative_length += seq_len
 
-    key_states = key_states.to(self.keys.dtype)
+    key_states = key_states.to(self.keys.dtype)  # pyrefly: ignore[missing-attribute]
 
-    value_states = value_states.to(self.values.dtype)
+    value_states = value_states.to(self.values.dtype)  # pyrefly: ignore[missing-attribute]
 
     if not cache_kwargs.get("kv_slice_preprocessed", False):
       if self.k_ts_idx == 3:
@@ -225,9 +225,12 @@ class LiteRTLMCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
     return kv_length, kv_offset
 
   def get_seq_length(self) -> int:
-    return (self.keys[0, 0].any(dim=-1)).sum() if self.is_initialized else 0
+    return (self.keys[0, 0].any(dim=-1)).sum() if self.is_initialized else 0  # pyrefly: ignore[unsupported-operation]
 
   def get_max_cache_shape(self) -> int:
+    return self.max_cache_len
+
+  def get_max_length(self) -> int:
     return self.max_cache_len
 
   @classmethod
@@ -395,7 +398,7 @@ class LiteRTLMConvCacheLayer(
     else:
       next_state = padded_input[:, :, -self.conv_kernel_size:]
 
-    self.conv_states.copy_(next_state)
+    self.conv_states.copy_(next_state)  # pyrefly: ignore[missing-attribute]
     return self.conv_states
 
   def update_recurrent_state(
@@ -412,6 +415,9 @@ class LiteRTLMConvCacheLayer(
     return 0
 
   def get_max_cache_shape(self) -> int:
+    return self.conv_kernel_size
+
+  def get_max_length(self) -> int:
     return self.conv_kernel_size
 
   @classmethod
@@ -585,7 +591,7 @@ def _flatten_kvc_t_with_keys(
 pytree.register_pytree_node(
     LiteRTLMCache,
     _flatten_kvc_t,
-    _unflatten_kvc_t,
+    _unflatten_kvc_t,  # pyrefly: ignore[bad-argument-type]
     flatten_with_keys_fn=_flatten_kvc_t_with_keys,
     serialized_type_name="",
 )

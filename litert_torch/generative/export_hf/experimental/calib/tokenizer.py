@@ -125,16 +125,28 @@ class Tokenizer:
     else:
       raise ValueError('No tokenizer available.')
 
-  def tokenize(self, input_string: str):
+  def tokenize(self, input_string: str, prepend_bos: bool = True):
     """Tokenizes the input string."""
     input_ids = self.tokenize_internal(input_string)
+    if prepend_bos:
+      bos_id = (
+          self.spm.bos_id()
+          if self.spm
+          else getattr(self.tx_tokenizer, 'bos_token_id', None)
+      )
+      if bos_id is not None:
+        input_ids = np.array(input_ids).tolist()
+        if len(input_ids) > 0 and input_ids[0] == bos_id:
+          pass
+        else:
+          input_ids = [bos_id] + input_ids
     input_ids = np.array(
         np.array(input_ids).tolist(),
         dtype=np.int32,
     )
     return np.array(input_ids).astype(np.int32)
 
-  def process_request(self, request: Request):
+  def process_request(self, request: Request, prepend_bos: bool = True):
     """Processes the request."""
     ids_with_indices = []
     image_idx: set[int] = set()
@@ -151,10 +163,15 @@ class Tokenizer:
 
     ids_with_indices = sorted(ids_with_indices, key=lambda x: x[0])
 
-    ids = []
+    bos_id = (
+        self.spm.bos_id()
+        if self.spm
+        else getattr(self.tx_tokenizer, 'bos_token_id', None)
+    )
 
-    index_media = [-1]
-    index_feat_in_media = [-1]
+    ids = []
+    index_media = []
+    index_feat_in_media = []
     images = []
 
     for item_idx, item in ids_with_indices:
@@ -184,6 +201,12 @@ class Tokenizer:
         ids += item
         index_media += [-1] * len(item)
         index_feat_in_media += [-1] * len(item)
+
+    if prepend_bos and bos_id is not None:
+      if len(ids) == 0 or ids[0] != bos_id:
+        ids = [bos_id] + ids
+        index_media = [-1] + index_media
+        index_feat_in_media = [-1] + index_feat_in_media
 
     return (
         np.asarray(ids).astype(np.int32)[None, :],
@@ -262,8 +285,8 @@ class LFM2VLImagePreprocessor:
         transformers_model_path
     )
     self.special_tokens = {
-        'soi': tx_tokenizer.convert_tokens_to_ids('<|image_start|>'),
-        'eoi': tx_tokenizer.convert_tokens_to_ids('<|image_end|>'),
+        'soi': tx_tokenizer.convert_tokens_to_ids('<|image_start|>'),  # pyrefly: ignore[missing-attribute]
+        'eoi': tx_tokenizer.convert_tokens_to_ids('<|image_end|>'),  # pyrefly: ignore[missing-attribute]
     }
 
   def __call__(self, image_bytes: bytes) -> dict[str, np.ndarray]:

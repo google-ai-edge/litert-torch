@@ -149,7 +149,7 @@ class LiteRTExportableModuleForDecoderOnlyLM(ExportableModuleBase):
     export_config = self.export_config
     num_layers = model_config.num_hidden_layers
     kv_cache = kv_cache_lib.CACHE_REGISTRY[
-        export_config.cache_implementation
+        export_config.cache_implementation  # pyrefly: ignore[bad-index]
     ].create_from_config(
         model_config,
         export_config,
@@ -296,7 +296,7 @@ class LiteRTExportableModuleForDecoderOnlyLMGenerate(
     tokens_dynamic_shape = {"tokens": None} if decode_length_dim else {}
     return tokens, tokens_dynamic_shape
 
-  def get_sample_inputs(self, model_config):
+  def get_sample_inputs(self, model_config):  # pyrefly: ignore[bad-override]
     export_config = self.export_config
     use_bool_mask = export_config.extra_kwargs.get("use_bool_mask", False)
     kv_cache_inputs, kv_cache_dynamic_shapes = self.get_sample_kv_cache(

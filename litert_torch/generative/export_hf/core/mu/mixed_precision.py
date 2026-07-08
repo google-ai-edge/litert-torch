@@ -103,7 +103,7 @@ def convert_to_fp16(
         if isinstance(op, stablehlo.CompositeOp):
           fp32_ops.add(op.decomposition_func)
         elif isinstance(op, tfl.SelectV2Op):
-          if isinstance(op.operands[2].op, tfl.ConstOp):
+          if isinstance(op.operands[2].op, tfl.ConstOp):  # pyrefly: ignore[missing-attribute]
             fp32_ops.add(op.operands[2].op)
 
     return orig_fp32_ops_len != len(fp32_ops)
@@ -121,7 +121,7 @@ def convert_to_fp16(
     if op in fp32_ops:
       for i, x in enumerate(op.operands):
         if is_float(x):
-          with mu.OpBuildingContext(op, insert_before=True):
+          with mu.OpBuildingContext(op, insert_before=True):  # pyrefly: ignore[bad-argument-type]
             op.operands[i] = tfl.cast(x, "f32")
       continue
 
@@ -129,13 +129,13 @@ def convert_to_fp16(
     if isinstance(op, func.FuncOp):
       for arg in op.body.block.args:
         if is_float(arg):
-          arg.type = mlir.RankedTensorType(arg.type.shape, "f16")
+          arg.type = mlir.RankedTensorType(arg.type.shape, "f16")  # pyrefly: ignore[missing-attribute]
     else:
       has_float_operand = False
       for i, x in enumerate(op.operands):
         if is_float(x):
           has_float_operand = True
-          with mu.OpBuildingContext(op, insert_before=True):
+          with mu.OpBuildingContext(op, insert_before=True):  # pyrefly: ignore[bad-argument-type]
             op.operands[i] = tfl.cast(x, "f16")
 
       for x in op.results:
@@ -146,14 +146,14 @@ def convert_to_fp16(
             # attributes. In such case, we need to insert a cast op to convert
             # the result to fp16 and rely on cleanups to propagate the type
             # change.
-            with mu.OpBuildingContext(op, insert_after=True):
+            with mu.OpBuildingContext(op, insert_after=True):  # pyrefly: ignore[bad-argument-type]
               cast = tfl.cast(x, "f16")
               x.replace_by(cast)
               cast.owner.operands[0] = x
           else:
             # Otherwise, the result type is determined by the input operand
             # types. We can directly update the result type to fp16.
-            x.type = mlir.RankedTensorType(x.type.shape, "f16")
+            x.type = mlir.RankedTensorType(x.type.shape, "f16")  # pyrefly: ignore[missing-attribute]
 
   # Update function types with new argument/result types.
   for op in module.walk():

@@ -15,6 +15,7 @@
 """Exportable modules for extended modules."""
 
 from litert_torch.generative.export_hf.core import exportable_module
+from litert_torch.generative.export_hf.core.speech import exportables as speech_exportables
 from litert_torch.generative.export_hf.model_ext.gemma3 import vision_exportable as gemma3_vision_exportable
 from litert_torch.generative.export_hf.model_ext.gemma3n import exportable_module as gemma3n_exportable
 from litert_torch.generative.export_hf.model_ext.gemma3n import vision_exportable as gemma3n_vision_exportable
@@ -112,3 +113,16 @@ def get_additional_exportables(
   else:
     pass
   return {}
+
+
+def get_speech_exportables(
+    model_config: transformers.PretrainedConfig,
+):
+  """Gets speech (ASR) exportables."""
+  if model_config.model_type == 'parakeet_ctc':
+    return (speech_exportables.LiteRTExportableModuleForAsrEncode,)
+  else:
+    return (
+        speech_exportables.LiteRTExportableModuleForAsrEncode,
+        speech_exportables.LiteRTExportableModuleForAsrDecode,
+    )

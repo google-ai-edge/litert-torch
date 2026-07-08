@@ -98,6 +98,9 @@ def export(
     experimental_use_mixed_precision: bool | None = None,
     export_vision_encoder: bool | None = None,
     vision_encoder_quantization_recipe: str | None = None,
+    export_audio_encoder: bool | None = None,
+    input_sec: float | None = None,
+    stateful_after: int | None = None,
     litert_lm_model_type_override: str | None = None,
     litert_lm_llm_metadata_override: str | None = None,
     sampler_top_p: float | None = None,
@@ -138,6 +141,10 @@ def export(
     export_vision_encoder: Whether to export the vision encoder.
     vision_encoder_quantization_recipe: The quantization recipe to use for the
       vision encoder.
+    export_audio_encoder: Whether to export the audio encoder.
+    input_sec: Input audio length in seconds.
+    stateful_after: If >= 0, the model runs in stateful mode after this many
+      tokens.
     litert_lm_model_type_override: Overriding the LiteRT LM model type.
     litert_lm_llm_metadata_override: Overriding the LiteRT LM LLM metadata.
     **kwargs: Additional keyword arguments to pass to the exportable module

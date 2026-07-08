@@ -127,6 +127,25 @@ class ExportLibTest(parameterized.TestCase):
 
     self.assertEqual(result_config["pre_tokenizer"]["type"], "Metaspace")
 
+  def test_asr_export_config_rules(self):
+    config = export_lib.exportable_module_config.ExportableModuleConfig(
+        model="dummy_asr_model",
+        task=export_lib.exportable_module_config.ExportTask.AUTOMATIC_SPEECH_RECOGNITION,
+        split_cache=True,
+        export_vision_encoder=True,
+    )
+    self.assertEqual(
+        config.task,
+        export_lib.exportable_module_config.ExportTask.AUTOMATIC_SPEECH_RECOGNITION,
+    )
+    self.assertTrue(config.export_audio_encoder)
+    self.assertFalse(config.export_vision_encoder)
+    self.assertFalse(config.split_cache)
+    self.assertFalse(config.externalize_embedder)
+    self.assertFalse(config.externalize_rope)
+    self.assertEqual(config.input_sec, 1.0)
+    self.assertEqual(config.stateful_after, -1)
+
 
 if __name__ == "__main__":
   absltest.main()
