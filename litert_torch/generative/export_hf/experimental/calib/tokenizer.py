@@ -55,9 +55,16 @@ class Request:
 class TokenizerConfig:
   vocab_path: str | None = None
   transformers_model_path: str | None = None
+  tokenizer_json_path: str | None = None
+  chat_template: str | None = None
 
   def make(self) -> 'Tokenizer':
-    return Tokenizer(self.vocab_path, self.transformers_model_path)
+    return Tokenizer(
+        spm_model_path=self.vocab_path,
+        transformers_model_path=self.transformers_model_path,
+        tokenizer_json_path=self.tokenizer_json_path,
+        chat_template=self.chat_template,
+    )
 
 
 class Tokenizer:
@@ -67,29 +74,45 @@ class Tokenizer:
       self,
       spm_model_path: str | None = None,
       transformers_model_path: str | None = None,
+      tokenizer_json_path: str | None = None,
+      chat_template: str | None = None,
   ):
+    self.spm = None
+    self.tx_tokenizer = None
+    self._image_preprocessor = None
+
     if spm_model_path:
       self.spm = spm.SentencePieceProcessor()
       self.spm.Load(spm_model_path)
-      self.tx_tokenizer = None
+    elif tokenizer_json_path:
+      self.tx_tokenizer = transformers.PreTrainedTokenizerFast(
+          tokenizer_file=tokenizer_json_path,
+          chat_template=chat_template,
+      )
     elif transformers_model_path:
       self.tx_tokenizer = transformers.AutoTokenizer.from_pretrained(
           transformers_model_path
       )
-      self.spm = None
     else:
       raise ValueError(
-          'Must specify either spm_model_path or transformers_model_path.'
+          'Must specify either spm_model_path, tokenizer_json_path, or'
+          ' transformers_model_path.'
       )
+
     if transformers_model_path:
-      config = transformers.AutoConfig.from_pretrained(transformers_model_path)
-      image_preprocessor_cls = IMAGE_PREPREOCESSORS.get(config.model_type, None)
+      try:
+        config = transformers.AutoConfig.from_pretrained(
+            transformers_model_path
+        )
+        image_preprocessor_cls = IMAGE_PREPREOCESSORS.get(
+            config.model_type, None
+        )
+      except (ValueError, OSError):
+        image_preprocessor_cls = None
       if image_preprocessor_cls:
         self._image_preprocessor = image_preprocessor_cls(
             transformers_model_path, self
         )
-      else:
-        self._image_preprocessor = None
 
   def tokenize_internal(self, input_string: str):
     """Tokenizes the input string."""
@@ -113,6 +136,53 @@ class Tokenizer:
     else:
       raise ValueError('No tokenizer available.')
 
+  @property
+  def bos_id(self) -> int | None:
+    """Returns the BOS id or None if no BOS token is configured."""
+    if self.spm:
+      return self.spm.bos_id()
+    elif self.tx_tokenizer:
+      bos = getattr(self.tx_tokenizer, 'bos_token_id', None)
+      if isinstance(bos, int) and bos >= 0:
+        return bos
+      for token_str in ('<bos>', '<s>', '<|begin_of_text|>'):
+        conv = getattr(self.tx_tokenizer, 'convert_tokens_to_ids', None)
+        if callable(conv):
+          tid = conv(token_str)
+          if (
+              isinstance(tid, int)
+              and tid >= 0
+              and tid != getattr(self.tx_tokenizer, 'unk_token_id', -1)
+          ):
+            return tid
+      return None
+    else:
+      raise ValueError('No tokenizer available.')
+
+  @property
+  def stop_token_ids(self) -> set[int]:
+    """Returns set of stop/EOS token IDs automatically discovered from tokenizer."""
+    ids = set()
+    if self.spm:
+      ids.add(self.spm.eos_id())
+    elif self.tx_tokenizer:
+      eos = getattr(self.tx_tokenizer, 'eos_token_id', None)
+      if isinstance(eos, (list, tuple, set)):
+        ids.update(int(x) for x in eos if x is not None)
+      elif isinstance(eos, int) and eos >= 0:
+        ids.add(eos)
+      for token_str in ('<end_of_turn>', '<eos>', '</s>', '<|endoftext|>'):
+        conv = getattr(self.tx_tokenizer, 'convert_tokens_to_ids', None)
+        if callable(conv):
+          tid = conv(token_str)
+          if (
+              isinstance(tid, int)
+              and tid >= 0
+              and tid != getattr(self.tx_tokenizer, 'unk_token_id', -1)
+          ):
+            ids.add(tid)
+    return ids
+
   def detokenize_internal(self, input_ids) -> str:
     """Detokenizes the input string."""
     if self.spm:
@@ -129,11 +199,7 @@ class Tokenizer:
     """Tokenizes the input string."""
     input_ids = self.tokenize_internal(input_string)
     if prepend_bos:
-      bos_id = (
-          self.spm.bos_id()
-          if self.spm
-          else getattr(self.tx_tokenizer, 'bos_token_id', None)
-      )
+      bos_id = self.bos_id
       if bos_id is not None:
         input_ids = np.array(input_ids).tolist()
         if len(input_ids) > 0 and input_ids[0] == bos_id:
@@ -163,11 +229,7 @@ class Tokenizer:
 
     ids_with_indices = sorted(ids_with_indices, key=lambda x: x[0])
 
-    bos_id = (
-        self.spm.bos_id()
-        if self.spm
-        else getattr(self.tx_tokenizer, 'bos_token_id', None)
-    )
+    bos_id = self.bos_id
 
     ids = []
     index_media = []

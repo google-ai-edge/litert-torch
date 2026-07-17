@@ -16,12 +16,14 @@
 
 import dataclasses
 import os
+import tempfile
 from typing import Any, Sequence
 
 from absl import app
 from absl import flags
 from litert_torch.generative.export_hf.experimental.calib import fuse_q
 from litert_torch.generative.export_hf.experimental.calib import quant_utils
+from litert_torch.generative.export_hf.experimental.litertlm_bundle import litertlm_bundle as litertlm_utils
 import numpy as np
 
 from ai_edge_quantizer import algorithm_manager
@@ -31,71 +33,126 @@ from ai_edge_quantizer.algorithms.uniform_quantize import naive_min_max_quantize
 from ai_edge_quantizer.utils import calibration_utils
 from litert_converter.tools import model_utils as mu
 
-_MODEL_PATH = flags.DEFINE_string(
+
+def _define_flag(define_fn, name, *args, **kwargs):
+  try:
+    return define_fn(name, *args, **kwargs)
+  except flags.DuplicateFlagError:
+    return flags.FLAGS[name]
+
+
+_INPUT_LITERTLM = _define_flag(
+    flags.DEFINE_string,
+    'input_litertlm',
+    None,
+    'Optional path to input .litertlm file.',
+)
+_OUTPUT_LITERTLM = _define_flag(
+    flags.DEFINE_string,
+    'output_litertlm',
+    None,
+    'Optional path to output .litertlm file.',
+)
+_EMBEDDER_MODEL_PATH = _define_flag(
+    flags.DEFINE_string,
+    'embedder_model_path',
+    None,
+    'Optional path to unquantized embedder model for bundling.',
+)
+_PLE_MODEL_PATH = _define_flag(
+    flags.DEFINE_string,
+    'ple_model_path',
+    None,
+    'Optional path to unquantized per-layer embedder model for bundling.',
+)
+_SPM_PATH = _define_flag(
+    flags.DEFINE_string,
+    'spm_path',
+    None,
+    'Optional path to SentencePiece tokenizer (.model) for bundling.',
+)
+_TRANSFORMERS_MODEL_PATH = _define_flag(
+    flags.DEFINE_string,
+    'transformers_model_path',
+    None,
+    'Optional path to HuggingFace tokenizer directory or file for bundling.',
+)
+
+_MODEL_PATH = _define_flag(
+    flags.DEFINE_string,
     'model_path',
     None,
     'Path to the unquantized TFLite model.',
-    required=True,
 )
-_CALIBRATION_PATH = flags.DEFINE_string(
+_CALIBRATION_PATH = _define_flag(
+    flags.DEFINE_string,
     'calibration_path',
     None,
     'Path to the calibration results JSON file.',
-    required=True,
 )
-_OUTPUT_PATH = flags.DEFINE_string(
+_OUTPUT_PATH = _define_flag(
+    flags.DEFINE_string,
     'output_path',
     None,
     'Path to save the quantized TFLite model.',
-    required=True,
 )
-_A16W8 = flags.DEFINE_bool(
+_A16W8 = _define_flag(
+    flags.DEFINE_bool,
     'a16w8',
     False,
     'Whether to use 16-bit activation quantization.',
 )
-_ALIGN_KV_CACHE = flags.DEFINE_bool(
+_ALIGN_KV_CACHE = _define_flag(
+    flags.DEFINE_bool,
     'align_kv_cache',
     True,
     'Whether to align KV cache quantization parameters.',
 )
-_ALLOW_FLOAT_OPERATIONS = flags.DEFINE_bool(
+_ALLOW_FLOAT_OPERATIONS = _define_flag(
+    flags.DEFINE_bool,
     'allow_float_operations',
     True,
     'Whether to allow float operations (e.g. RMS Norm, residual ADD) in the'
     ' quantized model.',
 )
-_SKIP_MLIR_PASSES = flags.DEFINE_bool(
+_SKIP_MLIR_PASSES = _define_flag(
+    flags.DEFINE_bool,
     'skip_mlir_passes',
-    False,
+    True,
     'Whether to skip post-quantization MLIR graph surgery passes.',
 )
-_KV_CACHE_K_NAME_PATTERN = flags.DEFINE_list(
+_KV_CACHE_K_NAME_PATTERN = _define_flag(
+    flags.DEFINE_list,
     'kv_cache_k_name_pattern',
     ['kv_cache_k_{}', 'kv_slice_k_{}'],
     'List of patterns for KV cache K tensor names.',
 )
-_KV_CACHE_V_NAME_PATTERN = flags.DEFINE_list(
+_KV_CACHE_V_NAME_PATTERN = _define_flag(
+    flags.DEFINE_list,
     'kv_cache_v_name_pattern',
     ['kv_cache_v_{}', 'kv_slice_v_{}'],
     'List of patterns for KV cache V tensor names.',
 )
-_AUX_MODEL_PATH = flags.DEFINE_string(
+_AUX_MODEL_PATH = _define_flag(
+    flags.DEFINE_string,
     'aux_model_path',
     None,
     'Optional. Path to the unquantized auxiliary TFLite model.',
 )
-_AUX_CALIBRATION_PATH = flags.DEFINE_string(
+_AUX_CALIBRATION_PATH = _define_flag(
+    flags.DEFINE_string,
     'aux_calibration_path',
     None,
     'Optional. Path to the auxiliary calibration results JSON file.',
 )
-_AUX_OUTPUT_PATH = flags.DEFINE_string(
+_AUX_OUTPUT_PATH = _define_flag(
+    flags.DEFINE_string,
     'aux_output_path',
     None,
     'Optional. Path to save the quantized auxiliary TFLite model.',
 )
-_CALIBRATION_RANGE_SCALE = flags.DEFINE_float(
+_CALIBRATION_RANGE_SCALE = _define_flag(
+    flags.DEFINE_float,
     'calibration_range_scale',
     1.0,
     'Scale factor to apply to the calibration min/max ranges before'
@@ -130,9 +187,11 @@ def _scale_calibration_results(
   return scaled_result
 
 
-def _apply_mlir_passes(quantization_result: Any) -> Any:
+def _apply_mlir_passes(
+    quantization_result: Any, skip_mlir_passes: bool = False
+) -> Any:
   """Applies MLIR QDQ and quantized BMM fusion passes."""
-  if _SKIP_MLIR_PASSES.value:
+  if skip_mlir_passes or _SKIP_MLIR_PASSES.value:
     return quantization_result
 
   print('--- Starting MLIR post-quantization passes...')
@@ -149,9 +208,61 @@ def _apply_mlir_passes(quantization_result: Any) -> Any:
   return quantization_result
 
 
-def main(argv: Sequence[str]) -> None:
-  if len(argv) > 1:
-    raise app.UsageError('Too many command-line arguments.')
+def quantize(
+    input_litertlm: str | None = None,
+    output_litertlm: str | None = None,
+    calibration_path: str | None = None,
+    aux_calibration_path: str | None = None,
+    model_path: str | None = None,
+    output_path: str | None = None,
+    embedder_model_path: str | None = None,
+    aux_model_path: str | None = None,
+    ple_model_path: str | None = None,
+    spm_path: str | None = None,
+    transformers_model_path: str | None = None,
+    a16w8: bool = True,
+    allow_float_operations: bool = False,
+    skip_mlir_passes: bool = True,
+    align_kv_cache: bool = True,
+    calibration_range_scale: float = 1.0,
+    calibration_dir: str | None = None,
+    quantization_recipe: str | None = None,
+    kv_cache_k_name_pattern: list[str] | None = None,
+    kv_cache_v_name_pattern: list[str] | None = None,
+    overwrite: bool = True,
+) -> None:
+  """Applies static range quantization to TFLite / LiteRT-LM models."""
+  if overwrite and output_litertlm and gfile.Exists(output_litertlm):
+    gfile.Remove(output_litertlm)
+  unpacked = {}
+  if input_litertlm:
+    unpack_dir = tempfile.mkdtemp(prefix='litertlm_quant_unpacked_')
+    unpacked = litertlm_utils.unpack_litertlm(input_litertlm, unpack_dir)
+
+  model_path = model_path or unpacked.get('tf_lite_prefill_decode')
+  aux_model_path = aux_model_path or unpacked.get('tf_lite_aux')
+  embedder_path = embedder_model_path or unpacked.get('tf_lite_embedder')
+  ple_path = ple_model_path or unpacked.get('tf_lite_per_layer_embedder')
+  spm_path = spm_path or unpacked.get('SP_Tokenizer')
+  hf_path = transformers_model_path or unpacked.get('transformers_model_path')
+  llm_metadata_path = unpacked.get('LlmMetadataProto') or unpacked.get(
+      'LlmMetadata'
+  )
+
+  if not model_path:
+    raise ValueError('Must specify model_path or input_litertlm.')
+
+  if calibration_dir and os.path.isdir(calibration_dir):
+    for fname in os.listdir(calibration_dir):
+      if fname.endswith('.json'):
+        full_p = os.path.join(calibration_dir, fname)
+        if 'prefill_decode' in fname and not calibration_path:
+          calibration_path = full_p
+        elif 'aux' in fname and not aux_calibration_path:
+          aux_calibration_path = full_p
+
+  if not calibration_path:
+    raise ValueError('Must provide calibration_path or valid calibration_dir.')
 
   print('--- Registering custom INPUT override for embeddings...')
   algorithm_manager.register_quantized_op(
@@ -162,104 +273,149 @@ def main(argv: Sequence[str]) -> None:
       materialize_func=quant_utils.get_custom_materialize_input('.*embeddings'),
   )
 
-  print(f'--- Loading calibration results from: {_CALIBRATION_PATH.value} ...')
+  print(f'--- Loading calibration results from: {calibration_path} ...')
   calibration_result, _ = calibration_utils.load_calibration_results(
-      _CALIBRATION_PATH.value
+      calibration_path
   )
   print(f'Loaded calibration results for {len(calibration_result)} tensors.')
 
-  if _CALIBRATION_RANGE_SCALE.value != 1.0:
+  if calibration_range_scale != 1.0:
     calibration_result = _scale_calibration_results(
-        calibration_result, _CALIBRATION_RANGE_SCALE.value
+        calibration_result, calibration_range_scale
     )
 
   aux_calibration_result = None
-  if _AUX_CALIBRATION_PATH.value:
+  if aux_calibration_path:
     print(
-        '--- Loading aux calibration results from:'
-        f' {_AUX_CALIBRATION_PATH.value} ...'
+        f'--- Loading aux calibration results from: {aux_calibration_path} ...'
     )
     aux_calibration_result, _ = calibration_utils.load_calibration_results(
-        _AUX_CALIBRATION_PATH.value
+        aux_calibration_path
     )
-    if _CALIBRATION_RANGE_SCALE.value != 1.0:
+    if calibration_range_scale != 1.0:
       aux_calibration_result = _scale_calibration_results(
-          aux_calibration_result, _CALIBRATION_RANGE_SCALE.value
+          aux_calibration_result, calibration_range_scale
       )
 
-  if _ALIGN_KV_CACHE.value:
+  if align_kv_cache:
     print('--- Aligning KV cache parameters across models...')
     quant_utils.align_kv_cache_params(
         calibration_results=calibration_result,
-        model_path=_MODEL_PATH.value,
-        kv_cache_k_patterns=_KV_CACHE_K_NAME_PATTERN.value,
-        kv_cache_v_patterns=_KV_CACHE_V_NAME_PATTERN.value,
+        model_path=model_path,
+        kv_cache_k_patterns=kv_cache_k_name_pattern
+        or _KV_CACHE_K_NAME_PATTERN.value,
+        kv_cache_v_patterns=kv_cache_v_name_pattern
+        or _KV_CACHE_V_NAME_PATTERN.value,
         aux_calibration_results=aux_calibration_result,
-        aux_model_path=_AUX_MODEL_PATH.value,
+        aux_model_path=aux_model_path,
     )
 
-  # Quantize Main Model
-  print(f'--- Initializing Quantizer for model: {_MODEL_PATH.value} ...')
-  q = quantizer.Quantizer(_MODEL_PATH.value)
-
-  print(
-      f'--- Adding main model quantization recipe (a16w8={_A16W8.value},'
-      f' allow_float={_ALLOW_FLOAT_OPERATIONS.value}) ...'
-  )
-  q = quant_utils.add_main_model_quant_recipe(
-      q,
-      allow_float_operations=_ALLOW_FLOAT_OPERATIONS.value,
-      a16w8=_A16W8.value,
-  )
+  print(f'--- Initializing Quantizer for model: {model_path} ...')
+  q_main = quantizer.Quantizer(model_path)
+  if quantization_recipe:
+    q_main.load_quantization_recipe(quantization_recipe)
+  else:
+    q_main = quant_utils.add_main_model_quant_recipe(
+        q_main,
+        allow_float_operations=allow_float_operations,
+        a16w8=a16w8,
+    )
 
   print('--- Running main model quantization...')
-  quantization_result = q.quantize(calibration_result)
+  quantization_result = q_main.quantize(calibration_result)
 
-  # Run MLIR post-quantization passes
-  quantization_result = _apply_mlir_passes(quantization_result)
+  if not skip_mlir_passes:
+    quantization_result = _apply_mlir_passes(
+        quantization_result, skip_mlir_passes=skip_mlir_passes
+    )
 
-  output_dir = os.path.dirname(_OUTPUT_PATH.value)
+  output_path = output_path or (
+      output_litertlm + '.intermediate.tflite'
+      if output_litertlm
+      else model_path + '.quantized.tflite'
+  )
+  output_dir = os.path.dirname(output_path)
   if output_dir and not os.path.exists(output_dir):
     os.makedirs(output_dir, exist_ok=True)
 
-  print(f'--- Exporting quantized model to: {_OUTPUT_PATH.value} ...')
-  quantization_result.export_model(_OUTPUT_PATH.value, overwrite=True)
+  print(f'--- Exporting quantized model to: {output_path} ...')
+  quantization_result.export_model(output_path, overwrite=True)
 
-  # Quantize Aux Model if provided
-  if (
-      _AUX_MODEL_PATH.value
-      and _AUX_OUTPUT_PATH.value
-      and aux_calibration_result is not None
-  ):
-    print(
-        f'--- Initializing Quantizer for aux model: {_AUX_MODEL_PATH.value} ...'
-    )
-    q_aux = quantizer.Quantizer(_AUX_MODEL_PATH.value)
-
-    print(
-        f'--- Adding aux model quantization recipe (a16w8={_A16W8.value},'
-        f' allow_float={_ALLOW_FLOAT_OPERATIONS.value}) ...'
-    )
-    q_aux = quant_utils.add_main_model_quant_recipe(
-        q_aux,
-        allow_float_operations=_ALLOW_FLOAT_OPERATIONS.value,
-        a16w8=_A16W8.value,
-    )
+  aux_output_path = None
+  if aux_model_path and aux_calibration_result:
+    print(f'--- Initializing Quantizer for aux model: {aux_model_path} ...')
+    q_aux = quantizer.Quantizer(aux_model_path)
+    if quantization_recipe:
+      q_aux.load_quantization_recipe(quantization_recipe)
+    else:
+      q_aux = quant_utils.add_main_model_quant_recipe(
+          q_aux,
+          allow_float_operations=allow_float_operations,
+          a16w8=a16w8,
+      )
 
     print('--- Running aux model quantization...')
     aux_quantization_result = q_aux.quantize(aux_calibration_result)
+    aux_quantization_result = _apply_mlir_passes(
+        aux_quantization_result, skip_mlir_passes=skip_mlir_passes
+    )
 
-    # Run MLIR post-quantization passes for aux model
-    aux_quantization_result = _apply_mlir_passes(aux_quantization_result)
-
-    aux_output_dir = os.path.dirname(_AUX_OUTPUT_PATH.value)
+    aux_output_path = (
+        output_litertlm + '.aux_intermediate.tflite'
+        if output_litertlm
+        else aux_model_path + '.quantized.tflite'
+    )
+    aux_output_dir = os.path.dirname(aux_output_path)
     if aux_output_dir and not os.path.exists(aux_output_dir):
       os.makedirs(aux_output_dir, exist_ok=True)
 
-    print(f'--- Exporting quantized aux model to: {_AUX_OUTPUT_PATH.value} ...')
-    aux_quantization_result.export_model(_AUX_OUTPUT_PATH.value, overwrite=True)
+    print(f'--- Exporting quantized aux model to: {aux_output_path} ...')
+    aux_quantization_result.export_model(aux_output_path, overwrite=True)
+
+  if output_litertlm:
+    print(f'\n--- Packaging model components into {output_litertlm} ---')
+    litertlm_utils.pack_litertlm(
+        output_litertlm=output_litertlm,
+        model_path=output_path,
+        embedder_model_path=embedder_path,
+        auxiliary_model_path=aux_output_path,
+        ple_model_path=ple_path,
+        spm_path=spm_path,
+        transformers_model_path=hf_path,
+        llm_metadata_path=llm_metadata_path,
+    )
+    print(f'Done packaging {output_litertlm}')
 
   print('--- Quantization completed successfully!')
+
+
+def main(argv: Sequence[str]) -> None:
+  if len(argv) > 1:
+    raise app.UsageError('Too many command-line arguments.')
+
+  if not _MODEL_PATH.value and not _INPUT_LITERTLM.value:
+    raise app.UsageError('Must specify --model_path or --input_litertlm.')
+
+  quantize(
+      input_litertlm=_INPUT_LITERTLM.value,
+      output_litertlm=_OUTPUT_LITERTLM.value,
+      calibration_path=_CALIBRATION_PATH.value,
+      aux_calibration_path=_AUX_CALIBRATION_PATH.value,
+      model_path=_MODEL_PATH.value,
+      output_path=_OUTPUT_PATH.value,
+      embedder_model_path=_EMBEDDER_MODEL_PATH.value,
+      aux_model_path=_AUX_MODEL_PATH.value,
+      ple_model_path=_PLE_MODEL_PATH.value,
+      spm_path=_SPM_PATH.value,
+      transformers_model_path=_TRANSFORMERS_MODEL_PATH.value,
+      a16w8=_A16W8.value,
+      allow_float_operations=_ALLOW_FLOAT_OPERATIONS.value,
+      skip_mlir_passes=_SKIP_MLIR_PASSES.value,
+      align_kv_cache=_ALIGN_KV_CACHE.value,
+      calibration_range_scale=_CALIBRATION_RANGE_SCALE.value,
+      kv_cache_k_name_pattern=_KV_CACHE_K_NAME_PATTERN.value,
+      kv_cache_v_name_pattern=_KV_CACHE_V_NAME_PATTERN.value,
+  )
 
 
 if __name__ == '__main__':

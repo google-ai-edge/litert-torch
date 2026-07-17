@@ -79,6 +79,7 @@ def export(
     output_dir: str,
     task: ExportTask | str = ExportTask.TEXT_GENERATION,
     keep_temporary_files: bool = False,
+    overwrite: bool = True,
     # target_accelerator: str | None = None,
     # TODO(weiyiw): Remove the following flags.
     # pylint: disable=unused-argument

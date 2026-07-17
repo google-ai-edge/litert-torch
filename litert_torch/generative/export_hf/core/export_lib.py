@@ -428,9 +428,28 @@ def maybe_quantize_model(
     quantization_recipe: str | None = None,
 ):
   """Quantizes model if recipe is provided."""
-  if not quantization_recipe:
+  if not quantization_recipe or str(quantization_recipe).strip().lower() in (
+      'none',
+      'null',
+      'false',
+      '',
+  ):
     return model_path
   return quantize_model(model_path, quantization_recipe)
+
+
+def _dynamic_wi8_emb4_afp32():
+  """Local recipe with 4-bit embedding tables and 8-bit fully connected weights."""
+  return recipe_lib.dynamic_wi4c_afp32(
+      operation_name=recipe_lib.TFLOperationName.EMBEDDING_LOOKUP,
+  ) + recipe_lib.dynamic_wi8c_afp32(
+      operation_name=recipe_lib.TFLOperationName.FULLY_CONNECTED,
+  )
+
+
+_LOCAL_QUANTIZATION_RECIPES = {
+    'dynamic_wi8_emb4_afp32': _dynamic_wi8_emb4_afp32,
+}
 
 
 @progress.task('Quantize model')
@@ -447,6 +466,8 @@ def quantize_model(
   try:
     if quantization_recipe.endswith('.json'):
       recipe = quantization_recipe
+    elif quantization_recipe in _LOCAL_QUANTIZATION_RECIPES:
+      recipe = _LOCAL_QUANTIZATION_RECIPES[quantization_recipe]()
     else:
       recipe = recipe_lib.__dict__[quantization_recipe]()
     qt.load_quantization_recipe(recipe)
