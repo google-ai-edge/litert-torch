@@ -79,11 +79,11 @@ class TflSamplingExecutorConfig:
 
   early_terminate_suffix: str | None = None
   stop_token: int | None = None
+  stop_tokens: set[int] | None = None
   enable_calibration: bool = False
   enable_min_max_calibration_update: bool = True
   ema_smoothing_factor: float = 0.95
   use_profiler_based_calibration: bool = False
-
 
 
 def load_model(
@@ -621,16 +621,23 @@ class Executor:
     sampled_tokens = np.concatenate(
         [decode_state.sampled_tokens, next_token_ids], axis=-1
     )
-    done = self.tokenizer.eos_id in next_token_ids
+    stop_ids = set(getattr(self.tokenizer, 'stop_token_ids', ()))
+    try:
+      stop_ids.add(self.tokenizer.eos_id)
+    except ValueError:
+      pass
+    if self.config.stop_tokens:
+      stop_ids.update(self.config.stop_tokens)
+    if self.config.stop_token is not None:
+      stop_ids.add(self.config.stop_token)
+
+    done = any(int(tid) in stop_ids for tid in next_token_ids.flatten())
 
     current_tokens = sampled_tokens.tolist()[0]
     current_output = self.tokenizer.detokenize_internal(current_tokens)
     if (
         self.config.early_terminate_suffix is not None
         and current_output.endswith(self.config.early_terminate_suffix)
-    ) or (
-        self.config.stop_token is not None
-        and current_tokens[-1] == self.config.stop_token
     ):
       done = True
     if self.stream_output:
@@ -686,6 +693,7 @@ class Executor:
     if self.stream_output:
       print()
 
+    print('SAMPLED NUMERIC TOKEN IDS:', decode_state.sampled_tokens.tolist())
     return [
         self.tokenizer.detokenize_internal(x)
         for x in decode_state.sampled_tokens.tolist()

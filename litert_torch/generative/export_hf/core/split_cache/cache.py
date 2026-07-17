@@ -277,7 +277,15 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
     )
     keys = torch.zeros(k_cache_shape, dtype=torch.float32)
     values = torch.zeros(v_cache_shape, dtype=torch.float32)
-    return cls((keys, None), (values, None), **kwargs)
+    init_kwargs = dict(kwargs)
+    init_kwargs.setdefault("batch_size", export_config.batch_size)
+    init_kwargs.setdefault("k_ts_idx", export_config.k_ts_idx)
+    init_kwargs.setdefault("v_ts_idx", export_config.v_ts_idx)
+    return cls(
+        (keys, None),
+        (values, None),
+        **init_kwargs,
+    )
 
 
 @cache_base_lib.register_cache_implementation
