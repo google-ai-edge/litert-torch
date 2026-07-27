@@ -59,11 +59,248 @@ try:
   Gemma4VisionEncoder = modeling_gemma4.Gemma4VisionEncoder
   Gemma4VisionPatchEmbedder = modeling_gemma4.Gemma4VisionPatchEmbedder
   Gemma4VisionPooler = modeling_gemma4.Gemma4VisionPooler
+
+  class FusedGemma4TextMLP(torch.nn.Module):
+    """Fused Gate + Up MLP layer for Gemma4."""
+
+    def __init__(self, original_mlp: modeling_gemma4.Gemma4TextMLP):
+      super().__init__()
+      self.gate_proj = original_mlp.gate_proj
+      self.up_proj = original_mlp.up_proj
+      self.down_proj = original_mlp.down_proj
+      self.act_fn = original_mlp.act_fn
+
+      # Fuse gate and up projections
+      gate_out_features = self.gate_proj.out_features
+      up_out_features = self.up_proj.out_features
+
+      self.gate_up_proj = torch.nn.Linear(
+          self.gate_proj.in_features,
+          gate_out_features + up_out_features,
+          bias=self.gate_proj.bias is not None,
+      )
+
+      # Copy weights and biases
+      with torch.no_grad():
+        self.gate_up_proj.weight.copy_(
+            torch.cat([self.gate_proj.weight, self.up_proj.weight], dim=0)
+        )
+        if self.gate_up_proj.bias is not None:
+          self.gate_up_proj.bias.copy_(
+              torch.cat([self.gate_proj.bias, self.up_proj.bias], dim=0)
+          )
+
+      self.gate_size = gate_out_features
+
+    def forward(self, x):
+      gate_up = self.gate_up_proj(x)
+      gate, up = gate_up.split(
+          [self.gate_size, gate_up.shape[-1] - self.gate_size], dim=-1
+      )
+      return self.down_proj(self.act_fn(gate) * up)
+
+  class FusedGemma4TextAttention(torch.nn.Module):
+    """Fused Attention layer for Gemma4 (Q + K + V)."""
+
+    def __init__(
+        self,
+        original_attn: modeling_gemma4.Gemma4TextAttention,
+        fuse_qkv: bool = False,
+    ):
+      super().__init__()
+      self.o_proj = original_attn.o_proj
+      self.q_norm = original_attn.q_norm
+
+      self.config = original_attn.config
+      self.layer_idx = original_attn.layer_idx
+      self.head_dim = original_attn.head_dim
+      self.num_key_value_groups = original_attn.num_key_value_groups
+      self.scaling = original_attn.scaling
+      self.attention_dropout = original_attn.attention_dropout
+      self.is_causal = original_attn.is_causal
+      self.sliding_window = original_attn.sliding_window
+      self.is_sliding = original_attn.is_sliding
+      self.use_alternative_attention = original_attn.use_alternative_attention
+      self.is_kv_shared_layer = original_attn.is_kv_shared_layer
+      self.store_full_length_kv = original_attn.store_full_length_kv
+      self.layer_type = original_attn.layer_type
+
+      self.fuse_qkv = fuse_qkv and not self.is_kv_shared_layer
+
+      self.q_proj = original_attn.q_proj
+
+      if not self.is_kv_shared_layer:
+        self.k_norm = original_attn.k_norm
+        self.v_norm = original_attn.v_norm
+        self.k_proj = original_attn.k_proj
+        self.v_proj = original_attn.v_proj
+
+        if self.fuse_qkv:
+          q_out_features = self.q_proj.out_features
+          k_out_features = self.k_proj.out_features
+          v_out_features = (
+              self.v_proj.out_features if self.v_proj is not None else 0
+          )
+
+          self.qkv_proj = torch.nn.Linear(
+              self.q_proj.in_features,
+              q_out_features + k_out_features + v_out_features,
+              bias=self.q_proj.bias is not None,
+          )
+
+          # Copy weights and biases
+          with torch.no_grad():
+            tensors_to_cat = [self.q_proj.weight, self.k_proj.weight]
+            if self.v_proj is not None:
+              tensors_to_cat.append(self.v_proj.weight)
+            self.qkv_proj.weight.copy_(torch.cat(tensors_to_cat, dim=0))
+
+            if self.qkv_proj.bias is not None:
+              biases_to_cat = [self.q_proj.bias, self.k_proj.bias]
+              if self.v_proj is not None:
+                biases_to_cat.append(self.v_proj.bias)
+              self.qkv_proj.bias.copy_(torch.cat(biases_to_cat, dim=0))
+
+          self.q_size = q_out_features
+          self.k_size = k_out_features
+          self.v_size = v_out_features
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        shared_kv_states: dict[str, tuple[torch.Tensor, torch.Tensor]],
+        past_key_values=None,
+        **kwargs,
+    ):
+      input_shape = hidden_states.shape[:-1]
+      hidden_shape = (*input_shape, -1, self.head_dim)
+      cos, sin = position_embeddings
+
+      if self.is_kv_shared_layer:
+        query_states = self.q_proj(hidden_states).view(hidden_shape)
+        query_states = self.q_norm(query_states)
+        query_states = modeling_gemma4.apply_rotary_pos_emb(
+            query_states, cos, sin, unsqueeze_dim=2
+        )
+        query_states = query_states.transpose(1, 2)
+
+        key_states, value_states = shared_kv_states[self.layer_type]
+        key_states = key_states.to(query_states.device)
+        value_states = value_states.to(query_states.device)
+      else:
+        if self.fuse_qkv:
+          qkv = self.qkv_proj(hidden_states)
+          if self.v_proj is not None:
+            q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+          else:
+            q, k = qkv.split([self.q_size, self.k_size], dim=-1)
+            v = k
+        else:
+          q = self.q_proj(hidden_states)
+          k = self.k_proj(hidden_states)
+          v = self.v_proj(hidden_states) if self.v_proj is not None else k
+
+        query_states = q.view(hidden_shape)
+        query_states = self.q_norm(query_states)
+        query_states = modeling_gemma4.apply_rotary_pos_emb(
+            query_states, cos, sin, unsqueeze_dim=2
+        )
+        query_states = query_states.transpose(1, 2)
+
+        key_states = k.view(hidden_shape)
+        key_states = self.k_norm(key_states)
+        key_states = modeling_gemma4.apply_rotary_pos_emb(
+            key_states, cos, sin, unsqueeze_dim=2
+        )
+        key_states = key_states.transpose(1, 2)
+
+        value_states = self.v_norm(v.view(hidden_shape))
+        value_states = value_states.transpose(1, 2)
+
+      if past_key_values is not None and not self.is_kv_shared_layer:
+        key_states, value_states = past_key_values.update(
+            key_states, value_states, self.layer_idx
+        )
+      if self.store_full_length_kv:
+        shared_kv_states[self.layer_type] = key_states, value_states
+
+      attention_interface = (
+          modeling_gemma4.ALL_ATTENTION_FUNCTIONS.get_interface(
+              self.config._attn_implementation,
+              modeling_gemma4.eager_attention_forward,
+          )
+      )
+      attn_output, attn_weights = attention_interface(
+          self,
+          query_states,
+          key_states,
+          value_states,
+          attention_mask,
+          dropout=self.attention_dropout if self.training else 0.0,
+          scaling=self.scaling,
+          sliding_window=self.sliding_window,
+          **kwargs,
+      )
+
+      attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+      attn_output = self.o_proj(attn_output)
+      return attn_output, attn_weights
+
+  @patches_lib.register_model_patch(["gemma4"])
+  @contextlib.contextmanager
+  def patch_gemma4_model(model, export_config):
+    """Dynamic model patch for Gemma4 export."""
+    fuse_gate_up = export_config.fuse_gate_up
+    fuse_qkv = export_config.fuse_qkv
+    print(
+        f"Gemma4 model patch applied. fuse_gate_up={fuse_gate_up},"
+        f" fuse_qkv={fuse_qkv}"
+    )
+
+    replaced_modules = []
+
+    def replace_modules(module):
+      for child_name, child in module.named_children():
+        if fuse_gate_up and isinstance(child, modeling_gemma4.Gemma4TextMLP):
+          print(f"Fusing MLP: {child_name}")
+          fused = FusedGemma4TextMLP(child)
+          setattr(module, child_name, fused)
+          replaced_modules.append((module, child_name, child))
+        elif isinstance(child, modeling_gemma4.Gemma4TextAttention):
+          if fuse_qkv:
+            print(f"Replacing Attention: {child_name} (fuse_qkv={fuse_qkv})")
+            fused = FusedGemma4TextAttention(child, fuse_qkv=fuse_qkv)
+            setattr(module, child_name, fused)
+            replaced_modules.append((module, child_name, child))
+        else:
+          replace_modules(child)
+
+    replace_modules(model)
+    try:
+      yield
+    finally:
+      for module, name, original in reversed(replaced_modules):
+        setattr(module, name, original)
+
+
 except ImportError:
   Gemma4VisionEncoder = torch.nn.Module
   Gemma4VisionPatchEmbedder = torch.nn.Module
   Gemma4VisionPooler = torch.nn.Module
   Gemma4TextModel = torch.nn.Module
+
+  class FusedGemma4TextMLP(torch.nn.Module):
+    pass
+
+  class FusedGemma4TextAttention(torch.nn.Module):
+    pass
+
+  @patches_lib.register_model_patch(["gemma4"])
+  @contextlib.contextmanager
+  def patch_gemma4_model(model, export_config):
+    yield
 
 
 class LiteRTGemma4VisionPatchEmbedder(Gemma4VisionPatchEmbedder):

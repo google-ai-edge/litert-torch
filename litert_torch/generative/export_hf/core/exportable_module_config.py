@@ -63,6 +63,8 @@ class ExportableModuleConfig:
   experimental_use_fp16: bool = False
   export_vision_encoder: bool = True
   export_audio_encoder: bool = True
+  fuse_gate_up: bool = False
+  fuse_qkv: bool = False
   input_sec: float = 1.0
   # If >= 0, the model runs in stateful mode after this many tokens.
   stateful_after: int = -1

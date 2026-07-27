@@ -43,9 +43,167 @@ class Gemma3RMSNorm(torch.nn.Module):
     return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
+class FusedGemma3MLP(torch.nn.Module):
+  """Fused Gate + Up MLP layer."""
+
+  def __init__(self, original_mlp: modeling_gemma3.Gemma3MLP):
+    super().__init__()
+    self.gate_proj = original_mlp.gate_proj
+    self.up_proj = original_mlp.up_proj
+    self.down_proj = original_mlp.down_proj
+    self.act_fn = original_mlp.act_fn
+
+    # Fuse gate and up projections
+    gate_out_features = self.gate_proj.out_features
+    up_out_features = self.up_proj.out_features
+
+    self.gate_up_proj = torch.nn.Linear(
+        self.gate_proj.in_features,
+        gate_out_features + up_out_features,
+        bias=self.gate_proj.bias is not None,
+    )
+
+    # Copy weights and biases
+    with torch.no_grad():
+      self.gate_up_proj.weight.copy_(
+          torch.cat([self.gate_proj.weight, self.up_proj.weight], dim=0)
+      )
+      if self.gate_up_proj.bias is not None:
+        self.gate_up_proj.bias.copy_(
+            torch.cat([self.gate_proj.bias, self.up_proj.bias], dim=0)
+        )
+
+    self.gate_size = gate_out_features
+
+  def forward(self, x):
+    gate_up = self.gate_up_proj(x)
+    gate, up = gate_up.split(
+        [self.gate_size, gate_up.shape[-1] - self.gate_size], dim=-1
+    )
+    return self.down_proj(self.act_fn(gate) * up)
+
+
+class FusedGemma3Attention(torch.nn.Module):
+  """Fused Attention layer (Q + K + V)."""
+
+  def __init__(
+      self,
+      original_attn: modeling_gemma3.Gemma3Attention,
+      fuse_qkv: bool = False,
+  ):
+    super().__init__()
+    self.o_proj = original_attn.o_proj
+    self.q_norm = original_attn.q_norm
+    self.k_norm = original_attn.k_norm
+
+    self.config = original_attn.config
+    self.layer_idx = original_attn.layer_idx
+    self.head_dim = original_attn.head_dim
+    self.num_key_value_groups = original_attn.num_key_value_groups
+    self.scaling = original_attn.scaling
+    self.attention_dropout = original_attn.attention_dropout
+    self.is_causal = original_attn.is_causal
+    self.attn_logit_softcapping = original_attn.attn_logit_softcapping
+    self.sliding_window = original_attn.sliding_window
+    self.is_sliding = original_attn.is_sliding
+
+    self.fuse_qkv = fuse_qkv
+
+    self.q_proj = original_attn.q_proj
+    self.k_proj = original_attn.k_proj
+    self.v_proj = original_attn.v_proj
+
+    if self.fuse_qkv:
+      q_out_features = self.q_proj.out_features
+      k_out_features = self.k_proj.out_features
+      v_out_features = self.v_proj.out_features
+
+      self.qkv_proj = torch.nn.Linear(
+          self.q_proj.in_features,
+          q_out_features + k_out_features + v_out_features,
+          bias=self.q_proj.bias is not None,
+      )
+
+      # Copy weights and biases
+      with torch.no_grad():
+        self.qkv_proj.weight.copy_(
+            torch.cat(
+                [self.q_proj.weight, self.k_proj.weight, self.v_proj.weight],
+                dim=0,
+            )
+        )
+        if self.qkv_proj.bias is not None:
+          self.qkv_proj.bias.copy_(
+              torch.cat(
+                  [self.q_proj.bias, self.k_proj.bias, self.v_proj.bias], dim=0
+              )
+          )
+
+      self.q_size = q_out_features
+      self.k_size = k_out_features
+      self.v_size = v_out_features
+
+  def forward(
+      self,
+      hidden_states: torch.Tensor,
+      position_embeddings: torch.Tensor = None,
+      attention_mask: torch.Tensor | None = None,
+      past_key_values=None,
+      **kwargs,
+  ):
+    if self.fuse_qkv:
+      qkv = self.qkv_proj(hidden_states)
+      q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+    else:
+      q = self.q_proj(hidden_states)
+      k = self.k_proj(hidden_states)
+      v = self.v_proj(hidden_states)
+
+    input_shape = hidden_states.shape[:-1]
+
+    query_states = q.view(*input_shape, -1, self.head_dim).transpose(1, 2)
+    key_states = k.view(*input_shape, -1, self.head_dim).transpose(1, 2)
+    value_states = v.view(*input_shape, -1, self.head_dim).transpose(1, 2)
+
+    query_states = self.q_norm(query_states)
+    key_states = self.k_norm(key_states)
+
+    cos, sin = position_embeddings
+    query_states, key_states = modeling_gemma3.apply_rotary_pos_emb(
+        query_states, key_states, cos, sin
+    )
+
+    if past_key_values is not None:
+      key_states, value_states = past_key_values.update(
+          key_states, value_states, self.layer_idx
+      )
+
+    attention_interface = modeling_gemma3.ALL_ATTENTION_FUNCTIONS.get_interface(
+        self.config._attn_implementation,  # pylint: disable=protected-access
+        modeling_gemma3.eager_attention_forward,
+    )
+
+    attn_output, attn_weights = attention_interface(
+        self,
+        query_states,
+        key_states,
+        value_states,
+        attention_mask,
+        dropout=self.attention_dropout if self.training else 0.0,
+        scaling=self.scaling,
+        sliding_window=self.sliding_window,
+        **kwargs,
+    )
+
+    attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+    attn_output = self.o_proj(attn_output)
+    return attn_output, attn_weights
+
+
 @patches_lib.register_patch(["gemma3", "gemma3_text"])
 @contextlib.contextmanager
 def gemma3_litert_patch():
+  """Gemma3 patch."""
   print("Gemma3 patch applied.")
   original_norm = modeling_gemma3.Gemma3RMSNorm
   modeling_gemma3.Gemma3RMSNorm = Gemma3RMSNorm  # pyrefly: ignore[bad-assignment]
@@ -54,3 +212,40 @@ def gemma3_litert_patch():
     yield
   finally:
     modeling_gemma3.Gemma3RMSNorm = original_norm
+
+
+@patches_lib.register_model_patch(["gemma3", "gemma3_text"])
+@contextlib.contextmanager
+def patch_gemma3_model(model, export_config):
+  """Dynamic model patch for Gemma3 export."""
+  fuse_gate_up = export_config.fuse_gate_up
+  fuse_qkv = export_config.fuse_qkv
+  print(
+      f"Gemma3 model patch applied. fuse_gate_up={fuse_gate_up},"
+      f" fuse_qkv={fuse_qkv}"
+  )
+
+  replaced_modules = []
+
+  def replace_modules(module):
+    for child_name, child in module.named_children():
+      if fuse_gate_up and isinstance(child, modeling_gemma3.Gemma3MLP):
+        print(f"Fusing MLP: {child_name}")
+        fused = FusedGemma3MLP(child)
+        setattr(module, child_name, fused)
+        replaced_modules.append((module, child_name, child))
+      elif isinstance(child, modeling_gemma3.Gemma3Attention):
+        if fuse_qkv:
+          print(f"Replacing Attention: {child_name} (fuse_qkv={fuse_qkv})")
+          fused = FusedGemma3Attention(child, fuse_qkv=fuse_qkv)
+          setattr(module, child_name, fused)
+          replaced_modules.append((module, child_name, child))
+      else:
+        replace_modules(child)
+
+  replace_modules(model)
+  try:
+    yield
+  finally:
+    for module, name, original in reversed(replaced_modules):
+      setattr(module, name, original)
