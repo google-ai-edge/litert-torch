@@ -17,6 +17,9 @@ on:
       run-on-macos:
         type: boolean
         default: false
+permissions:
+  contents: read
+
 jobs:
   prepare-matrix:
     runs-on: ubuntu-latest
@@ -40,13 +43,14 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
         os: ${{ fromJson(needs.prepare-matrix.outputs.os) }}
     runs-on: ${{ matrix.os }}
-    container: ${{ matrix.os == 'linux-x86-n2-16' && 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest' || null }}
+    container: ${{ matrix.os == 'linux-x86-n2-16' && 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d # latest' || null }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
         with:
           ref: ${{ inputs.trigger-sha }}
+          persist-credentials: false
 
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@0ae58361cdfd39e2950bed97a1e26aa20c3d8955 # v4
         with:
           python-version: ${{ matrix.python-version }}
 

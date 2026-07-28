@@ -1,0 +1,40 @@
+name: Zizmor Security Scan
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - '.github/workflows/**'
+  pull_request:
+    branches: ["main"]
+    paths:
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+jobs:
+  zizmor:
+    name: Run Zizmor Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
+
+      - name: Run Zizmor
+        run: uvx zizmor --format sarif .github/workflows > zizmor-results.sarif
+
+      - name: Upload SARIF file
+        if: always()
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
+        with:
+          sarif_file: zizmor-results.sarif
+          category: zizmor

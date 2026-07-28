@@ -4,6 +4,7 @@
    * [Code Formatting](./CONTRIBUTING.md#code-formatting)
 * [Contributor License Agreement](./CONTRIBUTING.md#contributor-license-agreement)
 * [Community Guidelines](./CONTRIBUTING.md#community-guidelines)
+* [Security Guidelines](./CONTRIBUTING.md#security-guidelines)
 * [Code Contribution Guidelines](./CONTRIBUTING.md#code-contribution-guidelines)
 
 <!-- Created by https://github.com/ekalinin/github-markdown-toc -->
@@ -52,6 +53,15 @@ bash ./format.sh
 
 This project follows [Google's Open Source Community
 Guidelines](https://opensource.google/conduct/).
+
+# Security Guidelines
+
+To maintain the security of our CI/CD pipelines, we use [Zizmor](https://github.com/woodruffw/zizmor) for static analysis of GitHub Actions workflows.
+
+When contributing changes to GitHub workflows (`.github/workflows/*.yml`):
+- Ensure all workflows pass Zizmor security scans.
+- Address any findings related to unpinned actions, script injections, or excessive permissions.
+- Workflow modifications may require review and approval from the infrastructure or security team.
 
 # Code Contribution Guidelines
 

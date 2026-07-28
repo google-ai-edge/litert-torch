@@ -1,3 +1,4 @@
+# zizmor: ignore[unpinned-images]
 # YAML schema for GitHub Actions:
 # https://help.github.com/en/actions/automating-your-workflow-with-github-actions/workflow-syntax-for-github-actions
 #
@@ -14,6 +15,14 @@ on:
       trigger-sha:
         required: true
         type: string
+    secrets:
+      PYTORCH_BENCHMARK_REPO:
+        required: true
+      PYTORCH_BENCHMARK_REPO_READER:
+        required: true
+
+permissions:
+  contents: read
 
 jobs:
   test-model-coverage:
@@ -23,20 +32,22 @@ jobs:
     runs-on:
       labels: linux-x86-n2-16
     container:
-      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d # latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
         with:
           ref: ${{ inputs.trigger-sha }}
+          persist-credentials: false
 
       - name: Checkout benchmark repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
         with:
           repository: ${{ secrets.PYTORCH_BENCHMARK_REPO }}
           path: ${{ github.workspace }}/benchmark
           token: ${{ secrets.PYTORCH_BENCHMARK_REPO_READER }}
+          persist-credentials: false
 
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@0ae58361cdfd39e2950bed97a1e26aa20c3d8955 # v4
         with:
           python-version: ${{ matrix.python-version }}
 

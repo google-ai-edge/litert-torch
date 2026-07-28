@@ -13,6 +13,9 @@ on:
 env:
   RUN_LARGE_TESTS: true
 
+permissions:
+  contents: read
+
 jobs:
   run-unittests-python:
     if: |

@@ -10,6 +10,9 @@ on:
 
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
 jobs:
   run-model-coverage:
     if: |
@@ -18,6 +21,8 @@ jobs:
 
     name: Model Coverage (nightly)
     uses: ./.github/workflows/model_coverage.yml
-    secrets: inherit
+    secrets:
+      PYTORCH_BENCHMARK_REPO: ${{ secrets.PYTORCH_BENCHMARK_REPO }}
+      PYTORCH_BENCHMARK_REPO_READER: ${{ secrets.PYTORCH_BENCHMARK_REPO_READER }}
     with:
       trigger-sha: ${{ github.sha }}

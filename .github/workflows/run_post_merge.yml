@@ -9,11 +9,16 @@ on:
       - 'main'
       - 'releases/**'
 
+permissions:
+  contents: read
+
 jobs:
   run-model-coverage:
     name: Model Coverage
     uses: ./.github/workflows/model_coverage.yml
-    secrets: inherit
+    secrets:
+      PYTORCH_BENCHMARK_REPO: ${{ secrets.PYTORCH_BENCHMARK_REPO }}
+      PYTORCH_BENCHMARK_REPO_READER: ${{ secrets.PYTORCH_BENCHMARK_REPO_READER }}
     with:
       trigger-sha: ${{ github.event.after }}
 

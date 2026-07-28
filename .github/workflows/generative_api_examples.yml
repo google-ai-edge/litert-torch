@@ -1,3 +1,4 @@
+# zizmor: ignore[unpinned-images]
 # YAML schema for GitHub Actions:
 # https://help.github.com/en/actions/automating-your-workflow-with-github-actions/workflow-syntax-for-github-actions
 #
@@ -15,18 +16,21 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   check-examples:
     runs-on:
       labels: linux-x86-n2-16
     container:
-      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d # latest
 
     steps:
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@0ae58361cdfd39e2950bed97a1e26aa20c3d8955 # v4
         with:
           python-version: "3.11"
-      - uses: bazel-contrib/setup-bazel@0.8.1
+      - uses: bazel-contrib/setup-bazel@b388b84bb637e50cdae241d0f255670d4bd79f29 # 0.8.1
         with:
           # Avoid downloading Bazel every time.
           bazelisk-cache: true
@@ -34,22 +38,23 @@ jobs:
           disk-cache: false
           # Share repository cache between workflows.
           repository-cache: false
-      - uses: nttld/setup-ndk@v1
+      - uses: nttld/setup-ndk@2817442ee7c3346c1eb7d2ec60263c93206ba14f # v1
         id: setup-ndk
         with:
           ndk-version: r21e
           add-to-path: false
-      - uses: actions/setup-java@v3
+      - uses: actions/setup-java@17f84c3641ba7b8f6deff6309fc4c864478f5d62 # v3
         with:
           java-version: "17"
           distribution: "temurin"
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
       - run: |
           sdkmanager "build-tools;30.0.3" "platform-tools"
           sdkmanager "platforms;android-30" "extras;android;m2repository"
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
         with:
           ref: ${{ inputs.trigger-sha }}
+          persist-credentials: false
       - name: Install python dependencies
         run: |
           pip3 install numpy
