@@ -221,9 +221,10 @@ def load_model(
 
   config._attn_implementation = 'lrt_transposed_attention'  # pylint: disable=protected-access
 
-  config._experts_implementation = export_config.moe_exports_implementation  # pylint: disable=protected-access
-  if hasattr(config, 'text_config'):
-    config.text_config._experts_implementation = export_config.moe_exports_implementation  # pylint: disable=protected-access
+  if export_config.moe_exports_implementation:
+    config._experts_implementation = export_config.moe_exports_implementation  # pylint: disable=protected-access
+    if hasattr(config, 'text_config'):
+      config.text_config._experts_implementation = export_config.moe_exports_implementation  # pylint: disable=protected-access
 
   if task == ExportTask.TEXT_GENERATION:
     auto_model_cls = transformers.AutoModelForCausalLM
