@@ -154,19 +154,27 @@ class FusedGemma3Attention(torch.nn.Module):
       past_key_values=None,
       **kwargs,
   ):
+    input_shape = hidden_states.shape[:-1]
+
     if self.fuse_qkv:
       qkv = self.qkv_proj(hidden_states)
-      q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+      qkv_reshaped = qkv.view(*input_shape, -1, self.head_dim)
+      num_q_heads = self.q_size // self.head_dim
+      num_k_heads = self.k_size // self.head_dim
+      q_view = qkv_reshaped[..., :num_q_heads, :]
+      k_view = qkv_reshaped[..., num_q_heads : num_q_heads + num_k_heads, :]
+      v_view = qkv_reshaped[..., num_q_heads + num_k_heads :, :]
     else:
       q = self.q_proj(hidden_states)
       k = self.k_proj(hidden_states)
       v = self.v_proj(hidden_states)
+      q_view = q.view(*input_shape, -1, self.head_dim)
+      k_view = k.view(*input_shape, -1, self.head_dim)
+      v_view = v.view(*input_shape, -1, self.head_dim)
 
-    input_shape = hidden_states.shape[:-1]
-
-    query_states = q.view(*input_shape, -1, self.head_dim).transpose(1, 2)
-    key_states = k.view(*input_shape, -1, self.head_dim).transpose(1, 2)
-    value_states = v.view(*input_shape, -1, self.head_dim).transpose(1, 2)
+    query_states = q_view.transpose(1, 2)
+    key_states = k_view.transpose(1, 2)
+    value_states = v_view.transpose(1, 2)
 
     query_states = self.q_norm(query_states)
     key_states = self.k_norm(key_states)

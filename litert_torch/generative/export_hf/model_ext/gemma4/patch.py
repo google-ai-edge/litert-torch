@@ -246,21 +246,33 @@ try:
       else:
         if self.fuse_qkv:
           qkv = self.qkv_proj(hidden_states)
+          qkv_reshaped = qkv.view(*input_shape, -1, self.head_dim)
+          num_q_heads = self.q_size // self.head_dim
+          num_k_heads = self.k_size // self.head_dim
+
+          query_states = qkv_reshaped[..., :num_q_heads, :]
+          query_states = self.q_norm(query_states)
+
+          k_view = qkv_reshaped[..., num_q_heads : num_q_heads + num_k_heads, :]
+          key_states = self.k_norm(k_view)
+
           if self.v_proj is not None:
-            q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+            v_view = qkv_reshaped[..., num_q_heads + num_k_heads :, :]
+            value_states = self.v_norm(v_view)
           else:
-            q, k = qkv.split([self.q_size, self.k_size], dim=-1)
-            v = k
+            value_states = self.v_norm(k_view)
         else:
           q = self.q_proj(hidden_states)
           k = self.k_proj(hidden_states)
           v = self.v_proj(hidden_states) if self.v_proj is not None else k
 
-        query_states = q.view(hidden_shape)
-        query_states = self.q_norm(query_states)
+          query_states = q.view(hidden_shape)
+          query_states = self.q_norm(query_states)
 
-        key_states = k.view(hidden_shape)
-        key_states = self.k_norm(key_states)
+          key_states = k.view(hidden_shape)
+          key_states = self.k_norm(key_states)
+
+          value_states = self.v_norm(v.view(hidden_shape))
 
         if getattr(self, "use_rope_composite", False):
           position_ids = kwargs.get("position_ids", None)
@@ -289,7 +301,6 @@ try:
           )
           key_states = key_states.transpose(1, 2)
 
-        value_states = self.v_norm(v.view(hidden_shape))
         value_states = value_states.transpose(1, 2)
 
       if past_key_values is not None and not self.is_kv_shared_layer:
