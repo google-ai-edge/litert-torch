@@ -147,6 +147,7 @@ def transposed_attention(
     )
 
   apply_gpu_composites = kwargs.get("apply_gpu_composites", False)
+  use_custom_op = kwargs.get("sdpa_use_custom_op", True)
   if apply_gpu_composites:
     is_global = kwargs.get("is_global", None)
     if is_global is None:
@@ -164,6 +165,7 @@ def transposed_attention(
         softcap=softcap,
         param_tensor=kwargs.get("param_tensor", None),
         is_global=is_global,
+        use_custom_op=use_custom_op,
     )
     # b, kg, t, h
     sdpa_out = sdpa_out.reshape(b, -1, seq_len, h).permute(0, 2, 1, 3)
