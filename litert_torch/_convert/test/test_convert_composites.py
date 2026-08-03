@@ -17,11 +17,17 @@
 from collections.abc import Callable
 
 import litert_torch
+from litert_torch.quantize import pt2e_quantizer
+from litert_torch.quantize.quant_config import QuantConfig
 from litert_torch.testing import model_coverage
+import numpy as np
 import parameterized
 import torch
+from torch import nn
+from torchao.quantization.pt2e import quantize_pt2e
 
 from absl.testing import absltest as googletest
+from ai_edge_litert import interpreter as tfl_interpreter
 
 
 def _func_to_torch_module(func: Callable[..., torch.Tensor]):
@@ -92,6 +98,44 @@ class TestConvertComposites(googletest.TestCase):
             edge_model, torch_module, tracing_args
         )
     )
+
+  def test_convert_adaptive_avg_pool2d_pt2e_static(self):
+    class ConvAdaptivePoolConv(nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.pre = nn.Conv2d(3, 4, 1)
+        self.post = nn.Conv2d(4, 5, 1)
+
+      def forward(self, x):
+        return self.post(torch.nn.functional.adaptive_avg_pool2d(
+            self.pre(x), (1, 1)
+        ))
+
+    args = (torch.randn(1, 3, 4, 4),)
+    quantizer = pt2e_quantizer.PT2EQuantizer().set_global(
+        pt2e_quantizer.get_symmetric_quantization_config(is_per_channel=True)
+    )
+    model = torch.export.export(ConvAdaptivePoolConv().eval(), args).module()
+    model = quantize_pt2e.prepare_pt2e(model, quantizer)
+    for _ in range(4):
+      model(torch.randn_like(args[0]))
+    model = quantize_pt2e.convert_pt2e(model, fold_quantize=False)
+
+    edge_model = litert_torch.convert(
+        model, args, quant_config=QuantConfig(pt2e_quantizer=quantizer)
+    )
+    interpreter = tfl_interpreter.Interpreter(
+        model_content=edge_model.model_content()
+    )
+    interpreter.allocate_tensors()
+    op_names = [op["op_name"] for op in interpreter._get_ops_details()]
+
+    self.assertIn("AVERAGE_POOL_2D", op_names)
+    self.assertNotIn("DEQUANTIZE", op_names)
+    self.assertNotIn("SUM", op_names)
+    self.assertEqual(interpreter.get_input_details()[0]["dtype"], np.int8)
+    self.assertEqual(interpreter.get_output_details()[0]["dtype"], np.int8)
 
   @parameterized.parameterized.expand([
       # use scale_factor with align_corners=False

@@ -136,6 +136,20 @@ class TestBuildAtenCompositePass(googletest.TestCase):
     )
     self.assertEqual(stablehlo.count('stablehlo.custom_call @mark_tensor'), 2)
 
+  def test_adaptive_avg_pool2d_exactly_representable(self):
+    stablehlo = _export_to_stablehlo_with_composite(
+        lambda x: torch.nn.functional.adaptive_avg_pool2d(x, (2, 2)),
+        (torch.rand(1, 3, 4, 6),),
+    )
+    self.assertEqual(stablehlo.count('stablehlo.custom_call @mark_tensor'), 2)
+
+  def test_adaptive_avg_pool2d_non_divisible_is_not_a_composite(self):
+    stablehlo = _export_to_stablehlo_with_composite(
+        lambda x: torch.nn.functional.adaptive_avg_pool2d(x, (2, 2)),
+        (torch.rand(1, 3, 5, 6),),
+    )
+    self.assertEqual(stablehlo.count('stablehlo.custom_call @mark_tensor'), 0)
+
   def test_gelu_layer(self):
     stablehlo = _export_to_stablehlo_with_composite(
         lambda x: torch.nn.GELU()(x), (torch.rand(10, 10),)  # pylint: disable=unnecessary-lambda

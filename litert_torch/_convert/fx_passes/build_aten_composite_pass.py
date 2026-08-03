@@ -250,6 +250,58 @@ def _aten_avg_pool2d(_: torch.fx.GraphModule, node: torch.fx.Node):
   node.target = avg_pool2d
 
 
+@_register_composite_builder(torch.ops.aten.adaptive_avg_pool2d.default)
+@_register_composite_builder(torch.ops.aten._adaptive_avg_pool2d.default)
+def _aten_adaptive_avg_pool2d(_: torch.fx.GraphModule, node: torch.fx.Node):
+  """Build an avg-pool composite for exactly representable adaptive pooling."""
+  op = node.target
+  args_mapper = TorchOpArgumentsMapper(op)
+
+  def adaptive_avg_pool2d(*args, **kwargs):
+    nonlocal op, args_mapper
+
+    full_kwargs = args_mapper.get_full_kwargs(args, kwargs)
+    input_tensor = full_kwargs["self"]
+    try:
+      input_size = [int(size) for size in input_tensor.shape[-2:]]
+      output_size = [int(size) for size in full_kwargs["output_size"]]
+    except (RuntimeError, TypeError, ValueError):
+      return op(*args, **kwargs)
+
+    # Adaptive pooling is exactly a fixed VALID average pool only when every
+    # input spatial dimension divides evenly into its requested output size.
+    # Leave all other cases to the existing general adaptive-pool lowering.
+    if (
+        len(input_size) != 2
+        or len(output_size) != 2
+        or any(size <= 0 for size in input_size + output_size)
+        or any(
+            input % output for input, output in zip(input_size, output_size)
+        )
+    ):
+      return op(*args, **kwargs)
+
+    kernel_size = [
+        input // output for input, output in zip(input_size, output_size)
+    ]
+    builder = backend.composite.StableHLOCompositeBuilder(
+        "aten.avg_pool2d.default",
+        attr=_tree_map_to_composite_attr_values({
+            "kernel_size": kernel_size,
+            "stride": kernel_size,
+            "padding": [0, 0],
+            "ceil_mode": False,
+            "count_include_pad": True,
+            "divisor_override": None,
+        }),
+    )
+    full_kwargs["self"] = builder.mark_inputs(input_tensor)
+    output = op(**full_kwargs)
+    return builder.mark_outputs(output)
+
+  node.target = adaptive_avg_pool2d
+
+
 @_register_composite_builder(torch.ops.aten.embedding.default)
 def _aten_embedding(gm: torch.fx.GraphModule, node: torch.fx.Node):
   op = node.target
