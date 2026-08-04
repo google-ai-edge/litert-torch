@@ -134,11 +134,6 @@ def get_model_config_v3() -> cfg.ModelConfig:
   https://huggingface.co/HuggingFaceTB/SmolLM3-3B.
   """
   norm_config = cfg.NormalizationConfig(type=cfg.NormalizationType.RMS_NORM)
-  ff_config = cfg.FeedForwardConfig(
-      type=cfg.FeedForwardType.GATED,
-      activation=cfg.ActivationConfig(cfg.ActivationType.SILU),
-      intermediate_size=11008,
-  )
   num_layers = 36
   # SmolLM3 disables RoPE on every 4th layer (NoPE). True = apply RoPE,
   # False = NoPE. Layers 3, 7, ..., 35 are NoPE.
@@ -152,6 +147,11 @@ def get_model_config_v3() -> cfg.ModelConfig:
         rotary_base=5000000,
         rotary_percentage=1.0,
         enable_rope=use_rope[idx],
+    )
+    ff_config = cfg.FeedForwardConfig(
+        type=cfg.FeedForwardType.GATED,
+        activation=cfg.ActivationConfig(cfg.ActivationType.SILU),
+        intermediate_size=11008,
     )
     return cfg.TransformerBlockConfig(
         attn_config=attn_config,
@@ -175,9 +175,9 @@ def get_fake_model_config_v3() -> cfg.ModelConfig:
   config.vocab_size = 128
   # Keep a full NoPE period (layers 0-3; layer 3 is a NoPE layer).
   config.num_layers = 4
-  config.block_configs = config.block_configs[:4]
-  for i in range(config.num_layers):
-    config.block_config(i).ff_config.intermediate_size = 64
+  config.block_configs = config.block_configs[: config.num_layers]
+  for block_config in config.block_configs:
+    block_config.ff_config.intermediate_size = 64
   return config
 
 

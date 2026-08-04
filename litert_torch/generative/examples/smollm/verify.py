@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Verifies the reauthored SmolLM-135M model."""
+"""Verifies the reauthored SmolLM model."""
 
 from absl import app
 from absl import flags
@@ -33,12 +33,13 @@ _MAX_NEW_TOKENS = flags.DEFINE_integer(
 _MODEL_VERSION = flags.DEFINE_enum(
     "model_version",
     "v1",
-    ["v1", "v2"],
+    ["v1", "v2", "v3"],
     "The version of SmolLm to verify.",
 )
 _CHECKPOINT = {
     "v1": "HuggingFaceTB/SmolLM-135M-Instruct",
     "v2": "HuggingFaceTB/SmolLM2-135M-Instruct",
+    "v3": "HuggingFaceTB/SmolLM3-3B",
 }
 
 
