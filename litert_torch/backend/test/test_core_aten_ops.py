@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+import re
+import sys
+
 import litert_torch
 from litert_torch import backend
 import numpy as np
@@ -335,8 +338,10 @@ class TestCoreAtenOps(parameterized.TestCase):
       ("aten_pixel_shuffle_0", torch.ops.aten.pixel_shuffle, (rnd(torch.float32, (1, 3, 10, 10)), 1,), dict()),
       ("aten_pixel_shuffle_1", torch.ops.aten.pixel_shuffle, (rnd(torch.float32, (1, 12, 10, 10)), 2,), dict()),
       ("aten_pixel_shuffle_2", torch.ops.aten.pixel_shuffle, (rnd(torch.float32, (2, 18, 5, 7)), 3,), dict()),
+      ("aten_pixel_shuffle_3", torch.ops.aten.pixel_shuffle, (rnd(torch.float32, (12, 10, 10)), 2,), dict()),
       ("aten_pixel_unshuffle_0", torch.ops.aten.pixel_unshuffle, (rnd(torch.float32, (1, 3, 10, 10)), 2,), dict()),
       ("aten_pixel_unshuffle_1", torch.ops.aten.pixel_unshuffle, (rnd(torch.float32, (2, 2, 15, 21)), 3,), dict()),
+      ("aten_pixel_unshuffle_2", torch.ops.aten.pixel_unshuffle, (rnd(torch.float32, (3, 10, 10)), 2,), dict()),
       ("aten_prelu_0", torch.ops.aten.prelu, (rnd(torch.float32, (1, 8, 5, 5), -1.0, 1.0), rnd(torch.float32, (8,)),), dict()),
       ("aten_prelu_1", torch.ops.aten.prelu, (rnd(torch.float32, (10, 10), -1.0, 1.0), rnd(torch.float32, (1,)),), dict()),
       ("aten_pow_Scalar_0", torch.ops.aten.pow.Scalar, (1.123, rnd(torch.float32, (10, 10)),), dict()),
@@ -382,6 +387,8 @@ class TestCoreAtenOps(parameterized.TestCase):
       ("aten_slice_Tensor_1", torch.ops.aten.slice.Tensor, (rnd(torch.float32, (10, 10)), 1, 0, 9, 2), dict()),
       ("aten_slice_Tensor_2", torch.ops.aten.slice.Tensor, (rnd(torch.float32, (2, 5, 10, 10)), 2, 1, None, 2), dict()),
       ("aten_slice_Tensor_3", torch.ops.aten.slice.Tensor, (rnd(torch.float32, (10, 10)), 0, -8, -1, 3), dict()),
+      ("aten_slice_Tensor_4", torch.ops.aten.slice.Tensor, (rnd(torch.float32, (10, 10)), 1, 0, sys.maxsize, 2), dict()),
+      ("aten_slice_Tensor_5", torch.ops.aten.slice.Tensor, (rnd(torch.float32, (2, 5, 10, 10)), 2, None, sys.maxsize, 2), dict()),
       ("aten_slice_copy_Tensor_1", torch.ops.aten.slice_copy.Tensor, (rnd(torch.float32, (10, 10)), 1, 0, 10, 2), dict()),
       ("aten__softmax_0", torch.ops.aten._softmax, (rnd(torch.float32, (10, 10)), 1, False,), dict()),
       ("aten_split_copy_Tensor_0", torch.ops.aten.split_copy.Tensor, (rnd(torch.float32, (10, 10)), 2,), dict()),
@@ -423,6 +430,32 @@ class TestCoreAtenOps(parameterized.TestCase):
   )
   def test_lowering_op(self, op, args, kwargs):
     self._run_export_and_compare(op, args, kwargs)
+
+  @parameterized.named_parameters(
+      # fmt: off
+      # pyformat: disable
+      ("prelu", torch.ops.aten.prelu, (rnd(torch.float32, (1, 8, 5, 5), -1.0, 1.0), rnd(torch.float32, (8,)),), dict()),
+      ("pixel_shuffle", torch.ops.aten.pixel_shuffle, (rnd(torch.float32, (1, 12, 10, 10)), 2,), dict()),
+      ("pixel_unshuffle", torch.ops.aten.pixel_unshuffle, (rnd(torch.float32, (1, 3, 10, 10)), 2,), dict()),
+      ("slice_step2", torch.ops.aten.slice.Tensor, (rnd(torch.float32, (1, 4, 10, 10)), 2, 0, sys.maxsize, 2), dict()),
+      # fmt: on
+      # pyformat: enable
+  )
+  def test_gpu_clean_lowering(self, op, args, kwargs):
+    """Asserts these ops lower to forms the TFLite GPU delegate accepts.
+
+    The lowered module must contain no op that legalizes to TFLite GATHER_ND
+    (stablehlo.gather), GREATER (stablehlo.compare), or SELECT
+    (stablehlo.select), and no tensor of rank greater than 4.
+    """
+    ep, args, kwargs = export_without_scalar_inputs(op, args, kwargs)
+    lowered = backend.export.exported_program_to_mlir(ep)
+    text = lowered.get_text()
+    for bad_op in ("stablehlo.gather", "stablehlo.compare", "stablehlo.select"):
+      self.assertNotIn(bad_op, text)
+    for shape_str in re.findall(r"tensor<([^>]*)>", text):
+      rank = len(re.findall(r"(?:\d+|\?)x", shape_str))
+      self.assertLessEqual(rank, 4, f"tensor<{shape_str}> exceeds rank 4")
 
   @googletest.skip("wip jax lowering")
   def test_aten_native_batch_norm_legit(self):

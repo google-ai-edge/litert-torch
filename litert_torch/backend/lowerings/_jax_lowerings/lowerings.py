@@ -19,6 +19,7 @@ import logging
 
 import jax
 import jax.numpy as jnp
+from litert_torch.backend import export_utils
 from litert_torch.backend import jax_bridge
 from litert_torch.backend.lowerings import context
 from litert_torch.backend.lowerings import registry
@@ -425,41 +426,6 @@ def _aten_max_pool3d_with_indices(
   return y, jnp.zeros_like(y, dtype=jnp.int64)
 
 
-@lower_by_jax(torch.ops.aten.pixel_shuffle)
-def _aten_pixel_shuffle(x, upscale_factor):
-  """PixelShuffle implementation in JAX lowering.
-
-  Args:
-    x: Input tensor. Typically a feature map.
-    upscale_factor: Integer by which to upscale the spatial dimensions.
-
-  Returns:
-    Tensor after PixelShuffle operation.
-  """
-
-  batch_size, channels, height, width = x.shape
-
-  if channels % (upscale_factor**2) != 0:
-    raise ValueError(
-        "Number of channels must be divisible by the square of the upscale"
-        " factor."
-    )
-
-  new_channels = channels // (upscale_factor**2)
-  new_height = height * upscale_factor
-  new_width = width * upscale_factor
-
-  x = x.reshape(
-      batch_size, new_channels, upscale_factor, upscale_factor, height, width
-  )
-  x = jnp.transpose(
-      x, (0, 1, 4, 2, 5, 3)
-  )  # Move channels to spatial dimensions
-  x = x.reshape(batch_size, new_channels, new_height, new_width)
-
-  return x
-
-
 # torchax implements aten.slice with jnp basic indexing, whose step > 1 path
 # lowers to gather (TFLite GATHER_ND), which the GPU delegate rejects. Emit
 # jax.lax.slice (TFLite STRIDED_SLICE) for static strided slices instead and
@@ -473,8 +439,15 @@ def _aten_slice(self, dim=0, start=None, end=None, step=1):
   if dim < 0:
     dim += len(self.shape)
   dim_size = self.shape[dim]
+  # A dynamic dimension reaches this lowering as export_utils.IR_DYNAMIC,
+  # which is a plain int, so isinstance alone cannot prove staticness.
+  # jax.lax.slice also needs concrete bounds for every dimension (not just
+  # the sliced one), so require the full shape to be static.
   static = (
-      isinstance(dim_size, int)
+      all(
+          isinstance(d, int) and not export_utils.is_ir_dynamic(d)
+          for d in self.shape
+      )
       and isinstance(step, int)
       and (start is None or isinstance(start, int))
       and (end is None or isinstance(end, int))
