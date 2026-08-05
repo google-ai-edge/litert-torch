@@ -47,7 +47,7 @@ jobs:
           token: ${{ secrets.PYTORCH_BENCHMARK_REPO_READER }}
           persist-credentials: false
 
-      - uses: actions/setup-python@0ae58361cdfd39e2950bed97a1e26aa20c3d8955 # v4
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
         with:
           python-version: ${{ matrix.python-version }}
 
