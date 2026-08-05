@@ -43,7 +43,7 @@ jobs:
         with:
           ndk-version: r21e
           add-to-path: false
-      - uses: actions/setup-java@17f84c3641ba7b8f6deff6309fc4c864478f5d62 # v3
+      - uses: actions/setup-java@e9fbacdec3bb3b6036605a3e6f7995d66773a8c6 # v3
         with:
           java-version: "17"
           distribution: "temurin"
