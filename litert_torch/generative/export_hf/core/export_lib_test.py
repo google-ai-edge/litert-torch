@@ -18,11 +18,12 @@ import json
 import os
 import shutil
 import tempfile
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
-
 from litert_torch.generative.export_hf.core import export_lib
+from litert_torch.generative.export_hf.core import litert_lm_builder
 
 
 class ExportLibTest(parameterized.TestCase):
@@ -191,6 +192,71 @@ class ExportLibTest(parameterized.TestCase):
           enable_dynamic_shape=True,
           enable_gpu_dynamic_cache=True,
       )
+
+  @mock.patch(
+      "litert_torch.generative.export_hf.core.litert_lm_builder.build_llm_metadata"
+  )
+  @mock.patch(
+      "litert_torch.generative.export_hf.core.litert_lm_builder.litertlm_builder.LitertLmFileBuilder"
+  )
+  def test_package_model_system_metadata(
+      self, mock_builder_cls, mock_build_llm_metadata
+  ):
+    mock_builder = mock_builder_cls.return_value
+    mock_llm_metadata = mock.MagicMock()
+    mock_llm_metadata.SerializeToString.return_value = b"dummy"
+    mock_build_llm_metadata.return_value = mock_llm_metadata
+
+    tokenizer_path = os.path.join(self.test_dir, "tokenizer.json")
+    with open(tokenizer_path, "w") as f:
+      f.write("{}")
+
+    model_path = os.path.join(self.test_dir, "model.tflite")
+    with open(model_path, "w") as f:
+      f.write("")
+
+    source_model_artifacts = mock.MagicMock()
+    source_model_artifacts.tokenizer = mock.MagicMock()
+    del source_model_artifacts.tokenizer.bos_token
+    del source_model_artifacts.tokenizer.eos_token
+
+    export_config = export_lib.exportable_module_config.ExportableModuleConfig(
+        model="dummy_model",
+        work_dir=self.test_dir,
+        output_dir=self.test_dir,
+        litert_lm_system_metadata={
+            "force_enable_ynnpack": True,
+            "some_string": "value",
+        },
+    )
+    exported_model_artifacts = export_lib.ExportedModelArtifacts(
+        tokenizer_model_path=tokenizer_path,
+        prefill_decode_model_path=model_path,
+    )
+
+    with mock.patch(
+        "litert_torch.generative.export_hf.model_ext.metadata_builder.get_executor_metadata_builder",
+        return_value=None,
+    ):
+      litert_lm_builder.package_model(
+          source_model_artifacts,
+          export_config,
+          exported_model_artifacts,
+      )
+
+    calls = mock_builder.add_system_metadata.call_args_list
+    self.assertEqual(len(calls), 3)
+
+    self.assertEqual(calls[0][0][0].key, "Authors")
+    self.assertEqual(calls[0][0][0].value, "ODML")
+
+    self.assertEqual(calls[1][0][0].key, "force_enable_ynnpack")
+    self.assertEqual(calls[1][0][0].value, True)
+    self.assertEqual(calls[1][0][0].dtype.value, "bool")
+
+    self.assertEqual(calls[2][0][0].key, "some_string")
+    self.assertEqual(calls[2][0][0].value, "value")
+    self.assertEqual(calls[2][0][0].dtype.value, "string")
 
 
 if __name__ == "__main__":

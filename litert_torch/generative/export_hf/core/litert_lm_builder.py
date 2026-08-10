@@ -395,6 +395,27 @@ def package_model(
           dtype=litertlm_builder.DType.STRING,
       )
   )
+  if export_config.litert_lm_system_metadata:
+    for key, value in export_config.litert_lm_system_metadata.items():
+      if isinstance(value, bool):
+        dtype = litertlm_builder.DType.BOOL
+      elif isinstance(value, int):
+        dtype = litertlm_builder.DType.INT32
+      elif isinstance(value, float):
+        dtype = litertlm_builder.DType.FLOAT32
+      elif isinstance(value, str):
+        dtype = litertlm_builder.DType.STRING
+      else:
+        raise ValueError(
+            f'Unsupported metadata value type: {type(value)} for key {key}'
+        )
+      builder.add_system_metadata(
+          litertlm_builder.Metadata(
+              key=key,
+              value=value,
+              dtype=dtype,
+          )
+      )
   builder.add_llm_metadata(llm_metadata_path)
   if executor_metadata_path:
     builder.add_executor_metadata(executor_metadata_path)

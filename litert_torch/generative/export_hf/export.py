@@ -109,6 +109,7 @@ def export(
     stateful_after: int | None = None,
     litert_lm_model_type_override: str | None = None,
     litert_lm_llm_metadata_override: str | None = None,
+    litert_lm_system_metadata: dict[str, Any] | None = None,
     sampler_top_p: float | None = None,
     sampler_temperature: float | None = None,
     sampler_top_k: int | None = None,
@@ -171,6 +172,7 @@ def export(
       tokens.
     litert_lm_model_type_override: Overriding the LiteRT LM model type.
     litert_lm_llm_metadata_override: Overriding the LiteRT LM LLM metadata.
+    litert_lm_system_metadata: System metadata to add to the LiteRT LM file.
     aot_backend: The backend to use for AOT compilation.
     aot_soc_model: The SoC model to use for AOT compilation.
     aot_compilation_config_dict: The configuration dictionary for AOT
