@@ -86,7 +86,7 @@ def ensure_tflite_models_exist(export_dir: str, model_id: str, cache_length: int
       with open(_LLM_METADATA_OVERRIDE_PATH.value, "r") as f:
         override_pbtext = f.read()
     else:
-      override_pbtext = f"""start_token {{
+      override_pbtext = f"""pad_token {{
   token_str: "<|endoftext|>"
 }}
 stop_tokens {{

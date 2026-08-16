@@ -138,6 +138,21 @@ def build_llm_metadata(
     else:
       llm_metadata.start_token.token_str = str(tokenizer.bos_token)
 
+  pad_token = getattr(tokenizer, 'pad_token', None)
+  pad_token_id = getattr(tokenizer, 'pad_token_id', None)
+  if pad_token:
+    if isinstance(pad_token, int):
+      llm_metadata.pad_token.token_ids.ids.append(pad_token)
+    elif isinstance(pad_token, str):
+      llm_metadata.pad_token.token_str = pad_token
+    else:
+      llm_metadata.pad_token.token_str = str(pad_token)
+  elif pad_token_id is not None:
+    if isinstance(pad_token_id, int):
+      llm_metadata.pad_token.token_ids.ids.append(pad_token_id)
+    elif isinstance(pad_token_id, str):
+      llm_metadata.pad_token.token_str = pad_token_id
+
   stop_tokens = set()
   gen_config = getattr(model, 'generation_config', None)
   has_eos_token_id = False

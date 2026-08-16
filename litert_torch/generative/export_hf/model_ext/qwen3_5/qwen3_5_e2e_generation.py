@@ -19,12 +19,12 @@ from collections.abc import Sequence
 
 from absl import app
 from absl import flags
+from litert_torch.generative.export_hf.core.export_lib import SourceModelArtifacts
+from litert_torch.generative.export_hf.core.exportable_module_config import ExportableModuleConfig
+from litert_torch.generative.export_hf.model_ext.qwen3_5 import exportable_module as qwen3_5_exportable
 import torch
 from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer
-
-from litert_torch.generative.export_hf.core.exportable_module_config import ExportableModuleConfig
-from litert_torch.generative.export_hf.model_ext.qwen3_5 import exportable_module as qwen3_5_exportable
 
 
 _MODEL_ID = flags.DEFINE_string(
@@ -61,176 +61,187 @@ def run_e2e_generation(
     prefill_chunk_size: int = 128,
     cache_length: int = 1280,
 ) -> None:
-    print(f"Loading tokenizer and model from: {model_id}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    assert tokenizer is not None
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        model_id, torch_dtype=torch.float32
+  print(f"Loading tokenizer and model from: {model_id}...")
+  tokenizer = AutoTokenizer.from_pretrained(model_id)
+  assert tokenizer is not None
+  hf_model = AutoModelForCausalLM.from_pretrained(
+      model_id, torch_dtype=torch.float32
+  )
+  hf_model.eval()
+  pad_token_id = getattr(tokenizer, "pad_token_id", 248044) or 248044
+
+  print("Formatting prompt with chat template...")
+  messages = [{"role": "user", "content": prompt}]
+  try:
+    formatted_prompt = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
     )
-    hf_model.eval()
+  except Exception:
+    formatted_prompt = prompt
 
-    print("Formatting prompt with chat template...")
-    messages = [{"role": "user", "content": prompt}]
-    try:
-        formatted_prompt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-    except Exception:
-        formatted_prompt = prompt
+  inputs = tokenizer(formatted_prompt, return_tensors="pt")
+  input_ids = inputs["input_ids"]
+  prompt_len = input_ids.shape[1]
+  print(f"Prompt length: {prompt_len} tokens")
+  if prompt_len > cache_length - max_new_tokens:
+    raise ValueError(
+        f"Prompt length ({prompt_len}) + max_new_tokens ({max_new_tokens})"
+        f" exceeds cache_length ({cache_length})."
+    )
 
-    inputs = tokenizer(formatted_prompt, return_tensors="pt")
-    input_ids = inputs["input_ids"]
-    prompt_len = input_ids.shape[1]
-    print(f"Prompt length: {prompt_len} tokens")
-    if prompt_len > cache_length - max_new_tokens:
-        raise ValueError(
-            f"Prompt length ({prompt_len}) + max_new_tokens ({max_new_tokens})"
-            f" exceeds cache_length ({cache_length})."
-        )
+  # 1. Reference HF Generation
+  print("\n--- [Reference] Running HF Transformers generate ---")
+  with torch.no_grad():
+    hf_gen_ids = hf_model.generate(
+        input_ids, max_new_tokens=max_new_tokens, do_sample=False
+    )
+  hf_text = tokenizer.decode(
+      hf_gen_ids[0, prompt_len:], skip_special_tokens=True
+  )
+  print(f"HF Output ({hf_gen_ids.shape[1] - prompt_len} tokens):\n{hf_text}")
 
-    # 1. Reference HF Generation
-    print("\n--- [Reference] Running HF Transformers generate ---")
+  # 2. Setup LiteRT Static Prefill & Decode Exportable Modules
+  print(
+      "\n--- [LiteRT Exportable] Setting up static prefill"
+      f" ({prefill_chunk_size}) & decode (1) up to cache length"
+      f" {cache_length} ---"
+  )
+  export_config = ExportableModuleConfig(
+      model="qwen3_5",
+      batch_size=1,
+      cache_length=cache_length,
+      prefill_lengths=[prefill_chunk_size],
+      prefill_length_dim=None,  # Pure static shapes
+      cache_implementation="LiteRTLMCache",
+      k_ts_idx=2,
+      v_ts_idx=3,
+  )
+
+  source_artifacts = SourceModelArtifacts(
+      model=hf_model,
+      model_config=hf_model.config,
+      text_model_config=hf_model.config,
+      tokenizer=tokenizer,
+  )
+  prefill_mod = qwen3_5_exportable.LiteRTExportableModuleForQwen3_5Prefill(
+      hf_model, export_config, source_artifacts
+  )
+
+  decode_mod = qwen3_5_exportable.LiteRTExportableModuleForQwen3_5Generate(
+      hf_model, export_config, source_artifacts
+  )
+  assert (
+      prefill_mod.model.config._attn_implementation
+      == "lrt_transposed_attention"
+  )
+  assert (
+      decode_mod.model.config._attn_implementation == "lrt_transposed_attention"
+  )
+
+  # Get sample inputs to initialize static KV cache object
+  sample_prefill = prefill_mod.get_sample_inputs(hf_model.config)[
+      f"prefill_{prefill_chunk_size}"
+  ][0]
+  kv_cache = sample_prefill["kv_cache"]
+
+  # ==========================================
+  # PHASE 1: PREFILLING (Static Chunked Processing)
+  # ==========================================
+  prefill_prompt_len = prompt_len - 1
+  prefill_prompt_ids = input_ids[:, :prefill_prompt_len]
+  print(
+      f"\n--- [Phase 1: Prefill] Processing {prefill_prompt_len} prompt tokens"
+      f" across static chunks of {prefill_chunk_size} ---"
+  )
+  num_chunks = (
+      prefill_prompt_len + prefill_chunk_size - 1
+  ) // prefill_chunk_size
+  for c in range(num_chunks):
+    start_idx = c * prefill_chunk_size
+    end_idx = min(start_idx + prefill_chunk_size, prefill_prompt_len)
+    chunk_slice = prefill_prompt_ids[:, start_idx:end_idx]
+    chunk_len = chunk_slice.shape[1]
+
+    if chunk_len < prefill_chunk_size:
+      tokens = torch.full(
+          (1, prefill_chunk_size),
+          pad_token_id,
+          dtype=input_ids.dtype,
+          device=input_ids.device,
+      )
+      tokens[:, :chunk_len] = chunk_slice
+    else:
+      tokens = chunk_slice
+
+    input_pos = torch.arange(
+        start_idx,
+        start_idx + prefill_chunk_size,
+        dtype=torch.int64,
+        device=input_ids.device,
+    )
+    prefill_mask = qwen3_5_exportable.create_qwen3_5_attention_mask(
+        prefill_chunk_size,
+        cache_length,
+        input_pos,
+        dtype=torch.float32,
+        device=input_ids.device,
+    )
+
     with torch.no_grad():
-        hf_gen_ids = hf_model.generate(
-            input_ids, max_new_tokens=max_new_tokens, do_sample=False
-        )
-    hf_text = tokenizer.decode(
-        hf_gen_ids[0, prompt_len:], skip_special_tokens=True
+      prefill_out = prefill_mod(
+          tokens=tokens,
+          input_pos=input_pos,
+          kv_cache=kv_cache,
+          mask=prefill_mask,
+      )
+      kv_cache = prefill_out["kv_cache"]
+
+  # ==========================================
+  # PHASE 2: DECODING (Autoregressive Static Loop)
+  # ==========================================
+  print(
+      "--- [Phase 2: Decode] Autoregressively generating tokens with static"
+      " decode exportable ---"
+  )
+  eos_token_id = tokenizer.eos_token_id
+
+  curr_token = input_ids[:, -1:]  # Last prompt token starts decode step 0
+  generated_token_ids = []
+
+  for step in range(max_new_tokens):
+    curr_pos = torch.tensor(
+        [prefill_prompt_len + step],
+        dtype=torch.int64,
+        device=input_ids.device,
     )
-    print(f"HF Output ({hf_gen_ids.shape[1] - prompt_len} tokens):\n{hf_text}")
-
-    # 2. Setup LiteRT Static Prefill & Decode Exportable Modules
-    print(
-        f"\n--- [LiteRT Exportable] Setting up static prefill"
-        f" ({prefill_chunk_size}) & decode (1) up to cache length"
-        f" {cache_length} ---"
-    )
-    export_config = ExportableModuleConfig(
-        model="qwen3_5",
-        batch_size=1,
-        cache_length=cache_length,
-        prefill_lengths=[prefill_chunk_size],
-        prefill_length_dim=None,  # Pure static shapes
-        cache_implementation="LiteRTLMCache",
-        k_ts_idx=2,
-        v_ts_idx=3,
+    decode_mask = qwen3_5_exportable.create_qwen3_5_attention_mask(
+        1, cache_length, curr_pos, dtype=torch.float32, device=input_ids.device
     )
 
-    prefill_mod = (
-        qwen3_5_exportable.LiteRTExportableModuleForQwen3_5Prefill(
-            hf_model, export_config
-        )
-    )
-    decode_mod = (
-        qwen3_5_exportable.LiteRTExportableModuleForQwen3_5Generate(
-            hf_model, export_config
-        )
-    )
-    assert prefill_mod.model.config._attn_implementation == "lrt_transposed_attention"
-    assert decode_mod.model.config._attn_implementation == "lrt_transposed_attention"
+    with torch.no_grad():
+      decode_out = decode_mod(
+          tokens=curr_token,
+          input_pos=curr_pos,
+          kv_cache=kv_cache,
+          mask=decode_mask,
+      )
+      kv_cache = decode_out["kv_cache"]
+      logits = decode_out["logits"]
 
-    # Get sample inputs to initialize static KV cache object
-    sample_prefill = prefill_mod.get_sample_inputs(hf_model.config)[
-        f"prefill_{prefill_chunk_size}"
-    ][0]
-    kv_cache = sample_prefill["kv_cache"]
+    next_token_logits = logits[:, -1, :]
+    next_token_id = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+    print(f"next token is {next_token_id.item()} eos token is {eos_token_id}")
+    if next_token_id.item() == eos_token_id:
+      break
+    generated_token_ids.append(next_token_id.item())
+    curr_token = next_token_id
 
-    pad_token_id = getattr(tokenizer, "pad_token_id", 248044) or 248044
-
-    # ==========================================
-    # PHASE 1: PREFILLING (Static Chunked Processing)
-    # ==========================================
-    prefill_prompt_len = prompt_len - 1
-    prefill_prompt_ids = input_ids[:, :prefill_prompt_len]
-    print(
-        f"\n--- [Phase 1: Prefill] Processing {prefill_prompt_len} prompt tokens"
-        f" across static chunks of {prefill_chunk_size} ---"
-    )
-    num_chunks = (
-        prefill_prompt_len + prefill_chunk_size - 1
-    ) // prefill_chunk_size
-    for c in range(num_chunks):
-        start_idx = c * prefill_chunk_size
-        end_idx = min(start_idx + prefill_chunk_size, prefill_prompt_len)
-        chunk_slice = prefill_prompt_ids[:, start_idx:end_idx]
-        chunk_len = chunk_slice.shape[1]
-
-        if chunk_len < prefill_chunk_size:
-            tokens = torch.full(
-                (1, prefill_chunk_size),
-                pad_token_id,
-                dtype=input_ids.dtype,
-                device=input_ids.device,
-            )
-            tokens[:, :chunk_len] = chunk_slice
-        else:
-            tokens = chunk_slice
-
-        input_pos = torch.arange(
-            start_idx,
-            start_idx + prefill_chunk_size,
-            dtype=torch.int64,
-            device=input_ids.device,
-        )
-        prefill_mask = qwen3_5_exportable.create_qwen3_5_attention_mask(
-            prefill_chunk_size, cache_length, input_pos, dtype=torch.float32, device=input_ids.device
-        )
-
-        with torch.no_grad():
-            prefill_out = prefill_mod(
-                tokens=tokens,
-                input_pos=input_pos,
-                kv_cache=kv_cache,
-                mask=prefill_mask,
-            )
-            kv_cache = prefill_out["kv_cache"]
-
-    # ==========================================
-    # PHASE 2: DECODING (Autoregressive Static Loop)
-    # ==========================================
-    print(
-        "--- [Phase 2: Decode] Autoregressively generating tokens with static"
-        " decode exportable ---"
-    )
-    eos_token_id = tokenizer.eos_token_id
-
-    curr_token = input_ids[:, -1:]  # Last prompt token starts decode step 0
-    generated_token_ids = []
-
-    for step in range(max_new_tokens):
-        curr_pos = torch.tensor(
-            [prefill_prompt_len + step],
-            dtype=torch.int64,
-            device=input_ids.device,
-        )
-        decode_mask = qwen3_5_exportable.create_qwen3_5_attention_mask(
-            1, cache_length, curr_pos, dtype=torch.float32, device=input_ids.device
-        )
-
-        with torch.no_grad():
-            decode_out = decode_mod(
-                tokens=curr_token,
-                input_pos=curr_pos,
-                kv_cache=kv_cache,
-                mask=decode_mask,
-            )
-            kv_cache = decode_out["kv_cache"]
-            logits = decode_out["logits"]
-
-        next_token_logits = logits[:, -1, :]
-        next_token_id = torch.argmax(next_token_logits, dim=-1, keepdim=True)
-        if next_token_id.item() == eos_token_id:
-            break
-        generated_token_ids.append(next_token_id.item())
-        curr_token = next_token_id
-
-    export_text = tokenizer.decode(
-        generated_token_ids, skip_special_tokens=True
-    )
-    print(
-        f"\nLiteRT Exportable Output ({len(generated_token_ids)} tokens):\n{export_text}"
-    )
-    print(f"\nExact match with HF output: {export_text == hf_text}")
+  export_text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
+  print(
+      f"\nLiteRT Exportable Output ({len(generated_token_ids)}"
+      f" tokens):\n{export_text}"
+  )
+  print(f"\nExact match with HF output: {export_text == hf_text}")
 
 
 def main(argv: Sequence[str]) -> None:
