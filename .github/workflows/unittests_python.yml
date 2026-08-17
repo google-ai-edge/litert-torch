@@ -20,6 +20,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   prepare-matrix:
     runs-on: ubuntu-latest
@@ -28,9 +32,11 @@ jobs:
     steps:
       - name: Set matrix
         id: set-matrix
+        env:
+          RUN_ON_MACOS: ${{ inputs.run-on-macos }}
         run: |
           os=("linux-x86-n2-16")
-          if [[ "${{ inputs.run-on-macos }}" == "true" ]]; then
+          if [[ "$RUN_ON_MACOS" == "true" ]]; then
             os+=("macos-latest")
           fi
           os=$(jq -c -n '$ARGS.positional' --args "${os[@]}")

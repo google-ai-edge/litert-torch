@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   stale:
     if: |
@@ -21,9 +25,9 @@ jobs:
 
     runs-on: ubuntu-latest
     permissions:
-      issues: write
-      pull-requests: write
-      actions: write
+      issues: write # Required to comment on issues
+      pull-requests: write # Required to update PRs
+      actions: write # Required to manage actions
 
     steps:
     - uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9

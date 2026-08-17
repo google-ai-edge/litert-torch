@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   run-unittests-python:
     if: |
@@ -31,7 +35,7 @@ jobs:
     needs: run-unittests-python
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
+      id-token: write # Required for OIDC authentication
       contents: read
 
     name: Build and Release litert-torch-nightly

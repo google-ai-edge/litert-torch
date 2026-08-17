@@ -16,6 +16,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   run-unittests-python:
     name: Unit Tests Python
@@ -99,7 +103,7 @@ jobs:
     if: success() && inputs.dry_run == false
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
+      id-token: write # Required for OIDC authentication
       contents: read
     steps:
       - name: Download Stable Wheel

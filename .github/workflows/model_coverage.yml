@@ -24,6 +24,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test-model-coverage:
     strategy:
@@ -61,10 +65,14 @@ jobs:
           python -m pip install . --no-cache-dir
 
       - name: Setup benchmark repository
+        env:
+          WORKSPACE: ${{ github.workspace }}
         run: |
-          bash ${{ github.workspace }}/benchmark/ci_litert_torch/ci_setup.sh
+          bash $WORKSPACE/benchmark/ci_litert_torch/ci_setup.sh
 
       - name: Run tests
+        env:
+          WORKSPACE: ${{ github.workspace }}
         run: |
-          cd ${{ github.workspace }}/benchmark
+          cd $WORKSPACE/benchmark
           python -m pytest ci_litert_torch -n 4
