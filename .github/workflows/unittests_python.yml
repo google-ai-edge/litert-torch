@@ -6,9 +6,9 @@
 #
 # This workflow will run nightly or when triggered from PR comment
 
-name: Unit Tests Python # zizmor: ignore[all]
+name: Unit Tests Python
 
-on: # zizmor: ignore[all]
+on:
   workflow_call:
     inputs:
       trigger-sha:
@@ -17,25 +17,25 @@ on: # zizmor: ignore[all]
       run-on-macos:
         type: boolean
         default: false
-permissions: # zizmor: ignore[all]
+permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs: # zizmor: ignore[all]
+jobs:
   prepare-matrix:
-    name: Prepare Matrix # zizmor: ignore[all]
-    runs-on: ubuntu-latest # zizmor: ignore[all]
+    name: Prepare Matrix
+    runs-on: ubuntu-latest
     outputs:
       os: ${{ steps.set-matrix.outputs.os }}
-    steps: # zizmor: ignore[all]
-      - name: Set matrix # zizmor: ignore[all]
+    steps:
+      - name: Set matrix
         id: set-matrix
-        env: # zizmor: ignore[all]
+        env:
           RUN_ON_MACOS: ${{ inputs.run-on-macos }}
-        run: | # zizmor: ignore[all]
+        run: |
           os=("linux-x86-n2-16")
           if [[ "$RUN_ON_MACOS" == "true" ]]; then
             os+=("macos-latest")
@@ -44,35 +44,35 @@ jobs: # zizmor: ignore[all]
           echo "os=${os}"
           echo "os=${os}" >> $GITHUB_OUTPUT
   test:
-    name: Test # zizmor: ignore[all]
+    name: Test
     needs: prepare-matrix
-    strategy: # zizmor: ignore[all]
-      matrix: # zizmor: ignore[all]
+    strategy:
+      matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
         os: ${{ fromJson(needs.prepare-matrix.outputs.os) }}
-    runs-on: ${{ matrix.os }} # zizmor: ignore[all]
-    container: ${{ matrix.os == 'linux-x86-n2-16' && 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d' || '' }} # zizmor: ignore[all]
-    steps: # zizmor: ignore[all]
-      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 # zizmor: ignore[all]
-        with: # zizmor: ignore[all]
+    runs-on: ${{ matrix.os }} # zizmor: ignore[self-hosted-runner]
+    container: ${{ matrix.os == 'linux-x86-n2-16' && 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d' || '' }}
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+        with:
           ref: ${{ inputs.trigger-sha }}
           persist-credentials: false
 
-      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[all]
-        with: # zizmor: ignore[all]
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
+        with:
           python-version: ${{ matrix.python-version }}
 
-      - run: | # zizmor: ignore[all]
+      - run: |
           python -m pip install --upgrade pip setuptools
           python -m pip cache purge
 
-      - name: Install dependencies # zizmor: ignore[all]
-        run: | # zizmor: ignore[all]
+      - name: Install dependencies
+        run: |
           python -m pip install -r dev-requirements.txt
 
-      - name: Run Tests # zizmor: ignore[all]
-        run: | # zizmor: ignore[all]
+      - name: Run Tests
+        run: |
           ./run_tests.sh
-        env: # zizmor: ignore[all]
+        env:
           STABLEHLO_BYTECODE_FROM_PRETTYPRINT: 1
           CI: "true"

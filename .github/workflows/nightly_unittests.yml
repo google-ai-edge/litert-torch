@@ -1,34 +1,34 @@
 # Helpful YAML parser to clarify YAML syntax:
 # https://yaml-online-parser.appspot.com/
 
-name: Unit Tests (nightly) # zizmor: ignore[all]
+name: Unit Tests (nightly)
 
-on: # zizmor: ignore[all]
+on:
   schedule:
     # 10 am UTC is 3am or 4am PT depending on daylight savings.
     - cron: '0 10 * * *'
 
   workflow_dispatch: {}
 
-env: # zizmor: ignore[all]
+env:
   RUN_LARGE_TESTS: true
 
-permissions: # zizmor: ignore[all]
+permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs: # zizmor: ignore[all]
+jobs:
   run-unittests-python:
-    if: | # zizmor: ignore[all]
+    if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' && github.repository == 'google-ai-edge/litert-torch')
 
-    name: Unit Tests Python # zizmor: ignore[all]
-    uses: ./.github/workflows/unittests_python.yml # zizmor: ignore[all]
-    with: # zizmor: ignore[all]
+    name: Unit Tests Python
+    uses: ./.github/workflows/unittests_python.yml
+    with:
       trigger-sha: ${{ github.sha }}
       # TODO(cnchan): Re-enable once the tf-nightly pywrap issue is fixed.
       run-on-macos: false

@@ -1,40 +1,40 @@
 # Helpful YAML parser to clarify YAML syntax:
 # https://yaml-online-parser.appspot.com/
 
-name: Run Post Merge # zizmor: ignore[all]
+name: Run Post Merge
 
-on: # zizmor: ignore[all]
+on:
   push:
     branches:
       - 'main'
       - 'releases/**'
 
-permissions: # zizmor: ignore[all]
+permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs: # zizmor: ignore[all]
+jobs:
   run-model-coverage:
-    name: Model Coverage # zizmor: ignore[all]
-    uses: ./.github/workflows/model_coverage.yml # zizmor: ignore[all]
+    name: Model Coverage
+    uses: ./.github/workflows/model_coverage.yml
     secrets:
       PYTORCH_BENCHMARK_REPO: ${{ secrets.PYTORCH_BENCHMARK_REPO }}
       PYTORCH_BENCHMARK_REPO_READER: ${{ secrets.PYTORCH_BENCHMARK_REPO_READER }}
-    with: # zizmor: ignore[all]
+    with:
       trigger-sha: ${{ github.event.after }}
 
   run-generative-api-examples:
-    name: Generative API Examples # zizmor: ignore[all]
-    uses: ./.github/workflows/generative_api_examples.yml # zizmor: ignore[all]
-    with: # zizmor: ignore[all]
+    name: Generative API Examples
+    uses: ./.github/workflows/generative_api_examples.yml
+    with:
       trigger-sha: ${{ github.event.after }}
 
   run-unittests-python:
-    name: Unit Tests Python # zizmor: ignore[all]
-    uses: ./.github/workflows/unittests_python.yml # zizmor: ignore[all]
-    with: # zizmor: ignore[all]
+    name: Unit Tests Python
+    uses: ./.github/workflows/unittests_python.yml
+    with:
       trigger-sha: ${{ github.event.after }}
       run-on-macos: false

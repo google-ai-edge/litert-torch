@@ -2,103 +2,103 @@
 # Helpful YAML parser to clarify YAML syntax:
 # https://yaml-online-parser.appspot.com/
 
-name: Build and Release (nightly) # zizmor: ignore[all]
+name: Build and Release (nightly)
 
-on: # zizmor: ignore[all]
+on:
   schedule:
     # 10 am UTC is 3am or 4am PT depending on daylight savings.
     - cron: "0 10 * * *"
 
   workflow_dispatch: {}
 
-permissions: # zizmor: ignore[all]
+permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs: # zizmor: ignore[all]
+jobs:
   run-unittests-python:
-    if: | # zizmor: ignore[all]
+    if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' && github.repository == 'google-ai-edge/litert-torch')
 
-    name: Unit Tests Python # zizmor: ignore[all]
-    uses: ./.github/workflows/unittests_python.yml # zizmor: ignore[all]
-    with: # zizmor: ignore[all]
+    name: Unit Tests Python
+    uses: ./.github/workflows/unittests_python.yml
+    with:
       trigger-sha: ${{ github.sha }}
       # TODO(cnchan): Re-enable once the tf-nightly pywrap issue is fixed.
       run-on-macos: false
 
   build-and-release-nightly:
     needs: run-unittests-python
-    runs-on: ubuntu-latest # zizmor: ignore[all]
-    permissions: # zizmor: ignore[all]
-      id-token: write # Required for OIDC authentication
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # Required for OIDC authentication # zizmor: ignore[excessive-permissions]
       contents: read
 
-    name: Build and Release litert-torch-nightly # zizmor: ignore[all]
-    steps: # zizmor: ignore[all]
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 # zizmor: ignore[all]
-        with: # zizmor: ignore[all]
+    name: Build and Release litert-torch-nightly
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
           persist-credentials: false
 
-      - name: Get and set nightly date # zizmor: ignore[all]
+      - name: Get and set nightly date
         id: date
-        run: | # zizmor: ignore[all]
+        run: |
           DATE=$(date +'%Y%m%d')
           echo "NIGHTLY_RELEASE_DATE=${DATE}" >> $GITHUB_ENV
           echo "date=${DATE}" >> $GITHUB_OUTPUT
 
-      - name: Setup Python # zizmor: ignore[all]
-        uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[all]
-        with: # zizmor: ignore[all]
+      - name: Setup Python
+        uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
+        with:
           python-version: "3.11"
 
-      - name: Install python-build and twine # zizmor: ignore[all]
-        run: | # zizmor: ignore[all]
+      - name: Install python-build and twine
+        run: |
           python -m pip install --upgrade pip
           python -m pip install build twine wheel
           python -m pip list
 
-      - name: Build the wheel # zizmor: ignore[all]
-        run: | # zizmor: ignore[all]
+      - name: Build the wheel
+        run: |
           python setup.py bdist_wheel
 
-      - name: Verify the distribution # zizmor: ignore[all]
-        run: twine check --strict dist/* # zizmor: ignore[all]
+      - name: Verify the distribution
+        run: twine check --strict dist/*
 
-      - name: List the contents of litert_torch wheel # zizmor: ignore[all]
-        run: python -m zipfile --list dist/*.whl # zizmor: ignore[all]
+      - name: List the contents of litert_torch wheel
+        run: python -m zipfile --list dist/*.whl
 
-      - name: Upload to PyPI # zizmor: ignore[all]
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1 # zizmor: ignore[all]
+      - name: Upload to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1 # zizmor: ignore[unverified-uses,stale-action-refs]
 
   run-pip-install-and-import-test:
     needs: build-and-release-nightly
-    strategy: # zizmor: ignore[all]
-      matrix: # zizmor: ignore[all]
+    strategy:
+      matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
 
-    name: Test Install and Import litert-torch # zizmor: ignore[all]
-    runs-on: # zizmor: ignore[all]
+    name: Test Install and Import litert-torch
+    runs-on: # zizmor: ignore[self-hosted-runner]
       labels: linux-x86-n2-16
-    container: # zizmor: ignore[all]
+    container:
       image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d # latest
-    steps: # zizmor: ignore[all]
-      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[all]
-        with: # zizmor: ignore[all]
+    steps:
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
+        with:
           python-version: ${{ matrix.python-version }}
 
-      - run: | # zizmor: ignore[all]
+      - run: |
           python -m pip cache purge
           python -m pip install --upgrade pip
 
-      - name: Install litert-torch-nightly # zizmor: ignore[all]
-        run: | # zizmor: ignore[all]
+      - name: Install litert-torch-nightly
+        run: |
           python -m pip install --pre litert-torch-nightly
 
-      - name: Import litert-torch # zizmor: ignore[all]
-        run: | # zizmor: ignore[all]
+      - name: Import litert-torch
+        run: |
           python -c "import litert_torch"

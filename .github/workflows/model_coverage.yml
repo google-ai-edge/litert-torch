@@ -7,9 +7,9 @@
 #
 # This workflow will run nightly or when triggered from PR comment
 
-name: Model Coverage # zizmor: ignore[all]
+name: Model Coverage
 
-on: # zizmor: ignore[all]
+on:
   workflow_call:
     inputs:
       trigger-sha:
@@ -21,59 +21,59 @@ on: # zizmor: ignore[all]
       PYTORCH_BENCHMARK_REPO_READER:
         required: true
 
-permissions: # zizmor: ignore[all]
+permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs: # zizmor: ignore[all]
+jobs:
   test-model-coverage:
-    name: Test Model Coverage # zizmor: ignore[all]
-    strategy: # zizmor: ignore[all]
-      matrix: # zizmor: ignore[all]
+    name: Test Model Coverage
+    strategy:
+      matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
-    runs-on: # zizmor: ignore[all]
+    runs-on: # zizmor: ignore[self-hosted-runner]
       labels: linux-x86-n2-16
-    container: # zizmor: ignore[all]
+    container:
       image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d # latest
-    steps: # zizmor: ignore[all]
-      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 # zizmor: ignore[all]
-        with: # zizmor: ignore[all]
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+        with:
           ref: ${{ inputs.trigger-sha }}
           persist-credentials: false
 
-      - name: Checkout benchmark repository # zizmor: ignore[all]
-        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 # zizmor: ignore[all]
-        with: # zizmor: ignore[all]
+      - name: Checkout benchmark repository
+        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+        with:
           repository: ${{ secrets.PYTORCH_BENCHMARK_REPO }}
           path: ${{ github.workspace }}/benchmark
           token: ${{ secrets.PYTORCH_BENCHMARK_REPO_READER }}
           persist-credentials: false
 
-      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[all]
-        with: # zizmor: ignore[all]
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
+        with:
           python-version: ${{ matrix.python-version }}
 
-      - run: | # zizmor: ignore[all]
+      - run: |
           python -m pip install --upgrade pip setuptools
           python -m pip cache purge
 
-      - name: Install litert-torch # zizmor: ignore[all]
-        run: | # zizmor: ignore[all]
+      - name: Install litert-torch
+        run: |
           python -m pip install -r dev-requirements.txt --force-reinstall
           python -m pip install . --no-cache-dir
 
-      - name: Setup benchmark repository # zizmor: ignore[all]
-        env: # zizmor: ignore[all]
+      - name: Setup benchmark repository
+        env:
           WORKSPACE: ${{ github.workspace }}
-        run: | # zizmor: ignore[all]
+        run: |
           bash $WORKSPACE/benchmark/ci_litert_torch/ci_setup.sh
 
-      - name: Run tests # zizmor: ignore[all]
-        env: # zizmor: ignore[all]
+      - name: Run tests
+        env:
           WORKSPACE: ${{ github.workspace }}
-        run: | # zizmor: ignore[all]
+        run: |
           cd $WORKSPACE/benchmark
           python -m pytest ci_litert_torch -n 4

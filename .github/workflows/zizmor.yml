@@ -1,6 +1,6 @@
-name: Zizmor Security Scan # zizmor: ignore[all]
+name: Zizmor Security Scan
 
-on: # zizmor: ignore[all]
+on:
   push:
     branches: ["main"]
     paths:
@@ -10,36 +10,36 @@ on: # zizmor: ignore[all]
     paths:
       - '.github/workflows/**'
 
-permissions: # zizmor: ignore[all]
+permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs: # zizmor: ignore[all]
+jobs:
   zizmor:
-    name: Run Zizmor Security Scan # zizmor: ignore[all]
-    runs-on: ubuntu-latest # zizmor: ignore[all]
-    permissions: # zizmor: ignore[all]
-      security-events: write # Required to upload SARIF results
+    name: Run Zizmor Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write # Required to upload SARIF results # zizmor: ignore[excessive-permissions]
       contents: read
-    steps: # zizmor: ignore[all]
-      - name: Checkout repository # zizmor: ignore[all]
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 # zizmor: ignore[all]
-        with: # zizmor: ignore[all]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
           persist-credentials: false
 
-      - name: Install zizmor # zizmor: ignore[all]
-        run: pipx install zizmor # zizmor: ignore[all]
+      - name: Install zizmor
+        run: pipx install zizmor
 
-      - name: Run Zizmor # zizmor: ignore[all]
+      - name: Run Zizmor
        
-        run: zizmor --format sarif .github/workflows > zizmor-results.sarif # zizmor: ignore[all]
+        run: zizmor --format sarif .github/workflows > zizmor-results.sarif
 
-      - name: Upload SARIF file # zizmor: ignore[all]
-        if: always() # zizmor: ignore[all]
-        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3 # zizmor: ignore[all]
-        with: # zizmor: ignore[all]
+      - name: Upload SARIF file
+        if: always()
+        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        with:
           sarif_file: zizmor-results.sarif
           category: zizmor

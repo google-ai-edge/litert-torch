@@ -1,29 +1,29 @@
 # Helpful YAML parser to clarify YAML syntax:
 # https://yaml-online-parser.appspot.com/
 
-name: Generative API (nightly) # zizmor: ignore[all]
+name: Generative API (nightly)
 
-on: # zizmor: ignore[all]
+on:
   schedule:
     # 10 am UTC is 3am or 4am PT depending on daylight savings.
     - cron: '0 10 * * *'
 
   workflow_dispatch: {}
 
-permissions: # zizmor: ignore[all]
+permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs: # zizmor: ignore[all]
+jobs:
   run-generative-api-examples:
-    if: | # zizmor: ignore[all]
+    if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' && github.repository == 'google-ai-edge/litert-torch')
 
-    name: Generative API Examples # zizmor: ignore[all]
-    uses: ./.github/workflows/generative_api_examples.yml # zizmor: ignore[all]
-    with: # zizmor: ignore[all]
+    name: Generative API Examples
+    uses: ./.github/workflows/generative_api_examples.yml
+    with:
       trigger-sha: ${{ github.sha }}

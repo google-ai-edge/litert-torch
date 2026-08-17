@@ -1,32 +1,32 @@
 # Helpful YAML parser to clarify YAML syntax:
 # https://yaml-online-parser.appspot.com/
 
-name: Model Coverage (nightly) # zizmor: ignore[all]
+name: Model Coverage (nightly)
 
-on: # zizmor: ignore[all]
+on:
   schedule:
     # 10 am UTC is 3am or 4am PT depending on daylight savings.
     - cron: '0 10 * * *'
 
   workflow_dispatch: {}
 
-permissions: # zizmor: ignore[all]
+permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs: # zizmor: ignore[all]
+jobs:
   run-model-coverage:
-    if: | # zizmor: ignore[all]
+    if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' && github.repository == 'google-ai-edge/litert-torch')
 
-    name: Model Coverage (nightly) # zizmor: ignore[all]
-    uses: ./.github/workflows/model_coverage.yml # zizmor: ignore[all]
+    name: Model Coverage (nightly)
+    uses: ./.github/workflows/model_coverage.yml
     secrets:
       PYTORCH_BENCHMARK_REPO: ${{ secrets.PYTORCH_BENCHMARK_REPO }}
       PYTORCH_BENCHMARK_REPO_READER: ${{ secrets.PYTORCH_BENCHMARK_REPO_READER }}
-    with: # zizmor: ignore[all]
+    with:
       trigger-sha: ${{ github.sha }}

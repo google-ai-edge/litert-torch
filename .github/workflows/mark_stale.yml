@@ -3,36 +3,36 @@
 # You can adjust the behavior by modifying this file.
 # For more information, see:
 # https://github.com/actions/stale
-name: Mark stale issues and pull requests # zizmor: ignore[all]
+name: Mark stale issues and pull requests
 
-on: # zizmor: ignore[all]
+on:
   schedule:
   # Scheduled to run at 1.30 UTC everyday
   - cron: '30 1 * * *'
 
-permissions: # zizmor: ignore[all]
+permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs: # zizmor: ignore[all]
+jobs:
   stale:
-    name: Mark Stale # zizmor: ignore[all]
-    if: | # zizmor: ignore[all]
+    name: Mark Stale
+    if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' && github.repository == 'google-ai-edge/litert-torch')
 
-    runs-on: ubuntu-latest # zizmor: ignore[all]
-    permissions: # zizmor: ignore[all]
-      issues: write # Required to comment on issues # Required to comment on issues
-      pull-requests: write # Required to update PRs # Required to update PRs
-      actions: write # Required to manage actions # Required to manage actions
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write # Required to comment on issues # Required to comment on issues # zizmor: ignore[excessive-permissions]
+      pull-requests: write # Required to update PRs # Required to update PRs # zizmor: ignore[excessive-permissions]
+      actions: write # Required to manage actions # Required to manage actions # zizmor: ignore[excessive-permissions]
 
-    steps: # zizmor: ignore[all]
-    - uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9 # zizmor: ignore[all]
-      with: # zizmor: ignore[all]
+    steps:
+    - uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9
+      with:
         days-before-issue-stale: 7
         days-before-issue-close: 7
         stale-issue-label: "status:stale"
