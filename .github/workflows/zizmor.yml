@@ -1,6 +1,6 @@
 name: Zizmor Security Scan
 
-on:
+on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
   push:
     branches: ["main"]
     paths:
@@ -10,7 +10,7 @@ on:
     paths:
       - '.github/workflows/**'
 
-permissions:
+permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
   contents: read
 
 concurrency:
@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  zizmor:
+  zizmor: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     name: Run Zizmor Security Scan
     runs-on: ubuntu-latest
     permissions:

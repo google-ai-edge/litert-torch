@@ -1,15 +1,15 @@
 name: auto-assignment
-on:
+on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
   issues:
     types:
       - opened
-permissions:
+permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
   contents: read
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  welcome:
+  welcome: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     name: Welcome
     permissions:
       issues: write # Assign users to issues

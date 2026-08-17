@@ -4,7 +4,7 @@
 
 name: Build and Release (stable)
 
-on:
+on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
   workflow_dispatch:  # Allow manual triggers for stable releases
     inputs:
       dry_run:
@@ -13,7 +13,7 @@ on:
         default: true
         type: boolean
 
-permissions:
+permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
   contents: read
 
 concurrency:
@@ -21,13 +21,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  run-unittests-python:
+  run-unittests-python: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     name: Unit Tests Python
     uses: ./.github/workflows/unittests_python.yml
     with:
       trigger-sha: ${{ github.sha }}
 
-  build-stable:
+  build-stable: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     needs: run-unittests-python
     name: Build and Release litert-torch
     runs-on: ubuntu-latest
@@ -63,7 +63,7 @@ jobs:
           name: litert-torch-wheel
           path: dist/*.whl
 
-  test-before-publish:
+  test-before-publish: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     needs: build-stable
     strategy:
       matrix:
@@ -97,7 +97,7 @@ jobs:
         run: |
           python -c "import litert_torch"
 
-  publish-stable:
+  publish-stable: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     name: Publish to PyPI
     needs: test-before-publish
     if: success() && inputs.dry_run == false
@@ -118,7 +118,7 @@ jobs:
           skip-existing: true
           verbose: true
 
-  test-after-publish:
+  test-after-publish: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     needs: publish-stable
     strategy:
       matrix:

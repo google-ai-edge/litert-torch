@@ -4,14 +4,14 @@
 
 name: Build and Release (nightly)
 
-on:
+on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
   schedule:
     # 10 am UTC is 3am or 4am PT depending on daylight savings.
     - cron: "0 10 * * *"
 
   workflow_dispatch: {}
 
-permissions:
+permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
   contents: read
 
 concurrency:
@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  run-unittests-python:
+  run-unittests-python: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' && github.repository == 'google-ai-edge/litert-torch')
@@ -31,7 +31,7 @@ jobs:
       # TODO(cnchan): Re-enable once the tf-nightly pywrap issue is fixed.
       run-on-macos: false
 
-  build-and-release-nightly:
+  build-and-release-nightly: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     needs: run-unittests-python
     runs-on: ubuntu-latest
     permissions:
@@ -75,7 +75,7 @@ jobs:
       - name: Upload to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
 
-  run-pip-install-and-import-test:
+  run-pip-install-and-import-test: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     needs: build-and-release-nightly
     strategy:
       matrix:

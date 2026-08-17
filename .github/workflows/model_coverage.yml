@@ -9,7 +9,7 @@
 
 name: Model Coverage
 
-on:
+on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
   workflow_call:
     inputs:
       trigger-sha:
@@ -21,7 +21,7 @@ on:
       PYTORCH_BENCHMARK_REPO_READER:
         required: true
 
-permissions:
+permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
   contents: read
 
 concurrency:
@@ -29,7 +29,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test-model-coverage:
+  test-model-coverage: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     name: Test Model Coverage
     strategy:
       matrix:

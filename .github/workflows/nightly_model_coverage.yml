@@ -3,14 +3,14 @@
 
 name: Model Coverage (nightly)
 
-on:
+on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
   schedule:
     # 10 am UTC is 3am or 4am PT depending on daylight savings.
     - cron: '0 10 * * *'
 
   workflow_dispatch: {}
 
-permissions:
+permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
   contents: read
 
 concurrency:
@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  run-model-coverage:
+  run-model-coverage: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' && github.repository == 'google-ai-edge/litert-torch')

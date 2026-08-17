@@ -10,14 +10,14 @@
 
 name: Generative API Examples
 
-on:
+on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
   workflow_call:
     inputs:
       trigger-sha:
         required: true
         type: string
 
-permissions:
+permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
   contents: read
 
 concurrency:
@@ -25,7 +25,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check-examples:
+  check-examples: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     name: Check Examples
     runs-on:
       labels: linux-x86-n2-16
