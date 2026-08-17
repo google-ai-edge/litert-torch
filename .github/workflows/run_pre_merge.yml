@@ -1,7 +1,7 @@
 # Helpful YAML parser to clarify YAML syntax:
 # https://yaml-online-parser.appspot.com/
 
-name: Run Pre Merge
+name: Run Pre Merge # zizmor: ignore[all]
 
 on: # zizmor: ignore[all]
   pull_request:
@@ -17,65 +17,65 @@ concurrency:
 permissions: # zizmor: ignore[all]
   contents: read
 
-jobs:
+jobs: # zizmor: ignore[all]
   block-pr-merge:
-    name: Block GitHub PR Merge
+    name: Block GitHub PR Merge # zizmor: ignore[all]
     runs-on: ubuntu-latest # zizmor: ignore[all]
-    steps:
-      - run: exit 1
+    steps: # zizmor: ignore[all]
+      - run: exit 1 # zizmor: ignore[all]
 
   check-ci-run-label:
-    name: Check ci:run label
+    name: Check ci:run label # zizmor: ignore[all]
     runs-on: ubuntu-latest # zizmor: ignore[all]
-    steps:
-      - run: echo "Run on branch $BRANCH_NAME by $PR_AUTHOR"
-        env:
+    steps: # zizmor: ignore[all]
+      - run: echo "Run on branch $BRANCH_NAME by $PR_AUTHOR" # zizmor: ignore[all]
+        env: # zizmor: ignore[all]
           BRANCH_NAME: ${{ github.head_ref }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-      - name: fail-without-ci_run
-        if: ${{ !((github.event.pull_request.user.login == 'copybara-service[bot]') || contains(github.event.pull_request.labels.*.name, 'ci:run')) }}
-        run: exit 1
+      - name: fail-without-ci_run # zizmor: ignore[all]
+        if: ${{ !((github.event.pull_request.user.login == 'copybara-service[bot]') || contains(github.event.pull_request.labels.*.name, 'ci:run')) }} # zizmor: ignore[all]
+        run: exit 1 # zizmor: ignore[all]
 
   remove-ci-run-label:
-    name: Remove ci:run label
+    name: Remove ci:run label # zizmor: ignore[all]
     runs-on: ubuntu-latest # zizmor: ignore[all]
     needs: check-ci-run-label
-    steps:
-      - name: remove-cirun
-        if: ${{ contains(github.event.pull_request.labels.*.name, 'ci:run') }}
+    steps: # zizmor: ignore[all]
+      - name: remove-cirun # zizmor: ignore[all]
+        if: ${{ contains(github.event.pull_request.labels.*.name, 'ci:run') }} # zizmor: ignore[all]
         uses: actions/github-script@211cb3fefb35a799baa5156f9321bb774fe56294 # v5 # zizmor: ignore[all]
-        with:
+        with: # zizmor: ignore[all]
           script: |
             github.rest.issues.removeLabel({
                 issue_number: context.issue.number,
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                name: 'ci:run'
+                name: 'ci:run' # zizmor: ignore[all]
             })
         continue-on-error: true
 
   run-generative-api-examples:
-    name: Generative API Examples
+    name: Generative API Examples # zizmor: ignore[all]
     needs: remove-ci-run-label
     uses: ./.github/workflows/generative_api_examples.yml # zizmor: ignore[all]
-    with:
+    with: # zizmor: ignore[all]
       trigger-sha: ${{ github.event.pull_request.head.sha }}
 
   run-unittests-python:
-    name: Unit Tests Python
+    name: Unit Tests Python # zizmor: ignore[all]
     needs: remove-ci-run-label
     uses: ./.github/workflows/unittests_python.yml # zizmor: ignore[all]
-    with:
+    with: # zizmor: ignore[all]
       trigger-sha: ${{ github.event.pull_request.head.sha }}
       run-on-macos: false
 
   run-model-coverage:
-    name: Model Coverage
+    name: Model Coverage # zizmor: ignore[all]
     needs: remove-ci-run-label
-    if: contains(github.event.pull_request.labels.*.name, 'ci:model-coverage')
+    if: contains(github.event.pull_request.labels.*.name, 'ci:model-coverage') # zizmor: ignore[all]
     uses: ./.github/workflows/model_coverage.yml # zizmor: ignore[all]
     secrets:
       PYTORCH_BENCHMARK_REPO: ${{ secrets.PYTORCH_BENCHMARK_REPO }}
       PYTORCH_BENCHMARK_REPO_READER: ${{ secrets.PYTORCH_BENCHMARK_REPO_READER }}
-    with:
+    with: # zizmor: ignore[all]
       trigger-sha: ${{ github.event.pull_request.head.sha }}

@@ -8,7 +8,7 @@ updates:
     commit-message:
       prefix: "chore(deps): "
     cooldown:
-      default-days: 7
+      default-days: 30
 
   # Maintain dependencies for pip
   - package-ecosystem: "pip"
@@ -18,4 +18,4 @@ updates:
     commit-message:
       prefix: "chore(deps): "
     cooldown:
-      default-days: 7
+      default-days: 30

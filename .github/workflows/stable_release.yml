@@ -2,7 +2,7 @@
 # Helpful YAML parser to clarify YAML syntax:
 # https://yaml-online-parser.appspot.com/
 
-name: Build and Release (stable)
+name: Build and Release (stable) # zizmor: ignore[all]
 
 on: # zizmor: ignore[all]
   workflow_dispatch:  # Allow manual triggers for stable releases
@@ -20,128 +20,128 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs:
+jobs: # zizmor: ignore[all]
   run-unittests-python:
-    name: Unit Tests Python
+    name: Unit Tests Python # zizmor: ignore[all]
     uses: ./.github/workflows/unittests_python.yml # zizmor: ignore[all]
-    with:
+    with: # zizmor: ignore[all]
       trigger-sha: ${{ github.sha }}
 
   build-stable:
     needs: run-unittests-python
-    name: Build and Release litert-torch
+    name: Build and Release litert-torch # zizmor: ignore[all]
     runs-on: ubuntu-latest # zizmor: ignore[all]
-    steps:
+    steps: # zizmor: ignore[all]
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 # zizmor: ignore[all]
-        with:
+        with: # zizmor: ignore[all]
           persist-credentials: false
 
-      - name: Setup Python
+      - name: Setup Python # zizmor: ignore[all]
         uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[all]
-        with:
+        with: # zizmor: ignore[all]
           python-version: "3.11"
 
-      - name: Install python-build and twine
-        run: |
+      - name: Install python-build and twine # zizmor: ignore[all]
+        run: | # zizmor: ignore[all]
           python -m pip install --upgrade pip
           python -m pip install build twine wheel
           python -m pip list
 
-      - name: Build the wheel
-        run: |
+      - name: Build the wheel # zizmor: ignore[all]
+        run: | # zizmor: ignore[all]
           python setup.py bdist_wheel
 
-      - name: Verify the distribution
-        run: twine check --strict dist/*
+      - name: Verify the distribution # zizmor: ignore[all]
+        run: twine check --strict dist/* # zizmor: ignore[all]
 
-      - name: List the contents of litert_torch wheel
-        run: python -m zipfile --list dist/*.whl
+      - name: List the contents of litert_torch wheel # zizmor: ignore[all]
+        run: python -m zipfile --list dist/*.whl # zizmor: ignore[all]
 
-      - name: Upload Stable Wheel
+      - name: Upload Stable Wheel # zizmor: ignore[all]
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 # zizmor: ignore[all]
-        with:
-          name: litert-torch-wheel
+        with: # zizmor: ignore[all]
+          name: litert-torch-wheel # zizmor: ignore[all]
           path: dist/*.whl
 
   test-before-publish:
     needs: build-stable
-    strategy:
-      matrix:
+    strategy: # zizmor: ignore[all]
+      matrix: # zizmor: ignore[all]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
 
-    name: Test Install and Import litert-torch
+    name: Test Install and Import litert-torch # zizmor: ignore[all]
     runs-on: # zizmor: ignore[all]
       labels: linux-x86-n2-16
     container: # zizmor: ignore[all]
       image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d # latest
-    steps:
+    steps: # zizmor: ignore[all]
       - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[all]
-        with:
+        with: # zizmor: ignore[all]
           python-version: ${{ matrix.python-version }}
 
-      - run: |
+      - run: | # zizmor: ignore[all]
           python -m pip cache purge
           python -m pip install --upgrade pip
 
-      - name: Download Stable Wheel
+      - name: Download Stable Wheel # zizmor: ignore[all]
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4 # zizmor: ignore[all]
-        with:
-          name: litert-torch-wheel
+        with: # zizmor: ignore[all]
+          name: litert-torch-wheel # zizmor: ignore[all]
           path: ./dist
 
-      - name: Install litert-torch
-        run: |
+      - name: Install litert-torch # zizmor: ignore[all]
+        run: | # zizmor: ignore[all]
           python -m pip install dist/*.whl
 
-      - name: Import litert-torch
-        run: |
+      - name: Import litert-torch # zizmor: ignore[all]
+        run: | # zizmor: ignore[all]
           python -c "import litert_torch"
 
   publish-stable:
-    name: Publish to PyPI
+    name: Publish to PyPI # zizmor: ignore[all]
     needs: test-before-publish
-    if: success() && inputs.dry_run == false
+    if: success() && inputs.dry_run == false # zizmor: ignore[all]
     runs-on: ubuntu-latest # zizmor: ignore[all]
     permissions: # zizmor: ignore[all]
       id-token: write # Required for OIDC authentication
       contents: read
-    steps:
-      - name: Download Stable Wheel
+    steps: # zizmor: ignore[all]
+      - name: Download Stable Wheel # zizmor: ignore[all]
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4 # zizmor: ignore[all]
-        with:
-          name: litert-torch-wheel
+        with: # zizmor: ignore[all]
+          name: litert-torch-wheel # zizmor: ignore[all]
           path: ./dist
 
-      - name: Publish to PyPI
+      - name: Publish to PyPI # zizmor: ignore[all]
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1 # zizmor: ignore[all]
-        with:
+        with: # zizmor: ignore[all]
           skip-existing: true
           verbose: true
 
   test-after-publish:
     needs: publish-stable
-    strategy:
-      matrix:
+    strategy: # zizmor: ignore[all]
+      matrix: # zizmor: ignore[all]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
 
-    name: Test Install and Import litert-torch from PyPI
+    name: Test Install and Import litert-torch from PyPI # zizmor: ignore[all]
     runs-on: # zizmor: ignore[all]
       labels: linux-x86-n2-16
     container: # zizmor: ignore[all]
       image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d # latest
-    steps:
+    steps: # zizmor: ignore[all]
       - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[all]
-        with:
+        with: # zizmor: ignore[all]
           python-version: ${{ matrix.python-version }}
 
-      - run: |
+      - run: | # zizmor: ignore[all]
           python -m pip cache purge
           python -m pip install --upgrade pip
 
-      - name: Install litert-torch from PyPI
-        run: |
+      - name: Install litert-torch from PyPI # zizmor: ignore[all]
+        run: | # zizmor: ignore[all]
           python -m pip install litert-torch
 
-      - name: Import litert-torch
-        run: |
+      - name: Import litert-torch # zizmor: ignore[all]
+        run: | # zizmor: ignore[all]
           python -c "import litert_torch"

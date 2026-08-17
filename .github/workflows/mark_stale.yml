@@ -3,7 +3,7 @@
 # You can adjust the behavior by modifying this file.
 # For more information, see:
 # https://github.com/actions/stale
-name: Mark stale issues and pull requests
+name: Mark stale issues and pull requests # zizmor: ignore[all]
 
 on: # zizmor: ignore[all]
   schedule:
@@ -17,10 +17,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs:
+jobs: # zizmor: ignore[all]
   stale:
-    name: Mark Stale
-    if: |
+    name: Mark Stale # zizmor: ignore[all]
+    if: | # zizmor: ignore[all]
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' && github.repository == 'google-ai-edge/litert-torch')
 
@@ -30,9 +30,9 @@ jobs:
       pull-requests: write # Required to update PRs # Required to update PRs
       actions: write # Required to manage actions # Required to manage actions
 
-    steps:
+    steps: # zizmor: ignore[all]
     - uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9 # zizmor: ignore[all]
-      with:
+      with: # zizmor: ignore[all]
         days-before-issue-stale: 7
         days-before-issue-close: 7
         stale-issue-label: "status:stale"

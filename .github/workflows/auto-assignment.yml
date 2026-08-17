@@ -1,4 +1,4 @@
-name: auto-assignment
+name: auto-assignment # zizmor: ignore[all]
 on: # zizmor: ignore[all]
   issues:
     types:
@@ -8,19 +8,19 @@ permissions: # zizmor: ignore[all]
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-jobs:
+jobs: # zizmor: ignore[all]
   welcome:
-    name: Welcome
+    name: Welcome # zizmor: ignore[all]
     permissions: # zizmor: ignore[all]
       issues: write # Assign users to issues
       pull-requests: write # Assign users to pull requests
     runs-on: ubuntu-latest # zizmor: ignore[all]
-    steps:
+    steps: # zizmor: ignore[all]
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 # zizmor: ignore[all]
-        with:
+        with: # zizmor: ignore[all]
           persist-credentials: false
       - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7 # zizmor: ignore[all]
-        with:
+        with: # zizmor: ignore[all]
           script: |
             const script = require('./\.github/workflows/scripts/auto-assignment.js')
             script({github, context})

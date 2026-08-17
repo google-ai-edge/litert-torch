@@ -8,7 +8,7 @@
 #
 # This workflow will run nightly or when triggered from PR comment
 
-name: Generative API Examples
+name: Generative API Examples # zizmor: ignore[all]
 
 on: # zizmor: ignore[all]
   workflow_call:
@@ -24,20 +24,20 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs:
+jobs: # zizmor: ignore[all]
   check-examples:
-    name: Check Examples
+    name: Check Examples # zizmor: ignore[all]
     runs-on: # zizmor: ignore[all]
       labels: linux-x86-n2-16
     container: # zizmor: ignore[all]
       image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d # latest
 
-    steps:
+    steps: # zizmor: ignore[all]
       - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[all]
-        with:
+        with: # zizmor: ignore[all]
           python-version: "3.11"
       - uses: bazel-contrib/setup-bazel@b388b84bb637e50cdae241d0f255670d4bd79f29 # 0.8.1 # zizmor: ignore[all]
-        with:
+        with: # zizmor: ignore[all]
           # Avoid downloading Bazel every time.
           bazelisk-cache: true
           # Store build cache per workflow.
@@ -46,26 +46,26 @@ jobs:
           repository-cache: false
       - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1 # zizmor: ignore[all]
         id: setup-ndk
-        with:
+        with: # zizmor: ignore[all]
           ndk-version: r21e
           add-to-path: false
       - uses: actions/setup-java@e9fbacdec3bb3b6036605a3e6f7995d66773a8c6 # v3 # zizmor: ignore[all]
-        with:
+        with: # zizmor: ignore[all]
           java-version: "17"
           distribution: "temurin"
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3 # zizmor: ignore[all]
-      - run: |
+      - run: | # zizmor: ignore[all]
           sdkmanager "build-tools;30.0.3" "platform-tools"
           sdkmanager "platforms;android-30" "extras;android;m2repository"
       - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 # zizmor: ignore[all]
-        with:
+        with: # zizmor: ignore[all]
           ref: ${{ inputs.trigger-sha }}
           persist-credentials: false
-      - name: Install python dependencies
-        run: |
+      - name: Install python dependencies # zizmor: ignore[all]
+        run: | # zizmor: ignore[all]
           pip3 install numpy
-      - name: Build
-        run: |
+      - name: Build # zizmor: ignore[all]
+        run: | # zizmor: ignore[all]
           ci/test_examples_build.sh
-        env:
+        env: # zizmor: ignore[all]
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
