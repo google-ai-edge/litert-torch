@@ -20,7 +20,7 @@ concurrency:
 jobs:
   zizmor: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     name: Run Zizmor Security Scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # zizmor: ignore[self-hosted-runner]
     permissions:
       security-events: write # Required to upload SARIF results
       contents: read

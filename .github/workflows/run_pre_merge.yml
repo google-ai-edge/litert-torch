@@ -20,13 +20,13 @@ permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poi
 jobs:
   block-pr-merge: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     name: Block GitHub PR Merge
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # zizmor: ignore[self-hosted-runner]
     steps:
       - run: exit 1
 
   check-ci-run-label: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     name: Check ci:run label
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # zizmor: ignore[self-hosted-runner]
     steps:
       - run: echo "Run on branch $BRANCH_NAME by $PR_AUTHOR"
         env:
@@ -38,7 +38,7 @@ jobs:
 
   remove-ci-run-label: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     name: Remove ci:run label
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # zizmor: ignore[self-hosted-runner]
     needs: check-ci-run-label
     steps:
       - name: remove-cirun

@@ -24,7 +24,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' && github.repository == 'google-ai-edge/litert-torch')
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # zizmor: ignore[self-hosted-runner]
     permissions:
       issues: write # Required to comment on issues # Required to comment on issues
       pull-requests: write # Required to update PRs # Required to update PRs
@@ -34,14 +34,12 @@ jobs:
     - uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9
       with:
         days-before-issue-stale: 7
-    name: Mark Stale
         days-before-issue-close: 7
         stale-issue-label: "status:stale"
         close-issue-reason: completed
         any-of-labels: "status:awaiting user response,status:more data needed"
         # List of labels to remove when issues/PRs unstale. 
         labels-to-remove-when-unstale: 'status:awaiting user response,status:stale'
-    name: Mark Stale
         stale-issue-message: >
           Marking this issue as stale since it has been open for 7 days with no activity.
           This issue will be closed if no further activity occurs.
@@ -49,7 +47,6 @@ jobs:
           This issue was closed because it has been inactive for 14 days.
           Please post a new issue if you need further assistance. Thanks!
         days-before-pr-stale: 14
-    name: Mark Stale
         days-before-pr-close: 14
         stale-pr-label: "status:stale"
         stale-pr-message: >

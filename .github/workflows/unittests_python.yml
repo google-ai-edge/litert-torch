@@ -27,7 +27,7 @@ concurrency:
 jobs:
   prepare-matrix: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
     name: Prepare Matrix
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # zizmor: ignore[self-hosted-runner]
     outputs:
       os: ${{ steps.set-matrix.outputs.os }}
     steps:
@@ -50,7 +50,7 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
         os: ${{ fromJson(needs.prepare-matrix.outputs.os) }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }} # zizmor: ignore[self-hosted-runner]
     container: ${{ matrix.os == 'linux-x86-n2-16' && 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d # latest' || null }}
     steps:
       - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
