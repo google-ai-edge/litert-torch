@@ -26,6 +26,7 @@ concurrency:
 
 jobs:
   check-examples:
+    name: Check Examples
     runs-on:
       labels: linux-x86-n2-16
     container:

@@ -3,18 +3,17 @@ on:
   issues:
     types:
       - opened
-
 permissions:
   contents: read
-  issues: write
-  pull-requests: write
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   welcome:
+    name: Welcome
+    permissions:
+      issues: write # Assign users to issues
+      pull-requests: write # Assign users to pull requests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
