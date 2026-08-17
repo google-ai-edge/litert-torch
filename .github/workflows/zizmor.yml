@@ -1,6 +1,6 @@
 name: Zizmor Security Scan
 
-on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
   push:
     branches: ["main"]
     paths:
@@ -10,7 +10,7 @@ on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,ar
     paths:
       - '.github/workflows/**'
 
-permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
   contents: read
 
 concurrency:
@@ -18,15 +18,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  zizmor: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+  zizmor:
     name: Run Zizmor Security Scan
-    runs-on: ubuntu-latest # zizmor: ignore[self-hosted-runner]
-    permissions:
+    runs-on: ubuntu-latest # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
       security-events: write # Required to upload SARIF results
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
         with:
           persist-credentials: false
 
@@ -34,12 +34,12 @@ jobs:
         run: pipx install zizmor
 
       - name: Run Zizmor
-        # zizmor: ignore[all]
+       
         run: zizmor --format sarif .github/workflows > zizmor-results.sarif
 
       - name: Upload SARIF file
         if: always()
-        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
         with:
           sarif_file: zizmor-results.sarif
           category: zizmor

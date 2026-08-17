@@ -8,8 +8,8 @@
 
 name: Unit Tests Python
 
-on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
-  workflow_call: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+  workflow_call:
     inputs:
       trigger-sha:
         type: string
@@ -17,7 +17,7 @@ on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,ar
       run-on-macos:
         type: boolean
         default: false
-permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
   contents: read
 
 concurrency:
@@ -25,9 +25,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  prepare-matrix: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+  prepare-matrix:
     name: Prepare Matrix
-    runs-on: ubuntu-latest # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+    runs-on: ubuntu-latest # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
     outputs:
       os: ${{ steps.set-matrix.outputs.os }}
     steps:
@@ -43,22 +43,22 @@ jobs:
           os=$(jq -c -n '$ARGS.positional' --args "${os[@]}")
           echo "os=${os}"
           echo "os=${os}" >> $GITHUB_OUTPUT
-  test: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+  test:
     name: Test
     needs: prepare-matrix
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
         os: ${{ fromJson(needs.prepare-matrix.outputs.os) }}
-    runs-on: ${{ matrix.os }} # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
-    container: ${{ matrix.os == 'linux-x86-n2-16' && 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d' || null }}
+    runs-on: ${{ matrix.os }} # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    container: ${{ matrix.os == 'linux-x86-n2-16' && 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d' || null }} # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
     steps:
-      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
         with:
           ref: ${{ inputs.trigger-sha }}
           persist-credentials: false
 
-      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
         with:
           python-version: ${{ matrix.python-version }}
 

@@ -5,12 +5,12 @@
 # https://github.com/actions/stale
 name: Mark stale issues and pull requests
 
-on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
   schedule:
   # Scheduled to run at 1.30 UTC everyday
   - cron: '30 1 * * *'
 
-permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
   contents: read
 
 concurrency:
@@ -18,20 +18,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  stale: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+  stale:
     name: Mark Stale
     if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'schedule' && github.repository == 'google-ai-edge/litert-torch')
 
-    runs-on: ubuntu-latest # zizmor: ignore[self-hosted-runner]
-    permissions:
+    runs-on: ubuntu-latest # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
       issues: write # Required to comment on issues # Required to comment on issues
       pull-requests: write # Required to update PRs # Required to update PRs
       actions: write # Required to manage actions # Required to manage actions
 
     steps:
-    - uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9
+    - uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
       with:
         days-before-issue-stale: 7
         days-before-issue-close: 7

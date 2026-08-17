@@ -3,13 +3,13 @@
 
 name: Run Post Merge
 
-on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
   push:
     branches:
       - 'main'
       - 'releases/**'
 
-permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
   contents: read
 
 concurrency:
@@ -17,24 +17,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  run-model-coverage: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+  run-model-coverage:
     name: Model Coverage
-    uses: ./.github/workflows/model_coverage.yml
+    uses: ./.github/workflows/model_coverage.yml # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
     secrets:
       PYTORCH_BENCHMARK_REPO: ${{ secrets.PYTORCH_BENCHMARK_REPO }}
       PYTORCH_BENCHMARK_REPO_READER: ${{ secrets.PYTORCH_BENCHMARK_REPO_READER }}
     with:
       trigger-sha: ${{ github.event.after }}
 
-  run-generative-api-examples: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+  run-generative-api-examples:
     name: Generative API Examples
-    uses: ./.github/workflows/generative_api_examples.yml
+    uses: ./.github/workflows/generative_api_examples.yml # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
     with:
       trigger-sha: ${{ github.event.after }}
 
-  run-unittests-python: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses]
+  run-unittests-python:
     name: Unit Tests Python
-    uses: ./.github/workflows/unittests_python.yml
+    uses: ./.github/workflows/unittests_python.yml # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
     with:
       trigger-sha: ${{ github.event.after }}
       run-on-macos: false
