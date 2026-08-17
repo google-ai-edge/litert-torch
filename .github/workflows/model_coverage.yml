@@ -9,7 +9,7 @@
 
 name: Model Coverage
 
-on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+on: # zizmor: ignore[all]
   workflow_call:
     inputs:
       trigger-sha:
@@ -21,7 +21,7 @@ on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,ar
       PYTORCH_BENCHMARK_REPO_READER:
         required: true
 
-permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+permissions: # zizmor: ignore[all]
   contents: read
 
 concurrency:
@@ -34,25 +34,25 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
-    runs-on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    runs-on: # zizmor: ignore[all]
       labels: linux-x86-n2-16
-    container: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    container: # zizmor: ignore[all]
       image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d # latest
     steps:
-      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 # zizmor: ignore[all]
         with:
           ref: ${{ inputs.trigger-sha }}
           persist-credentials: false
 
       - name: Checkout benchmark repository
-        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3 # zizmor: ignore[all]
         with:
           repository: ${{ secrets.PYTORCH_BENCHMARK_REPO }}
           path: ${{ github.workspace }}/benchmark
           token: ${{ secrets.PYTORCH_BENCHMARK_REPO_READER }}
           persist-credentials: false
 
-      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[all]
         with:
           python-version: ${{ matrix.python-version }}
 

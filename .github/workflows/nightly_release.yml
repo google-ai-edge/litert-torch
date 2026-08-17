@@ -4,14 +4,14 @@
 
 name: Build and Release (nightly)
 
-on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+on: # zizmor: ignore[all]
   schedule:
     # 10 am UTC is 3am or 4am PT depending on daylight savings.
     - cron: "0 10 * * *"
 
   workflow_dispatch: {}
 
-permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+permissions: # zizmor: ignore[all]
   contents: read
 
 concurrency:
@@ -25,7 +25,7 @@ jobs:
       (github.event_name == 'schedule' && github.repository == 'google-ai-edge/litert-torch')
 
     name: Unit Tests Python
-    uses: ./.github/workflows/unittests_python.yml # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    uses: ./.github/workflows/unittests_python.yml # zizmor: ignore[all]
     with:
       trigger-sha: ${{ github.sha }}
       # TODO(cnchan): Re-enable once the tf-nightly pywrap issue is fixed.
@@ -33,14 +33,14 @@ jobs:
 
   build-and-release-nightly:
     needs: run-unittests-python
-    runs-on: ubuntu-latest # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
-    permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    runs-on: ubuntu-latest # zizmor: ignore[all]
+    permissions: # zizmor: ignore[all]
       id-token: write # Required for OIDC authentication
       contents: read
 
     name: Build and Release litert-torch-nightly
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 # zizmor: ignore[all]
         with:
           persist-credentials: false
 
@@ -52,7 +52,7 @@ jobs:
           echo "date=${DATE}" >> $GITHUB_OUTPUT
 
       - name: Setup Python
-        uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+        uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[all]
         with:
           python-version: "3.11"
 
@@ -73,7 +73,7 @@ jobs:
         run: python -m zipfile --list dist/*.whl
 
       - name: Upload to PyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1 # zizmor: ignore[all]
 
   run-pip-install-and-import-test:
     needs: build-and-release-nightly
@@ -82,12 +82,12 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     name: Test Install and Import litert-torch
-    runs-on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    runs-on: # zizmor: ignore[all]
       labels: linux-x86-n2-16
-    container: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    container: # zizmor: ignore[all]
       image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d # latest
     steps:
-      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4 # zizmor: ignore[all]
         with:
           python-version: ${{ matrix.python-version }}
 

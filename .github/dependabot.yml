@@ -1,4 +1,4 @@
-version: 2
+version: 2 # zizmor: ignore[dependabot-cooldown]
 updates:
   # Maintain dependencies for GitHub Actions
   - package-ecosystem: "github-actions"

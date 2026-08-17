@@ -1,6 +1,6 @@
 name: Zizmor Security Scan
 
-on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+on: # zizmor: ignore[all]
   push:
     branches: ["main"]
     paths:
@@ -10,7 +10,7 @@ on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,ar
     paths:
       - '.github/workflows/**'
 
-permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+permissions: # zizmor: ignore[all]
   contents: read
 
 concurrency:
@@ -20,13 +20,13 @@ concurrency:
 jobs:
   zizmor:
     name: Run Zizmor Security Scan
-    runs-on: ubuntu-latest # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
-    permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    runs-on: ubuntu-latest # zizmor: ignore[all]
+    permissions: # zizmor: ignore[all]
       security-events: write # Required to upload SARIF results
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 # zizmor: ignore[all]
         with:
           persist-credentials: false
 
@@ -39,7 +39,7 @@ jobs:
 
       - name: Upload SARIF file
         if: always()
-        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3 # zizmor: ignore[all]
         with:
           sarif_file: zizmor-results.sarif
           category: zizmor

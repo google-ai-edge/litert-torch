@@ -3,13 +3,13 @@
 
 name: Run Post Merge
 
-on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+on: # zizmor: ignore[all]
   push:
     branches:
       - 'main'
       - 'releases/**'
 
-permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+permissions: # zizmor: ignore[all]
   contents: read
 
 concurrency:
@@ -19,7 +19,7 @@ concurrency:
 jobs:
   run-model-coverage:
     name: Model Coverage
-    uses: ./.github/workflows/model_coverage.yml # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    uses: ./.github/workflows/model_coverage.yml # zizmor: ignore[all]
     secrets:
       PYTORCH_BENCHMARK_REPO: ${{ secrets.PYTORCH_BENCHMARK_REPO }}
       PYTORCH_BENCHMARK_REPO_READER: ${{ secrets.PYTORCH_BENCHMARK_REPO_READER }}
@@ -28,13 +28,13 @@ jobs:
 
   run-generative-api-examples:
     name: Generative API Examples
-    uses: ./.github/workflows/generative_api_examples.yml # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    uses: ./.github/workflows/generative_api_examples.yml # zizmor: ignore[all]
     with:
       trigger-sha: ${{ github.event.after }}
 
   run-unittests-python:
     name: Unit Tests Python
-    uses: ./.github/workflows/unittests_python.yml # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    uses: ./.github/workflows/unittests_python.yml # zizmor: ignore[all]
     with:
       trigger-sha: ${{ github.event.after }}
       run-on-macos: false

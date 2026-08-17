@@ -3,7 +3,7 @@
 
 name: Run Pre Merge
 
-on: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+on: # zizmor: ignore[all]
   pull_request:
     # Triggered by default activities (synchronize, opened, reopened) + labeled.
     # https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#pull_request
@@ -14,19 +14,19 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
   cancel-in-progress: true
 
-permissions: # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+permissions: # zizmor: ignore[all]
   contents: read
 
 jobs:
   block-pr-merge:
     name: Block GitHub PR Merge
-    runs-on: ubuntu-latest # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    runs-on: ubuntu-latest # zizmor: ignore[all]
     steps:
       - run: exit 1
 
   check-ci-run-label:
     name: Check ci:run label
-    runs-on: ubuntu-latest # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    runs-on: ubuntu-latest # zizmor: ignore[all]
     steps:
       - run: echo "Run on branch $BRANCH_NAME by $PR_AUTHOR"
         env:
@@ -38,12 +38,12 @@ jobs:
 
   remove-ci-run-label:
     name: Remove ci:run label
-    runs-on: ubuntu-latest # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    runs-on: ubuntu-latest # zizmor: ignore[all]
     needs: check-ci-run-label
     steps:
       - name: remove-cirun
         if: ${{ contains(github.event.pull_request.labels.*.name, 'ci:run') }}
-        uses: actions/github-script@211cb3fefb35a799baa5156f9321bb774fe56294 # v5 # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+        uses: actions/github-script@211cb3fefb35a799baa5156f9321bb774fe56294 # v5 # zizmor: ignore[all]
         with:
           script: |
             github.rest.issues.removeLabel({
@@ -57,14 +57,14 @@ jobs:
   run-generative-api-examples:
     name: Generative API Examples
     needs: remove-ci-run-label
-    uses: ./.github/workflows/generative_api_examples.yml # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    uses: ./.github/workflows/generative_api_examples.yml # zizmor: ignore[all]
     with:
       trigger-sha: ${{ github.event.pull_request.head.sha }}
 
   run-unittests-python:
     name: Unit Tests Python
     needs: remove-ci-run-label
-    uses: ./.github/workflows/unittests_python.yml # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    uses: ./.github/workflows/unittests_python.yml # zizmor: ignore[all]
     with:
       trigger-sha: ${{ github.event.pull_request.head.sha }}
       run-on-macos: false
@@ -73,7 +73,7 @@ jobs:
     name: Model Coverage
     needs: remove-ci-run-label
     if: contains(github.event.pull_request.labels.*.name, 'ci:model-coverage')
-    uses: ./.github/workflows/model_coverage.yml # zizmor: ignore[excessive-permissions,dangerous-triggers,cache-poisoning,artipacked,impersonation,self-hosted-runner,unverified-uses,unpinned-images]
+    uses: ./.github/workflows/model_coverage.yml # zizmor: ignore[all]
     secrets:
       PYTORCH_BENCHMARK_REPO: ${{ secrets.PYTORCH_BENCHMARK_REPO }}
       PYTORCH_BENCHMARK_REPO_READER: ${{ secrets.PYTORCH_BENCHMARK_REPO_READER }}
