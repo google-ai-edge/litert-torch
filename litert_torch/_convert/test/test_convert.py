@@ -18,7 +18,9 @@ import dataclasses
 from typing import Tuple
 
 import litert_torch
+from litert_torch.backend.lowerings import _decomp_registry
 from litert_torch.quantize import pt2e_quantizer
+
 from litert_torch.testing import model_coverage
 import numpy as np
 import torch
@@ -677,6 +679,131 @@ class TestConvert(googletest.TestCase):
     self.assertEqual(
         compilation_result.models_with_backend[0][0].id(),
         fallback_backend.FallbackBackend.id(),
+    )
+
+  def test_convert_conv1d(self):
+    """Tests conversion of various nn.Conv1d modules."""
+    test_configs = [
+        # (in_channels, out_channels, kernel_size, stride, padding, dilation,
+        #  groups, bias, input_shape)
+        (3, 7, 5, 2, 2, 1, 1, True, (2, 3, 32)),
+        (4, 4, 3, 1, 1, 1, 1, False, (1, 4, 16)),
+        (4, 8, 3, 1, 1, 2, 2, True, (2, 4, 24)),
+    ]
+    for (
+        in_c,
+        out_c,
+        k,
+        stride,
+        padding,
+        dilation,
+        groups,
+        bias,
+        in_shape,
+    ) in test_configs:
+      torch_module = nn.Conv1d(
+          in_channels=in_c,
+          out_channels=out_c,
+          kernel_size=k,
+          stride=stride,
+          padding=padding,
+          dilation=dilation,
+          groups=groups,
+          bias=bias,
+      ).eval()
+      args = (torch.randn(in_shape),)
+      edge_model = litert_torch.convert(torch_module, args)
+      self.assertTrue(
+          model_coverage.compare_tflite_torch(edge_model, torch_module, args)
+      )
+
+  def test_convert_conv1d_sequential(self):
+    """Tests conversion of chained 1D convolutions with bias fusion."""
+
+    class TinyConv1D(nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv1d(32, 4, 3, padding=1)
+        self.conv2 = nn.Conv1d(4, 1, 3, padding=1)
+
+      def forward(self, x):
+        return self.conv2(torch.relu(self.conv1(x)))
+
+    torch_module = TinyConv1D().eval()
+    args = (torch.randn(1, 32, 2),)
+    edge_model = litert_torch.convert(torch_module, args)
+    self.assertTrue(
+        model_coverage.compare_tflite_torch(edge_model, torch_module, args)
+    )
+
+  def test_decomp_registry_conv1d_and_convolution(self):
+    """Tests _conv1d_decomp and _convolution_decomp directly with scalar, tuple, list args."""
+    # pylint: disable=protected-access
+    x = torch.randn(2, 3, 16)
+    w = torch.randn(4, 3, 3)
+    b = torch.randn(4)
+
+    # 1. Test _conv1d_decomp with scalar int stride, padding, dilation
+
+    out_conv1d_scalar = _decomp_registry._conv1d_decomp(
+        x, w, b, stride=2, padding=1, dilation=1, groups=1
+    )
+    self.assertEqual(out_conv1d_scalar.shape, (2, 4, 8))
+
+    # 2. Test _conv1d_decomp with list and tuple stride, padding, dilation
+    out_conv1d_list = _decomp_registry._conv1d_decomp(
+        x, w, b, stride=[2], padding=[1], dilation=[1], groups=1
+    )
+    self.assertEqual(out_conv1d_list.shape, (2, 4, 8))
+    self.assertTrue(torch.allclose(out_conv1d_scalar, out_conv1d_list))
+
+    # 3. Test _convolution_decomp with scalar int args
+    out_conv_scalar = _decomp_registry._convolution_decomp(
+        x,
+        w,
+        b,
+        stride=2,
+        padding=1,
+        dilation=1,
+        transposed=False,
+        output_padding=0,
+        groups=1,
+    )
+    self.assertEqual(out_conv_scalar.shape, (2, 4, 8))
+    self.assertTrue(torch.allclose(out_conv1d_scalar, out_conv_scalar))
+
+    # 4. Test _convolution_decomp with list args
+    out_conv_list = _decomp_registry._convolution_decomp(
+        x,
+        w,
+        b,
+        stride=[2],
+        padding=[1],
+        dilation=[1],
+        transposed=False,
+        output_padding=[0],
+        groups=1,
+    )
+    self.assertEqual(out_conv_list.shape, (2, 4, 8))
+    self.assertTrue(torch.allclose(out_conv_scalar, out_conv_list))
+
+    # 5. Test SymInt scalar if available
+    if hasattr(torch, "sym_int"):
+      s = torch.sym_int(2)
+      if isinstance(s, torch.SymInt):
+        out_sym = _decomp_registry._conv1d_decomp(
+            x, w, b, stride=s, padding=1, dilation=1, groups=1
+        )
+        self.assertEqual(out_sym.shape, (2, 4, 8))
+
+    # 6. Test rank != 3 returns NotImplemented
+    x_rank4 = torch.randn(2, 3, 4, 4)
+    self.assertEqual(
+        _decomp_registry._conv1d_decomp(x_rank4, w), NotImplemented
+    )
+    self.assertEqual(
+        _decomp_registry._convolution_decomp(x_rank4, w), NotImplemented
     )
 
   def test_convert_model_with_dict_arg(self):

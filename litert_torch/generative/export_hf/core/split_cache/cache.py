@@ -29,6 +29,7 @@ import copy
 from typing import List, Tuple
 import jaxtyping as jt
 from litert_torch.generative.export_hf.core import exportable_module_config
+import litert_torch.generative.export_hf.core.cache as cache_lib
 import litert_torch.generative.export_hf.core.cache_base as cache_base_lib
 import torch
 import torch.utils._pytree as pytree
@@ -100,6 +101,7 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
       batch_size: int = 1,
       k_ts_idx: int = 2,
       v_ts_idx: int = 3,
+      layer_type: str = "full_attention",
       **kwargs,
   ):
     super().__init__()
@@ -124,6 +126,9 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
     self.additional_states = kwargs.get("additional_states", None)
 
     self.cumulative_length = 0
+    self.layer_type = layer_type
+    if layer_type == "sliding_attention":
+      self.is_sliding = True
 
   def get_batch_size(self) -> int:
     return self.batch_size
@@ -134,7 +139,7 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
   def get_v_ts_idx(self) -> int:
     return self.v_ts_idx
 
-  def lazy_initialization(self, key_states: torch.Tensor):
+  def lazy_initialization(self, key_states: torch.Tensor):  # pyrefly: ignore[bad-override]
     # Since we don't support real lazy initialization, this function could only
     # be called by Cache.early_initialization, where uses a standard cache
     # layout [batch_size, num_heads, ?, head_dim].
@@ -143,7 +148,7 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
         "Lazy initialization is not supported in LiteRTLMCacheLayer."
     )
 
-  def update(
+  def update(  # pyrefly: ignore[bad-override]
       self,
       key_states: torch.Tensor,
       value_states: torch.Tensor,
@@ -153,9 +158,9 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
     seq_len = key_states.shape[2]
     self.cumulative_length += seq_len
 
-    key_states = key_states.to(self.keys[0].dtype)
+    key_states = key_states.to(self.keys[0].dtype)  # pyrefly: ignore[unsupported-operation]
 
-    value_states = value_states.to(self.values[0].dtype)
+    value_states = value_states.to(self.values[0].dtype)  # pyrefly: ignore[unsupported-operation]
 
     if self.k_ts_idx == 2:
       key_states = key_states.reshape(
@@ -177,8 +182,8 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
           1, -1, self.head_dim, seq_len
       )  # 1, bk, h, s
 
-    self.keys = (self.keys[0], key_states)
-    self.values = (self.values[0], value_states)
+    self.keys = (self.keys[0], key_states)  # pyrefly: ignore[unsupported-operation]
+    self.values = (self.values[0], value_states)  # pyrefly: ignore[unsupported-operation]
 
     return SplitCacheTuple([self.keys, self.values])
 
@@ -189,9 +194,12 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
     return kv_length, kv_offset
 
   def get_seq_length(self) -> int:
-    return (self.keys[0][0, 0].any(dim=-1)).sum() if self.is_initialized else 0
+    return (self.keys[0][0, 0].any(dim=-1)).sum() if self.is_initialized else 0  # pyrefly: ignore[unsupported-operation]
 
   def get_max_cache_shape(self) -> int:
+    return self.max_cache_len
+
+  def get_max_length(self) -> int:
     return self.max_cache_len
 
   @classmethod
@@ -209,6 +217,13 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
     k_ts_idx = export_config.k_ts_idx
     v_ts_idx = export_config.v_ts_idx
     num_kv_heads = model_config.num_key_value_heads
+    layer_type = "full_attention"
+    if hasattr(model_config, "layer_types"):
+      layer_type = model_config.layer_types[layer_index]
+    if layer_type == "sliding_attention":
+      cache_length = (
+          export_config.sliding_window_ring_buffer_size or cache_length
+      )
     if hasattr(model_config, "num_global_key_value_heads") and hasattr(
         model_config, "layer_types"
     ):
@@ -274,7 +289,22 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
     )
     keys = torch.zeros(k_cache_shape, dtype=torch.float32)
     values = torch.zeros(v_cache_shape, dtype=torch.float32)
-    return cls((keys, None), (values, None), **kwargs)
+    init_kwargs = dict(kwargs)
+    init_kwargs.setdefault("batch_size", export_config.batch_size)
+    init_kwargs.setdefault("k_ts_idx", export_config.k_ts_idx)
+    init_kwargs.setdefault("v_ts_idx", export_config.v_ts_idx)
+    return cls(
+        (keys, None),
+        (values, None),
+        **init_kwargs,
+    )
+
+
+LAYER_TYPE_TO_CLASS = {
+    "full_attention": LiteRTLMSplitCacheLayer,
+    "sliding_attention": LiteRTLMSplitCacheLayer,
+    "conv": cache_lib.LiteRTLMConvCacheLayer,
+}
 
 
 @cache_base_lib.register_cache_implementation
@@ -293,11 +323,16 @@ class LiteRTLMSplitCache(cache_base_lib.LiteRTLMCacheMixin):
     num_shared_layers = getattr(model_config, "num_kv_shared_layers", 0)
     layers = []
     for layer_index in range(num_layers - num_shared_layers):
+      layer_type = "full_attention"
+      if hasattr(model_config, "layer_types"):
+        layer_type = model_config.layer_types[layer_index]
+      layer_class = LAYER_TYPE_TO_CLASS.get(layer_type, LiteRTLMSplitCacheLayer)
       layers.append(
-          LiteRTLMSplitCacheLayer.create_from_config(
+          layer_class.create_from_config(
               model_config,
               layer_index,
               export_config,
+              layer_type=layer_type,
               **kwargs,
           )
       )
@@ -323,7 +358,9 @@ class LiteRTLMSplitCache(cache_base_lib.LiteRTLMCacheMixin):
 
 def _flatten_kvc_t(
     kvc: LiteRTLMSplitCache,
-) -> Tuple[List[torch.Tensor], Tuple[List[str], Tuple[int, int, int, int]]]:
+) -> Tuple[
+    List[torch.Tensor], Tuple[List[str], Tuple[int, int, int, int, List[str]]]
+]:
   """Flattens the KV cache to a list of tensors."""
   flattened = []
   flat_names = []
@@ -333,32 +370,54 @@ def _flatten_kvc_t(
   batch_size = layer_0.get_batch_size()
   k_ts_idx = layer_0.get_k_ts_idx()
   v_ts_idx = layer_0.get_v_ts_idx()
+  layer_types = [
+      getattr(layer, "layer_type", "full_attention") for layer in kvc.layers
+  ]
   for i, cache_layer in enumerate(kvc.layers):
-    flattened.append(cache_layer.keys[0])
+    if layer_types[i] == "conv":
+      assert hasattr(cache_layer, "conv_states")
+      flattened.append(cache_layer.conv_states)
+      flat_names.append(f"c_{i}")
+      continue
+    flattened.append(cache_layer.keys[0])  # pyrefly: ignore[missing-attribute]
     flat_names.append(f"k_{i}")
-    flattened.append(cache_layer.values[0])
+    flattened.append(cache_layer.values[0])  # pyrefly: ignore[missing-attribute]
     flat_names.append(f"v_{i}")
-    if cache_layer.keys[1] is not None:
-      assert cache_layer.values[1] is not None
-      flattened.append(cache_layer.keys[1])
+    if cache_layer.keys[1] is not None:  # pyrefly: ignore[missing-attribute]
+      assert cache_layer.values[1] is not None  # pyrefly: ignore[missing-attribute]
+      flattened.append(cache_layer.keys[1])  # pyrefly: ignore[missing-attribute]
       flat_names.append(f"k_{i}_slice")
-      flattened.append(cache_layer.values[1])
+      flattened.append(cache_layer.values[1])  # pyrefly: ignore[missing-attribute]
       flat_names.append(f"v_{i}_slice")
-  return flattened, (flat_names, (batch_size, num_layers, k_ts_idx, v_ts_idx))
+  return flattened, (
+      flat_names,
+      (batch_size, num_layers, k_ts_idx, v_ts_idx, layer_types),
+  )
 
 
 def _unflatten_kvc_t(
     values: List[torch.Tensor],
-    context: Tuple[List[str], Tuple[int, int, int, int]],
+    context: Tuple[List[str], Tuple[int, int, int, int, List[str]]],
 ) -> LiteRTLMSplitCache:
   """Unflattens the KV cache from a list of tensors."""
   flat_names = context[0]
   batch_size = context[1][0]
   k_ts_idx = context[1][2]
   v_ts_idx = context[1][3]
+  layer_types = context[1][4]
   num_layers = context[1][1]
   kv_entries = []
   for i in range(num_layers):
+    layer_type = layer_types[i]
+    if layer_type == "conv":
+      c_cache_idx = flat_names.index(f"c_{i}")
+      kv_entries.append(
+          cache_lib.LiteRTLMConvCacheLayer(
+              conv_states=values[c_cache_idx],
+              batch_size=batch_size,
+          )
+      )
+      continue
     k_cache_idx = flat_names.index(f"k_{i}")
     k_cache = values[k_cache_idx]
     try:
@@ -380,6 +439,7 @@ def _unflatten_kvc_t(
             batch_size=batch_size,
             k_ts_idx=k_ts_idx,
             v_ts_idx=v_ts_idx,
+            layer_type=layer_type,
         )
     )
   obj = LiteRTLMSplitCache(kv_entries)
@@ -398,7 +458,7 @@ def _flatten_kvc_t_with_keys(
 pytree.register_pytree_node(
     LiteRTLMSplitCache,
     _flatten_kvc_t,
-    _unflatten_kvc_t,
+    _unflatten_kvc_t,  # pyrefly: ignore[bad-argument-type]
     flatten_with_keys_fn=_flatten_kvc_t_with_keys,
     serialized_type_name="",
 )

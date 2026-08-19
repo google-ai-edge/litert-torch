@@ -17,4 +17,24 @@
 from litert_torch.generative.export_hf.model_ext.gemma3 import patch as _
 from litert_torch.generative.export_hf.model_ext.gemma3n import patch as _
 from litert_torch.generative.export_hf.model_ext.gemma4 import patch as _
+from litert_torch.generative.export_hf.model_ext.gemma4_unified import patch as _
 from litert_torch.generative.export_hf.model_ext.lfm2 import patch as _
+from litert_torch.generative.export_hf.model_ext.lfm2_vl import patch as _
+from litert_torch.generative.export_hf.model_ext.moonshine import patch as _
+from litert_torch.generative.export_hf.model_ext.parakeet import patch as _
+from litert_torch.generative.export_hf.model_ext.qwen3 import patch as _
+from litert_torch.generative.export_hf.model_ext.qwen3_tts import patch as _
+from litert_torch.generative.export_hf.model_ext.whisper import patch as _
+from litert_torch.generative.layers import moe
+
+try:
+  from transformers.integrations import moe as transformers_moe
+
+  transformers_moe.ALL_EXPERTS_FUNCTIONS.register(
+      "litert_moe", moe.litert_moe_experts_forward
+  )
+  transformers_moe.ALL_EXPERTS_FUNCTIONS.register(
+      "litert_moe_sequential", moe.litert_sequential_experts_forward
+  )
+except (ImportError, AttributeError):
+  pass

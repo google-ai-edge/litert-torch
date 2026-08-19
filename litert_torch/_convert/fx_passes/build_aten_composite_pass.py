@@ -16,9 +16,17 @@
 from typing import Any, Callable
 from litert_torch import backend
 from litert_torch import fx_infra
+from litert_torch._convert.fx_passes.optimize_layout_transposes_pass.layout_rewrite import reflection_pad2d_nhwc
+from litert_torch._convert.fx_passes.optimize_layout_transposes_pass.layout_rewrite import replication_pad2d_nhwc
 from litert_torch.backend import optimization_barrier as optimization_barrier_lib
 import torch
+import torch._decomp
 import torch.utils._pytree as pytree
+
+_replication_pad2d_decomp = torch._decomp.get_decompositions(
+    [torch.ops.aten.replication_pad2d.default]
+).get(torch.ops.aten.replication_pad2d.default)
+
 
 _composite_builders: dict[
     Callable[[Any, ...], Any],
@@ -28,7 +36,8 @@ _composite_builders: dict[
 
 def _register_composite_builder(op):
   # Remove op from pre_convert_decomp to keep this in the decomposed graph.
-  fx_infra.decomp.remove_pre_convert_decomp(op)
+  if isinstance(op, (torch._ops.OpOverload, torch._ops.OpOverloadPacket)):
+    fx_infra.decomp.remove_pre_convert_decomp(op)
 
   def inner(func):
     if isinstance(op, torch._ops.OpOverloadPacket):
@@ -344,6 +353,136 @@ def _aten_upsample_nearest2d_vec(_, node: torch.fx.Node):
     return output
 
   node.target = upsample_nearest2d_vec
+
+
+@_register_composite_builder(torch.ops.aten.reflection_pad2d.default)
+def _aten_reflection_pad2d(_, node: torch.fx.Node):
+  """Build a composite for aten.reflection_pad2d.default."""
+  op = node.target
+  args_mapper = TorchOpArgumentsMapper(op)
+
+  def reflection_pad2d(*args, **kwargs):
+    nonlocal op, args_mapper
+    full_kwargs = args_mapper.get_full_kwargs(args, kwargs)
+
+    left, right, top, bottom = full_kwargs["padding"]
+
+    builder = backend.composite.StableHLOCompositeBuilder(
+        name="tfl.mirror_pad",
+        attr={
+            "mode": "REFLECT",
+            "paddings": [left, right, top, bottom],
+            "is_nchw_op": True,
+        },
+    )
+    full_kwargs["self"] = builder.mark_inputs(full_kwargs["self"])
+    output = op(**full_kwargs)
+    output = builder.mark_outputs(output)
+    return output
+
+  node.target = reflection_pad2d
+
+
+@_register_composite_builder(reflection_pad2d_nhwc)
+def _reflection_pad2d_nhwc(_, node: torch.fx.Node):
+  """Build a composite for reflection_pad2d_nhwc."""
+  op = node.target
+
+  def reflection_pad2d(*args, **kwargs):
+    nonlocal op
+    # signature is (x, padding)
+    x = args[0] if len(args) > 0 else kwargs["x"]
+    padding = args[1] if len(args) > 1 else kwargs["padding"]
+
+    left, right, top, bottom = padding
+
+    builder = backend.composite.StableHLOCompositeBuilder(
+        name="tfl.mirror_pad",
+        attr={
+            "mode": "REFLECT",
+            "paddings": [left, right, top, bottom],
+            "is_nchw_op": False,
+        },
+    )
+    x_marked = builder.mark_inputs(x)
+    output = op(x_marked, padding)
+    output = builder.mark_outputs(output)
+    return output
+
+  node.target = reflection_pad2d
+
+
+@_register_composite_builder(torch.ops.aten.replication_pad2d.default)
+def _aten_replication_pad2d(_, node: torch.fx.Node):
+  """Build a composite for aten.replication_pad2d.default."""
+  op = node.target
+  args_mapper = TorchOpArgumentsMapper(op)
+
+  def replication_pad2d(*args, **kwargs):
+    nonlocal op, args_mapper
+    full_kwargs = args_mapper.get_full_kwargs(args, kwargs)
+
+    left, right, top, bottom = full_kwargs["padding"]
+
+    # PyTorch's replicate padding repeats the boundary element, whereas TFLite's
+    # MirrorPad(mode="SYMMETRIC") mirrors inward. They are only mathematically
+    # equivalent for padding <= 1 (where both repeat the edge element once).
+    if all(p <= 1 for p in [left, right, top, bottom]):
+      builder = backend.composite.StableHLOCompositeBuilder(
+          name="tfl.mirror_pad",
+          attr={
+              "mode": "SYMMETRIC",
+              "paddings": [left, right, top, bottom],
+              "is_nchw_op": True,
+          },
+      )
+      full_kwargs["self"] = builder.mark_inputs(full_kwargs["self"])
+      output = op(**full_kwargs)
+      output = builder.mark_outputs(output)
+      return output
+    elif _replication_pad2d_decomp is not None:
+      return _replication_pad2d_decomp(
+          full_kwargs["self"], full_kwargs["padding"]
+      )
+    else:
+      return op(**full_kwargs)
+
+  node.target = replication_pad2d
+
+
+@_register_composite_builder(replication_pad2d_nhwc)
+def _replication_pad2d_nhwc(_, node: torch.fx.Node):
+  """Build a composite for replication_pad2d_nhwc."""
+  op = node.target
+
+  def replication_pad2d(*args, **kwargs):
+    nonlocal op
+    # signature is (x, padding)
+    x = args[0] if len(args) > 0 else kwargs["x"]
+    padding = args[1] if len(args) > 1 else kwargs["padding"]
+
+    left, right, top, bottom = padding
+
+    # PyTorch's replicate padding repeats the boundary element, whereas TFLite's
+    # MirrorPad(mode="SYMMETRIC") mirrors inward. They are only mathematically
+    # equivalent for padding <= 1 (where both repeat the edge element once).
+    if all(p <= 1 for p in [left, right, top, bottom]):
+      builder = backend.composite.StableHLOCompositeBuilder(
+          name="tfl.mirror_pad",
+          attr={
+              "mode": "SYMMETRIC",
+              "paddings": [left, right, top, bottom],
+              "is_nchw_op": False,
+          },
+      )
+      x_marked = builder.mark_inputs(x)
+      output = op(x_marked, padding)
+      output = builder.mark_outputs(output)
+      return output
+    else:
+      return op(x, padding)
+
+  node.target = replication_pad2d
 
 
 class BuildAtenCompositePass(fx_infra.PassBase):

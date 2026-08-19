@@ -23,7 +23,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLMPrefill(
 ):
   """Exportable module for prefill with external embedder."""
 
-  def adapt_inputs(
+  def adapt_inputs(  # pyrefly: ignore[bad-override]
       self,
       embeddings,
       per_layer_embeddings,
@@ -37,7 +37,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLMPrefill(
 
   def _get_input(self, batch_size, input_length, cache_length):
     inputs = super()._get_input(batch_size, input_length, cache_length)
-    inputs["per_layer_embeddings"] = torch.ones(
+    inputs["per_layer_embeddings"] = torch.ones(  # pyrefly: ignore[no-matching-overload]
         (
             batch_size,
             input_length,
@@ -48,7 +48,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLMPrefill(
     )
     return inputs
 
-  def forward(
+  def forward(  # pyrefly: ignore[bad-override]
       self,
       embeddings,
       per_layer_embeddings,
@@ -78,7 +78,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLMGenerate(
 ):
   """Exportable module for generate with external embedder."""
 
-  def adapt_inputs(
+  def adapt_inputs(  # pyrefly: ignore[bad-override]
       self,
       embeddings,
       per_layer_embeddings,
@@ -92,7 +92,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLMGenerate(
 
   def _get_input(self, batch_size, input_length, cache_length):
     inputs = super()._get_input(batch_size, input_length, cache_length)
-    inputs["per_layer_embeddings"] = torch.ones(
+    inputs["per_layer_embeddings"] = torch.ones(  # pyrefly: ignore[no-matching-overload]
         (
             batch_size,
             input_length,
@@ -103,7 +103,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLMGenerate(
     )
     return inputs
 
-  def forward(
+  def forward(  # pyrefly: ignore[bad-override]
       self,
       embeddings,
       per_layer_embeddings,

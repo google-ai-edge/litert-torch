@@ -76,7 +76,7 @@ class LiteRTExportableModuleForGemma3VisionAdapter(
     )
     eoi_emb = self.model.get_input_embeddings()(torch.tensor(eoi)[None, :])
 
-    mm_embedding = torch.concat([image_features, eoi_emb], axis=1)
+    mm_embedding = torch.concat([image_features, eoi_emb], axis=1)  # pyrefly: ignore[unexpected-keyword]
     return {'mm_embedding': mm_embedding}
 
   def get_sample_inputs(

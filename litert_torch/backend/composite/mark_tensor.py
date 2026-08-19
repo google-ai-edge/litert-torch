@@ -13,14 +13,14 @@
 # limitations under the License.
 # ==============================================================================
 import json
-from typing import Sequence, Union
+from typing import Mapping, Sequence, Union
 from litert_torch.backend import _torch_library  # pylint: disable=unused-import
 from litert_torch.backend import lowerings
 from litert_converter.mlir import ir
 from litert_converter.mlir.dialects import stablehlo
 import torch
 
-CompositeAttrType = dict[
+CompositeAttrType = Mapping[
     str,
     Union[
         int,

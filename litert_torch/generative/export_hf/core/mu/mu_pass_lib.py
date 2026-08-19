@@ -38,26 +38,26 @@ try:
 
     name = "hf-transformers-optimize"
 
-  @HFTransformersOptimize.register_rewrite_pattern(tfl.SumOp)
+  @HFTransformersOptimize.register_rewrite_pattern(tfl.SumOp)  # pyrefly: ignore[bad-argument-type]
   def fuse_mean(op: tfl.SumOp, rewriter) -> None:
     """A pattern that fuse sum-mul with mean."""
 
     with mm.MatchingContext():
       mm.match(op.name == "tfl.sum")
       reduction_axis = mm.op("arith.constant", None, [op.operands[1]])
-      mul_op = mm.op("tfl.mul", [op.results[0], mm.ANY], None)
+      mul_op = mm.op("tfl.mul", [op.results[0], mm.ANY], None)  # pyrefly: ignore[no-matching-overload]
       reduction_x = mm.op("arith.constant", None, [mul_op.operands[1]])
-      if len(reduction_x.numpy().shape) > 0:
-        if reduction_x.numpy().size != 1:
+      if len(reduction_x.numpy().shape) > 0:  # pyrefly: ignore[missing-attribute]
+        if reduction_x.numpy().size != 1:  # pyrefly: ignore[missing-attribute]
           return
-        red_x = reduction_x.numpy().flatten()[0]
+        red_x = reduction_x.numpy().flatten()[0]  # pyrefly: ignore[missing-attribute]
       else:
-        red_x = reduction_x.numpy()
+        red_x = reduction_x.numpy()  # pyrefly: ignore[missing-attribute]
       reduction_elements = int(1.0 / red_x)
 
-      input_shape = op.operands[0].type.shape
+      input_shape = op.operands[0].type.shape  # pyrefly: ignore[missing-attribute]
       infered_elements = int(
-          np.prod(np.take(input_shape, reduction_axis.numpy()))
+          np.prod(np.take(input_shape, reduction_axis.numpy()))  # pyrefly: ignore[missing-attribute]
       )
       if reduction_elements != infered_elements:
         return
@@ -73,6 +73,25 @@ try:
         )
         out.replace_by(mean_op.results[0])
         rewriter.erase_op(mul_op)
+
+  @HFTransformersOptimize.register_rewrite_pattern(tfl.CastOp)  # pyrefly: ignore[bad-argument-type]
+  def fuse_fp32cast_fc_fp16cast(op: tfl.CastOp, rewriter) -> None:
+    """A pattern that fuse fp32 fp16 fc with cast ops."""
+
+    with mm.MatchingContext():
+      mm.match(op.name == "tfl.cast")
+      fc_op = mm.op("tfl.fully_connected", None, [op.operands[0]])
+      top_cast_op = mm.op("tfl.cast", None, [fc_op.operands[0]])
+      out = op.results[0]
+
+      with core.OpBuildingContext(op):
+        new_fc = tfl.fully_connected(
+            input=top_cast_op.operands[0],
+            filter=fc_op.operands[1],
+            bias=fc_op.operands[2] if len(fc_op.operands) > 2 else None,
+        )
+        out.replace_by(new_fc)
+        rewriter.erase_op(op)
 
 except ImportError:
   _is_mu_available = False

@@ -93,21 +93,36 @@ _BACKEND = flags.DEFINE_enum(
 
 _LITERT_LM_MODEL_PATH = flags.DEFINE_string(
     'litert_lm_model_path',
-    '',
-    'Path to a LiteRT LM model to validate. If specified, the model will be'
-    ' used instead of exporting from Hugging Face.',
+    None,
+    'Path to the LiteRT LM model to validate. If not specified, will export '
+    'from HuggingFace.',
 )
+
+_DIFFBASE_LITERT_LM_MODEL_PATH = flags.DEFINE_string(
+    'diffbase_litert_lm_model_path',
+    None,
+    'Path to the LiteRT LM model to compare against. If not specified, will '
+    'compare against Transformers.',
+)
+
+_SLIDING_WINDOW_RING_BUFFER_SIZE = flags.DEFINE_integer(
+    'sliding_window_ring_buffer_size',
+    None,
+    'Size of the sliding window ring buffer.',
+)
+
 
 def run_transformers(
     model_id: str, prompts: list[str], max_new_tokens: int
 ) -> list[str]:
   print('Running transformers...')
   tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
+  assert tokenizer is not None, 'Tokenizer is None'
   model = transformers.AutoModelForCausalLM.from_pretrained(
       model_id, torch_dtype=torch.float32
   )
 
-  has_template = tokenizer.chat_template is not None
+  has_template = tokenizer.chat_template is not None  # pyrefly: ignore[missing-attribute]
   responses = []
   chat = []
   history_str = ''
@@ -121,7 +136,7 @@ def run_transformers(
       history_str += prompt
       formatted_prompt = history_str
 
-    inputs = tokenizer(
+    inputs = tokenizer(  # pyrefly: ignore[not-callable]
         formatted_prompt,
         return_tensors='pt',
         add_special_tokens=not has_template,
@@ -134,7 +149,7 @@ def run_transformers(
       )
     input_length = inputs.input_ids.shape[-1]
     generated_tokens = outputs[0][input_length:]
-    output_text = tokenizer.decode(
+    output_text = tokenizer.decode(  # pyrefly: ignore[missing-attribute]
         generated_tokens, skip_special_tokens=True
     ).strip()
     responses.append(output_text)
@@ -156,9 +171,9 @@ def run_litert_lm(
 ) -> list[str]:
   print('Running litert_lm...')
   if backend_str == 'npu':
-    backend = litert_lm.Backend.NPU(litert_dispatch_lib_dir='')
+    backend = litert_lm.Backend.NPU(litert_dispatch_lib_dir='')  # pyrefly: ignore[missing-attribute]
   else:
-    backend = litert_lm.Backend.CPU()
+    backend = litert_lm.Backend.CPU()  # pyrefly: ignore[missing-attribute]
   engine = litert_lm.Engine(
       model_path,
       backend,
@@ -207,8 +222,10 @@ def main(argv):
   print(f'Exporting model to {export_dir}...')
 
   try:
-    # Export model
-    if not _LITERT_LM_MODEL_PATH.value:
+    if _LITERT_LM_MODEL_PATH.value:
+      exported_model_path = _LITERT_LM_MODEL_PATH.value
+    else:
+      # Export model
       litert_torch_export.export(
           model=model_id,
           output_dir=export_dir,
@@ -218,17 +235,26 @@ def main(argv):
           externalize_embedder=_EXTERNALIZE_EMBEDDER.value,
           single_token_embedder=_SINGLE_TOKEN_EMBEDDER.value,
           split_cache=_SPLIT_CACHE.value,
+          sliding_window_ring_buffer_size=_SLIDING_WINDOW_RING_BUFFER_SIZE.value,
       )
 
       exported_model_path = os.path.join(export_dir, 'model.litertlm')
-    else:
-      exported_model_path = _LITERT_LM_MODEL_PATH.value
     if not os.path.exists(exported_model_path):
       raise FileNotFoundError(
           f'Exported model not found at {exported_model_path}'
       )
 
-    tf_outputs = run_transformers(model_id, prompts, max_new_tokens)
+    if _DIFFBASE_LITERT_LM_MODEL_PATH.value:
+      tf_outputs = run_litert_lm(
+          _DIFFBASE_LITERT_LM_MODEL_PATH.value,
+          prompts,
+          max_new_tokens,
+          _MAX_NUM_TOKENS.value,
+          _BACKEND.value,
+      )
+    else:
+      tf_outputs = run_transformers(model_id, prompts, max_new_tokens)
+
     lite_outputs = run_litert_lm(
         exported_model_path,
         prompts,

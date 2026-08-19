@@ -79,6 +79,12 @@ setup(
     packages=find_packages(
         include=["litert_torch*"],
     ),
+    package_data={
+        "litert_torch.generative.export_hf.experimental.npu_export": [
+            "*.json",
+            "configs/*.json",
+        ],
+    },
     python_requires=">=3.10",
     install_requires=[
         "absl-py",
@@ -100,6 +106,7 @@ setup(
         "sentencepiece",
         "rich",
         "litert-lm-builder>=0.0.0.dev0",
+        "pillow",
     ],
     entry_points={
         "console_scripts": [

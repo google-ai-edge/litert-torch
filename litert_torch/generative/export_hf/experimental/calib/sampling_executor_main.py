@@ -21,6 +21,13 @@ from absl import app
 from absl import flags
 from litert_torch.generative.export_hf.experimental.calib import loader
 from litert_torch.generative.export_hf.experimental.calib import sampling_executor as tfl_sampling_executor
+from litert_torch.generative.export_hf.experimental.litertlm_bundle import litertlm_bundle as litertlm_utils
+
+_INPUT_LITERTLM = flags.DEFINE_string(
+    'input_litertlm',
+    None,
+    'Optional path to input .litertlm file.',
+)
 
 _KV_CACHE_MAX_LEN = flags.DEFINE_integer(
     'kv_cache_max_len',
@@ -32,7 +39,6 @@ _MODEL_PATH = flags.DEFINE_string(
     'model_path',
     None,
     'Path to the model.',
-    required=True,
 )
 _DECODE_MODEL_PATH = flags.DEFINE_string(
     'decode_model_path',
@@ -43,13 +49,11 @@ _EMBEDDER_MODEL_PATH = flags.DEFINE_string(
     'embedder_model_path',
     None,
     'Path to the embedder model.',
-    required=True,
 )
 _AUXILIARY_MODEL_PATH = flags.DEFINE_string(
     'auxiliary_model_path',
     None,
     'Path to the auxiliary model.',
-    required=True,
 )
 _PLE_MODEL_PATH = flags.DEFINE_string(
     'ple_model_path',
@@ -128,6 +132,12 @@ _ENABLE_MIN_MAX_CALIBRATION_UPDATE = flags.DEFINE_bool(
     ' model is already heavily quantized. Using min/max will help us to find'
     ' the true range for k/v cache and rope signals.',
 )
+_USE_PROFILER_BASED_CALIBRATION = flags.DEFINE_bool(
+    'use_profiler_based_calibration',
+    False,
+    'Use profiler-based calibration.',
+)
+
 
 _ENABLE_FORMATTING = flags.DEFINE_bool(
     'enable_formatting',
@@ -164,9 +174,13 @@ def main(argv: Sequence[str]) -> None:
     prompt = _PROMPT.value
 
   print('--- Configuring executor...')
+  if _INPUT_LITERTLM.value:
+    print(f'--- Inspecting input .litertlm bundle: {_INPUT_LITERTLM.value}')
+    print(litertlm_utils.peek_litertlm(_INPUT_LITERTLM.value))
+
   config = loader.load_models(
       max_kv_cache_size=_KV_CACHE_MAX_LEN.value,
-      model_path=(_MODEL_PATH.value, _DECODE_MODEL_PATH.value),
+      model_path=(_MODEL_PATH.value, _DECODE_MODEL_PATH.value),  # pyrefly: ignore[bad-argument-type]
       embedder_model_path=_EMBEDDER_MODEL_PATH.value,
       spm_path=_SPM_PATH.value,
       transformers_model_path=_TRANSFORMERS_MODEL_PATH.value,
@@ -176,15 +190,25 @@ def main(argv: Sequence[str]) -> None:
       mm_adapter_model_path=_MM_ADAPTER_MODEL_PATH.value,
       enable_calibration=_ENABLE_CALIBRATION.value,
       enable_min_max_calibration_update=_ENABLE_MIN_MAX_CALIBRATION_UPDATE.value,
+      use_profiler_based_calibration=_USE_PROFILER_BASED_CALIBRATION.value,
+      input_litertlm=_INPUT_LITERTLM.value,
   )
 
   if _ENABLE_FORMATTING.value:
     assert (
         _TRANSFORMERS_MODEL_PATH.value is not None
-    ), 'Transformers model path is required for formatting.'
-    messages = [{'role': 'user', 'content': prompt}]
+        or config.tokenizer_config.transformers_model_path is not None
+        or config.tokenizer_config.tokenizer_json_path is not None
+    ), (
+        'Transformers model path or tokenizer JSON path is required for'
+        ' formatting.'
+    )
+    if isinstance(prompt, list) and all(isinstance(m, dict) for m in prompt):
+      messages = prompt
+    else:
+      messages = [{'role': 'user', 'content': prompt}]
     tokenizer = config.tokenizer_config.make().tx_tokenizer
-    prompt = tokenizer.apply_chat_template(
+    prompt = tokenizer.apply_chat_template(  # pyrefly: ignore[missing-attribute]
         messages,
         tokenize=False,
         add_generation_prompt=True,
@@ -195,13 +219,9 @@ def main(argv: Sequence[str]) -> None:
     config.early_terminate_suffix = _EARLY_TERMINATE_SUFFIX.value
   if _STOP_TOKEN.value is not None:
     config.stop_token = _STOP_TOKEN.value
+
   print('--- Initializing executor. Loading models...')
-  executor_cls = (
-      tfl_sampling_executor.ConversationExecutor
-      if _SECOND_PROMPT.value
-      else tfl_sampling_executor.Executor
-  )
-  executor = executor_cls(config, stream_output=_STREAM_OUTPUT.value)
+  executor = tfl_sampling_executor.ConversationExecutor(config)
   print('--- Models loaded. Starting sampling...')
 
   images = []
@@ -226,7 +246,7 @@ def main(argv: Sequence[str]) -> None:
     )
     print(f'Response:\n{response}')
 
-  if isinstance(prompt, list):
+  elif isinstance(prompt, list):
     for i, p in enumerate(prompt):
       print(f'\n--- Processing prompt {i} ---')
       print(f'Prompt:\n{p}')
@@ -238,7 +258,7 @@ def main(argv: Sequence[str]) -> None:
     print('\n--- Processing prompt ---')
     print(f'Prompt:\n{prompt}')
     response = executor.sample_text(
-        prompt, max_sample_step=_MAX_DECODE_STEPS.value
+        prompt, max_sample_step=_MAX_DECODE_STEPS.value  # pyrefly: ignore[bad-argument-type]
     )
     print(f'Response:\n{response}')
 
@@ -247,16 +267,17 @@ def main(argv: Sequence[str]) -> None:
     if _ENABLE_FORMATTING.value:
       assert (
           _TRANSFORMERS_MODEL_PATH.value is not None
+          or config.tokenizer_config.transformers_model_path is not None
       ), 'Transformers model path is required for formatting.'
       messages = [{'role': 'user', 'content': second_prompt}]
       tokenizer = config.tokenizer_config.make().tx_tokenizer
-      second_prompt = tokenizer.apply_chat_template(
+      second_prompt = tokenizer.apply_chat_template(  # pyrefly: ignore[missing-attribute]
           messages,
           tokenize=False,
           add_generation_prompt=True,
       )
-      if tokenizer.special_tokens_map.get('bos_token', None):
-        bos_token = tokenizer.special_tokens_map['bos_token']
+      if tokenizer.special_tokens_map.get('bos_token', None):  # pyrefly: ignore[missing-attribute]
+        bos_token = tokenizer.special_tokens_map['bos_token']  # pyrefly: ignore[missing-attribute]
         second_prompt = '\n' + second_prompt.removeprefix(bos_token)
       print(f'--- Formatted second prompt:\n\n{second_prompt}')
     print('\n--- Processing second prompt ---')

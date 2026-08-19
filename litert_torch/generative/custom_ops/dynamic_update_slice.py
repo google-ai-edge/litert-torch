@@ -16,9 +16,27 @@
 from dataclasses import dataclass
 from typing import Sequence
 from litert_torch.backend import lowerings
+from litert_torch.hlfb import StableHLOCompositeBuilder
 from litert_converter.mlir import ir
 from litert_converter.mlir.dialects import stablehlo
 import torch
+
+
+def dynamic_update_slice_composite(
+    in_tensor: torch.Tensor,
+    update: torch.Tensor,
+    start_indices: torch.Tensor,
+) -> torch.Tensor:
+  """Dynamic update slice op for in place update."""
+  builder = StableHLOCompositeBuilder(
+      name="tfl.dynamic_update_slice",
+  )
+  in_tensor, update, start_indices = builder.mark_inputs(
+      in_tensor, update, start_indices
+  )
+  out = dynamic_update_slice(in_tensor, update, [x for x in start_indices])
+  out = builder.mark_outputs(out)
+  return out
 
 
 # Use torch.library.custom_op to define a new custom operator.

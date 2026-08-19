@@ -1,0 +1,20 @@
+{
+  "model_id": "Qwen/Qwen3-0.6B",
+  "backend": "qualcomm",
+  "soc_model": "SM8750",
+  "weight_quantization_recipe": "dynamic_wi8_afp32",
+  "k_ts_idx": 3,
+  "v_ts_idx": 2,
+  "use_float_input_output_normalizer": false,
+  "skip_mlir_passes": true,
+  "prefill_lengths": [
+    128
+  ],
+  "cache_length": 1024,
+  "max_calibration_decode_steps": 32,
+  "calibration_dataset_format": "jsonl",
+  "calibration_eval_task_names": "ALL",
+  "use_profiler_based_calibration": true,
+  "enable_min_max_calibration_update": true,
+  "calibration_range_scale": 1.0
+}

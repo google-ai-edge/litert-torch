@@ -45,7 +45,11 @@ def build_cache_data(
       value_cache = torch.randn(
           1, batch_size, head_dim, context_len, dtype=torch.float32
       )
-    cache_data.append(cache_lib.LiteRTLMCacheLayer(key_cache, value_cache))
+    cache_data.append(
+        cache_lib.LiteRTLMCacheLayer(
+            key_cache, value_cache, layer_type="full_attention"
+        )
+    )
   return cache_data
 
 
@@ -205,9 +209,9 @@ class CacheTest(googletest.TestCase):
         self.hidden_size = 256
         self.num_attention_heads = 8
         self.layer_types = [
-            "local_attention",
+            "sliding_attention",
             "full_attention",
-            "local_attention",
+            "sliding_attention",
             "full_attention",
         ]
         self.num_kv_shared_layers = 1
@@ -253,7 +257,73 @@ class CacheTest(googletest.TestCase):
     kv_cache.remove_dummy_cache_layers(model_config)
     self.assertLen(kv_cache.layers, 3)
 
+  def test_linear_attention_conv_cache(self):
+    class MockQwenConfig:
+
+      def __init__(self):
+        self.num_hidden_layers = 2
+        self.layer_types = ["full_attention", "linear_attention"]
+        self.hidden_size = 64
+        self.num_attention_heads = 4
+        self.num_key_value_heads = 2
+        self.head_dim = 16
+        self.linear_conv_kernel_dim = 4
+        self.linear_key_head_dim = 16
+        self.linear_value_head_dim = 16
+        self.linear_num_key_heads = 2
+        self.linear_num_value_heads = 4
+
+    class MockExportConfig:
+
+      def __init__(self):
+        self.batch_size = 1
+        self.cache_length = 128
+        self.k_ts_idx = 2
+        self.v_ts_idx = 2
+        self.experimental_use_fp16 = False
+
+    model_config = MockQwenConfig()
+    export_config = MockExportConfig()
+
+    kv_cache = cache_lib.LiteRTLMCache.create_from_config(
+        model_config, export_config
+    )
+    self.assertLen(kv_cache.layers, 2)
+    self.assertIsInstance(kv_cache.layers[0], cache_lib.LiteRTLMCacheLayer)
+    self.assertIsInstance(kv_cache.layers[1], cache_lib.LiteRTLMConvCacheLayer)
+
+    conv_layer = kv_cache.layers[1]
+    self.assertIsNotNone(conv_layer.recurrent_states)
+    self.assertEqual(conv_layer.conv_states.shape, (1, 2 * 16 * 2 + 4 * 16, 3))
+    self.assertEqual(conv_layer.recurrent_states.shape, (1, 4, 16, 16))
+
+    # Test update_recurrent_state
+    new_r = torch.ones_like(conv_layer.recurrent_states)
+    conv_layer.update_recurrent_state(new_r)
+    self.assertTrue(torch.allclose(conv_layer.recurrent_states, new_r))
+
+    # Test flatten / unflatten roundtrip
+    flattened, context = cache_lib._flatten_kvc_t(kv_cache)
+    self.assertLen(flattened, 4)  # k_0, v_0, c_1, r_1
+    flat_names = context[0]
+    self.assertEqual(flat_names, ["k_0", "v_0", "c_1", "r_1"])
+
+    unflattened = cache_lib._unflatten_kvc_t(flattened, context)
+    self.assertIsInstance(
+        unflattened.layers[1], cache_lib.LiteRTLMConvCacheLayer
+    )
+    self.assertTrue(
+        torch.allclose(
+            unflattened.layers[1].conv_states, conv_layer.conv_states
+        )
+    )
+    self.assertTrue(
+        torch.allclose(
+            unflattened.layers[1].recurrent_states, conv_layer.recurrent_states
+        )
+    )
 
 
 if __name__ == "__main__":
   googletest.main()
+

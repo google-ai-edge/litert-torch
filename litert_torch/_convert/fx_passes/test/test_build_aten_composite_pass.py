@@ -61,6 +61,7 @@ def _export_to_stablehlo_with_composite(
       exported_program,
       fx_infra.decomp.pre_convert_decomp(),
   )
+
   exported_program = fx_infra.run_passes(
       exported_program,
       [
@@ -342,6 +343,59 @@ class TestBuildAtenCompositePass(googletest.TestCase):
     self.assertEqual(
         backend_configs.count('{"size": [15, 20], "is_nchw_op": true}'), 1
     )
+
+  def test_reflection_pad2d(self):
+    stablehlo = _export_to_stablehlo_with_composite(
+        lambda x: torch.nn.functional.pad(x, [1, 1, 2, 2], mode='reflect'),
+        (torch.rand(1, 3, 10, 10),),
+    )
+    self.assertEqual(stablehlo.count('stablehlo.custom_call @mark_tensor'), 2)
+    backend_configs = _extract_backend_configs(stablehlo)
+    self.assertEqual(
+        backend_configs.count(
+            '"attr": {"mode": "REFLECT", "paddings": [1, 1, 2, 2],'
+            ' "is_nchw_op": true}'
+        ),
+        1,
+    )
+
+  def test_reflection_pad2d_large(self):
+    stablehlo = _export_to_stablehlo_with_composite(
+        lambda x: torch.nn.functional.pad(x, [2, 2, 2, 2], mode='reflect'),
+        (torch.rand(1, 3, 10, 10),),
+    )
+    self.assertEqual(stablehlo.count('stablehlo.custom_call @mark_tensor'), 2)
+    backend_configs = _extract_backend_configs(stablehlo)
+    self.assertEqual(
+        backend_configs.count(
+            '"attr": {"mode": "REFLECT", "paddings": [2, 2, 2, 2],'
+            ' "is_nchw_op": true}'
+        ),
+        1,
+    )
+
+  def test_replication_pad2d(self):
+    stablehlo = _export_to_stablehlo_with_composite(
+        lambda x: torch.nn.functional.pad(x, [1, 1, 1, 1], mode='replicate'),
+        (torch.rand(1, 3, 10, 10),),
+    )
+    self.assertEqual(stablehlo.count('stablehlo.custom_call @mark_tensor'), 2)
+    backend_configs = _extract_backend_configs(stablehlo)
+    self.assertEqual(
+        backend_configs.count(
+            '"attr": {"mode": "SYMMETRIC", "paddings": [1, 1, 1, 1],'
+            ' "is_nchw_op": true}'
+        ),
+        1,
+    )
+
+  def test_replication_pad2d_large(self):
+    stablehlo = _export_to_stablehlo_with_composite(
+        lambda x: torch.nn.functional.pad(x, [2, 2, 2, 2], mode='replicate'),
+        (torch.rand(1, 3, 10, 10),),
+    )
+    # Should decompose, so no mark_tensor for mirror_pad
+    self.assertEqual(stablehlo.count('stablehlo.custom_call @mark_tensor'), 0)
 
 
 if __name__ == '__main__':

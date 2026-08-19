@@ -37,7 +37,7 @@ class LiteRTExportableModuleForGemma3nVisionEncoder(
         self.model.config.vision_soft_tokens_per_image,
     ).permute(0, 2, 1)
     # Normalize and embed the soft tokens into language model space.
-    vision_outputs *= self.model.config.vision_config.hidden_size**0.5
+    vision_outputs *= self.model.config.vision_config.hidden_size**0.5  # pyrefly: ignore[unsupported-operation]
     return {'features': vision_outputs}
 
 
@@ -56,7 +56,7 @@ class LiteRTExportableModuleForGemma3nVisionAdapter(
     )
     eoi_emb = self.model.get_input_embeddings()(torch.tensor(eoi)[None, :])
 
-    mm_embedding = torch.concat([image_features, eoi_emb], axis=1)
+    mm_embedding = torch.concat([image_features, eoi_emb], axis=1)  # pyrefly: ignore[unexpected-keyword]
     return {'mm_embedding': mm_embedding}
 
   def get_sample_inputs(

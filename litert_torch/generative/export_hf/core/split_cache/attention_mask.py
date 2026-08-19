@@ -16,6 +16,7 @@
 
 import dataclasses
 from typing import Any, List, Tuple
+from litert_torch.generative.export_hf.core.sliding_window import attention_mask as sliding_window_mask_lib
 import torch
 from torch import nn
 import torch.utils._pytree as pytree
@@ -107,7 +108,7 @@ def _flatten_mask_with_keys(
     mask: Mask,
 ) -> tuple[list[tuple[pytree.KeyEntry, Any]], Any]:
   flattened, (flat_names, _) = _flatten_mask(mask)
-  return [
+  return [  # pyrefly: ignore[bad-return]
       (pytree.MappingKey(k), v) for k, v in zip(flat_names, flattened)
   ], flat_names
 
@@ -115,7 +116,7 @@ def _flatten_mask_with_keys(
 pytree.register_pytree_node(
     Mask,
     _flatten_mask,
-    _unflatten_mask,
+    _unflatten_mask,  # pyrefly: ignore[bad-argument-type]
     flatten_with_keys_fn=_flatten_mask_with_keys,
     serialized_type_name='',
 )
@@ -123,7 +124,7 @@ pytree.register_pytree_node(
 pytree.register_pytree_node(
     SplitMask,
     _flatten_mask,
-    _unflatten_mask,
+    _unflatten_mask,  # pyrefly: ignore[bad-argument-type]
     flatten_with_keys_fn=_flatten_mask_with_keys,
     serialized_type_name='',
 )
@@ -195,9 +196,17 @@ def build_full_mask(
     S: int,  # pylint: disable=invalid-name
     time_step: torch.Tensor,
     valid_mask: torch.Tensor,
+    sliding_window_ring_buffer_size: int | None = None,
 ):
   """Builds full attention mask."""
-  left_mask = generate_causal_left(input_tokens, W, S, time_step)
+  if W is not None and sliding_window_ring_buffer_size is not None:
+    # Local layer with ring buffer.
+    left_mask = sliding_window_mask_lib.generate_causal_left_with_ring_buffer(
+        valid_mask, W, sliding_window_ring_buffer_size, time_step
+    )
+  else:
+    # Global layer or local layer without ring buffer.
+    left_mask = generate_causal_left(input_tokens, W, S, time_step)
   right_mask = generate_causal_right(input_tokens, W, valid_mask)
 
   mask = torch.cat([left_mask, right_mask], dim=-1)
@@ -212,10 +221,12 @@ class SplitAttentionMask(nn.Module):
       self,
       context_size: int,
       sliding_window_size: int | None = None,
+      sliding_window_ring_buffer_size: int | None = None,
   ):
     super().__init__()
     self.context_size = context_size
     self.sliding_window_size = sliding_window_size
+    self.sliding_window_ring_buffer_size = sliding_window_ring_buffer_size
 
   def forward(self, input_tokens, time_step, valid_mask):
     # input_tokens: [1, T]
@@ -227,4 +238,5 @@ class SplitAttentionMask(nn.Module):
         self.context_size,
         time_step,
         valid_mask,
+        self.sliding_window_ring_buffer_size,
     )

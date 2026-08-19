@@ -17,6 +17,7 @@
 from typing import Optional
 
 from litert_torch.backend.lowerings import registry
+from litert_torch.backend.lowerings import utils
 from litert_converter.mlir import ir
 from litert_converter.mlir.dialects import stablehlo
 import torch
@@ -79,28 +80,95 @@ def build_transpose_conv(
     output_padding: list[int],
     groups: int,
 ):
-  del lctx, output_padding
+  del lctx
   lhs_type: ir.RankedTensorType = lhs.type
   num_spatial_dims = len(lhs_type.shape) - 2
   rhs = stablehlo.reverse(rhs, list(range(2, 2 + num_spatial_dims)))
 
   kernel_size = rhs.type.shape
-  # We need to additional padding on the input to get the right output size.
+  # We need additional padding on the input to get the right output size.
   adjusted_padding = [
       dilation[dim] * (kernel_size[dim + 2] - 1) - padding[dim]
       for dim in range(num_spatial_dims)
   ]
-  return stablehlo.convolution(
-      result=output_type,
-      lhs=lhs,
-      rhs=rhs,
-      dimension_numbers=create_conv_dimension_numbers(lhs, True),
-      feature_group_count=groups,
-      batch_group_count=1,
-      padding=make_padding(adjusted_padding),
-      lhs_dilation=stride,
-      rhs_dilation=dilation,
+
+  unpadded_shape = list(output_type.shape)
+  if output_padding:
+    for dim in range(num_spatial_dims):
+      if len(output_padding) > dim and output_padding[dim] > 0:
+        unpadded_shape[dim + 2] -= output_padding[dim]
+  unpadded_output_type = ir.RankedTensorType.get(
+      unpadded_shape, output_type.element_type
   )
+
+  if num_spatial_dims == 1:
+    # TFLite schema only natively supports 2D spatial TRANSPOSE_CONV.
+    # Expand 1D spatial tensors [N, C, L] to 2D [N, C, 1, L], perform 2D
+    # transposed conv, and reshape back to 1D [N, C, L'].
+    lhs_2d_type = ir.RankedTensorType.get(
+        [lhs_type.shape[0], lhs_type.shape[1], 1, lhs_type.shape[2]],
+        lhs_type.element_type,
+    )
+    lhs_2d = stablehlo.ReshapeOp(lhs_2d_type, lhs).result
+
+    rhs_2d_type = ir.RankedTensorType.get(
+        [rhs.type.shape[0], rhs.type.shape[1], 1, rhs.type.shape[2]],
+        rhs.type.element_type,
+    )
+    rhs_2d = stablehlo.ReshapeOp(rhs_2d_type, rhs).result
+
+    conv_2d_out_type = ir.RankedTensorType.get(
+        [
+            unpadded_output_type.shape[0],
+            unpadded_output_type.shape[1],
+            1,
+            unpadded_output_type.shape[2],
+        ],
+        unpadded_output_type.element_type,
+    )
+
+    conv_2d_res = stablehlo.convolution(
+        result=conv_2d_out_type,
+        lhs=lhs_2d,
+        rhs=rhs_2d,
+        dimension_numbers=create_conv_dimension_numbers(lhs_2d, True),
+        feature_group_count=groups,
+        batch_group_count=1,
+        padding=make_padding([0, adjusted_padding[0]]),
+        lhs_dilation=[1, stride[0]],
+        rhs_dilation=[1, dilation[0]],
+    )
+    res = stablehlo.ReshapeOp(unpadded_output_type, conv_2d_res).result
+  else:
+    res = stablehlo.convolution(
+        result=unpadded_output_type,
+        lhs=lhs,
+        rhs=rhs,
+        dimension_numbers=create_conv_dimension_numbers(lhs, True),
+        feature_group_count=groups,
+        batch_group_count=1,
+        padding=make_padding(adjusted_padding),
+        lhs_dilation=stride,
+        rhs_dilation=dilation,
+    )
+
+  if output_padding and any(output_padding):
+    rank = len(output_type.shape)
+    pad_value = utils.splat(0, output_type.element_type, [])
+    edge_low = [0] * rank
+    edge_high = [0] * rank
+    for dim in range(num_spatial_dims):
+      if len(output_padding) > dim:
+        edge_high[dim + 2] = output_padding[dim]
+    res = stablehlo.pad(
+        res,
+        pad_value,
+        edge_padding_low=edge_low,
+        edge_padding_high=edge_high,
+        interior_padding=[0] * rank,
+    )
+
+  return res
 
 
 # convolution(Tensor input, Tensor weight, Tensor? bias, SymInt[] stride,
@@ -120,10 +188,10 @@ def _aten_convolution(
     groups: int,
 ):
 
-  # TODO(b/365559296) Add support for output_padding
-  if any(output_padding):
+  # TODO(b/365559296) Add support for output_padding on regular convs
+  if not transposed and any(output_padding):
     raise NotImplementedError(
-        "Output padding on convolution is not implemented."
+        "Output padding on regular convolution is not implemented."
     )
 
   out_aval = lctx.node.meta.get("tensor_meta") or lctx.node.meta.get("val")

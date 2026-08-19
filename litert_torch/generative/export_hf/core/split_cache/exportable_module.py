@@ -29,7 +29,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
 ):
   """Exportable module for decoder only LM."""
 
-  def adapt_inputs(
+  def adapt_inputs(  # pyrefly: ignore[bad-override]
       self,
       embeddings,
       pos_emb,
@@ -87,7 +87,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
       language_model = self.model.model.language_model
 
     assert language_model.original_rotary_emb is not None
-    language_model.rotary_emb.data = (
+    language_model.rotary_emb.data = (  # pyrefly: ignore[missing-attribute]
         pos_emb_cos.permute(0, 2, 1, 3).squeeze(0),
         pos_emb_sin.permute(0, 2, 1, 3).squeeze(0),
     )
@@ -101,7 +101,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
               pos_emb_local_sin.permute(0, 2, 1, 3).squeeze(0),
           ),
       }
-      language_model.rotary_emb.data = rope_data
+      language_model.rotary_emb.data = rope_data  # pyrefly: ignore[missing-attribute]
 
     return ret
 
@@ -110,20 +110,22 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
     k_slices = []
     v_slices = []
     for layer in output_cache.layers:
-      k_slices.append(layer.keys[1])
-      v_slices.append(layer.values[1])
+      k_slices.append(layer.keys[1])  # pyrefly: ignore[missing-attribute]
+      v_slices.append(layer.values[1])  # pyrefly: ignore[missing-attribute]
     assert all(x is not None for x in k_slices)
     assert all(x is not None for x in v_slices)
     return {'kv_slice_k': k_slices, 'kv_slice_v': v_slices}
 
   def _get_input(self, batch_size, input_length, cache_length):
 
+    export_config = self.export_config
+
     model_config = self.model.model.config
     if hasattr(model_config, 'text_config'):
       model_config = model_config.text_config
     embed_size_per_head = (
         getattr(model_config, 'head_dim', None)
-        or model_config.hidden_size // model_config.num_attention_heads
+        or model_config.hidden_size // model_config.num_attention_heads  # pyrefly: ignore[unsupported-operation]
     )
     if hasattr(model_config, 'global_head_dim'):
       global_embed_size_per_head = (
@@ -133,17 +135,17 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
       global_embed_size_per_head = embed_size_per_head
 
     sample_inputs = {
-        'embeddings': torch.ones(
+        'embeddings': torch.ones(  # pyrefly: ignore[no-matching-overload]
             (batch_size, input_length, model_config.hidden_size),
             dtype=torch.float32,
         ),
     }
     pos_emb = {
-        'cos': torch.ones(
+        'cos': torch.ones(  # pyrefly: ignore[no-matching-overload]
             (1, input_length, 1, global_embed_size_per_head),
             dtype=torch.float32,
         ),
-        'sin': torch.ones(
+        'sin': torch.ones(  # pyrefly: ignore[no-matching-overload]
             (1, input_length, 1, global_embed_size_per_head),
             dtype=torch.float32,
         ),
@@ -164,8 +166,17 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
         'global': torch.ones(mask_shape, dtype=torch.float32),
     }
     if utils.has_sliding_attention(self.model):
+      if export_config.sliding_window_ring_buffer_size is not None:
+        local_mask_shape = (
+            1,
+            1,
+            input_length,
+            export_config.sliding_window_ring_buffer_size + input_length,
+        )
+      else:
+        local_mask_shape = mask_shape
       mask.update({
-          'local': torch.ones(mask_shape, dtype=torch.float32),
+          'local': torch.ones(local_mask_shape, dtype=torch.float32),
       })
     sample_inputs.update({
         'mask': mask,
@@ -267,21 +278,29 @@ class SplitAttentionMaskBuilder(nn.Module):
 
   def __init__(
       self,
-      context_size: int,
+      export_config: base_exportable_module.ExportableModuleConfig,
       sliding_window_sizes: list[int | None] | None = None,
   ):
     super().__init__()
+    context_size = export_config.cache_length
+    sliding_window_ring_buffer_size = (
+        export_config.sliding_window_ring_buffer_size
+    )
     if sliding_window_sizes is None:
       sliding_window_sizes = [None]
     local_masks = {}
-    self.global_mask = attention_mask.SplitAttentionMask(context_size, None)
+    self.global_mask = attention_mask.SplitAttentionMask(
+        context_size, None, sliding_window_ring_buffer_size
+    )
     for sliding_window_size in sliding_window_sizes:
       if sliding_window_size is not None:
         local_masks[sliding_window_size] = attention_mask.SplitAttentionMask(
-            context_size, sliding_window_size
+            context_size, sliding_window_size, sliding_window_ring_buffer_size
         )
       else:
-        self.global_mask = attention_mask.SplitAttentionMask(context_size, None)
+        self.global_mask = attention_mask.SplitAttentionMask(
+            context_size, None, sliding_window_ring_buffer_size
+        )
     self.local_masks = local_masks
 
   def forward(
@@ -342,19 +361,22 @@ class CacheUpdate(torch.nn.Module):
       kv_slice: base_cache_lib.LiteRTLMCache,
       kv_cache: base_cache_lib.LiteRTLMCache,
       input_pos: torch.Tensor,
+      valid_mask: torch.Tensor | None = None,
   ):
     assert len(kv_slice.layers) == len(kv_cache.layers)
     num_layers = len(kv_slice.layers)
 
     cache_kwargs = {'cache_position': input_pos, 'kv_slice_preprocessed': True}
+    if valid_mask is not None:
+      cache_kwargs['valid_mask'] = valid_mask
     kv_cache.set_cache_runtime_args(cache_kwargs)
 
     for i in range(num_layers):
       # TODO(weiyiw): Fix for linear attention layers.
       assert hasattr(kv_slice.layers[i], 'keys')
       assert hasattr(kv_slice.layers[i], 'values')
-      k_slice = kv_slice.layers[i].keys
-      v_slice = kv_slice.layers[i].values
+      k_slice = kv_slice.layers[i].keys  # pyrefly: ignore[missing-attribute]
+      v_slice = kv_slice.layers[i].values  # pyrefly: ignore[missing-attribute]
       kv_cache.update(k_slice, v_slice, i)
 
     return {'kv_cache': kv_cache}
@@ -372,6 +394,8 @@ class CacheUpdate(torch.nn.Module):
     )
     slice_export_config = copy.deepcopy(export_config)
     slice_export_config.cache_length = input_length
+    if slice_export_config.sliding_window_ring_buffer_size is not None:
+      slice_export_config.sliding_window_ring_buffer_size = input_length
     kv_slice = base_cache_lib.LiteRTLMCache.create_from_config(
         model_config, slice_export_config
     )
@@ -379,6 +403,7 @@ class CacheUpdate(torch.nn.Module):
         'kv_cache': kv_cache,
         'kv_slice': kv_slice,
         'input_pos': torch.ones((input_length), dtype=torch.int32),
+        'valid_mask': torch.ones((1, input_length), dtype=torch.bool),
     }
 
   @classmethod

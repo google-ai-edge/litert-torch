@@ -71,7 +71,7 @@ def log(message: str):
   """Log a message."""
   if not config.show_progress:
     return
-  console.print(
+  console.print(  # pyrefly: ignore[missing-attribute]
       f"{_stack_elapsed_time()} [bold blue][ INFO][/bold blue] {message}"
   )
 
@@ -87,20 +87,20 @@ def task(name: str) -> Generator[None, None, None]:
   _task_stack.append(current_task)
 
   stack_view = _task_stack_repr()
-  console.print(
+  console.print(  # pyrefly: ignore[missing-attribute]
       f"{_stack_elapsed_time()} [bold cyan][START][/bold cyan] {stack_view}"
   )
 
   try:
     yield
   except Exception:
-    console.print(
+    console.print(  # pyrefly: ignore[missing-attribute]
         f"{_stack_elapsed_time()} [bold red][ FAIL][/bold red] {stack_view}"
     )
     raise
   else:
     elapsed_time = time.perf_counter() - current_task.start_time
-    console.print(
+    console.print(  # pyrefly: ignore[missing-attribute]
         f"{_stack_elapsed_time()} [bold green][ DONE][/bold green]"
         f" [dim]{stack_view}[/dim]"
         f" [dim](+[/dim]{_style_elapsed_time(elapsed_time)}[dim])[/dim]"

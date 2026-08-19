@@ -80,6 +80,6 @@ def build_model(
       config=get_model_config(),
       tensor_names=TENSOR_NAMES,
       model_class=AmdLlama,
-      custom_loader=custom_loader,
+      custom_loader=custom_loader,  # pyrefly: ignore[bad-argument-type]
       mask_cache_size=mask_cache_size,
   )

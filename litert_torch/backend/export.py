@@ -209,11 +209,11 @@ class MlirLowered:
   def __repr__(self):
     return str(self.get_text(enable_debug_info=False))
 
-  def get_text(self, enable_debug_info=False):
+  def get_text(self, enable_debug_info=False, large_elements_limit=16):
     return str(
         self.module.operation.get_asm(
             enable_debug_info=enable_debug_info,
-            large_elements_limit=16,
+            large_elements_limit=large_elements_limit,
         )
     )
 

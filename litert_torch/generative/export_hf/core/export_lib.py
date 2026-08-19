@@ -19,6 +19,7 @@ import dataclasses
 import gc
 import json
 import os
+from typing import Any
 
 import huggingface_hub
 from litert_torch import fx_infra
@@ -31,18 +32,18 @@ from litert_torch.generative.export_hf.core import exportable_module_config
 from litert_torch.generative.export_hf.core import patches as _
 from litert_torch.generative.export_hf.core import utils
 from litert_torch.generative.export_hf.core.external_emb import exportable_module as external_emb_module
-
-ExportTask = exportable_module_config.ExportTask
 from litert_torch.generative.export_hf.core.external_rope import exportable_module as external_rope_module
 from litert_torch.generative.export_hf.core.external_rope import preprocess_model as external_rope_preprocess_model
 from litert_torch.generative.export_hf.core.mu import mu_pass_lib
 from litert_torch.generative.export_hf.core.split_cache import attention as _
 from litert_torch.generative.export_hf.core.split_cache import exportable_module as split_cache_module
+from litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler import litert_lm_npu_compiler
 from litert_torch.generative.export_hf.model_ext import exportables as model_ext_exportables
 from litert_torch.generative.export_hf.model_ext import extension as model_ext_extension
 from litert_torch.generative.export_hf.model_ext import patches as model_ext_patches
 from litert_torch.generative.tools import tokenizer_to_sentencepiece_lib as tokenizer_lib
 import torch
+from torch import nn
 import transformers
 
 from ai_edge_litert.aot import aot_compile
@@ -50,6 +51,8 @@ from ai_edge_litert.aot.core import aot_types
 from ai_edge_litert.aot.vendors import import_vendor
 from ai_edge_quantizer import quantizer as quantizer_lib
 from ai_edge_quantizer import recipe as recipe_lib
+
+ExportTask = exportable_module_config.ExportTask
 
 
 @dataclasses.dataclass
@@ -72,6 +75,7 @@ class ExportedModelArtifacts:
   embedder_model_path: str | None = None
   vision_encoder_model_path: str | None = None
   vision_adapter_model_path: str | None = None
+  eoi_model_path: str | None = None
   auxiliary_model_path: str | None = None
   tokenizer_model_path: str | None = None
   additional_model_paths: dict[str, str] | None = None
@@ -122,9 +126,9 @@ def verify_model_compatibility(model, model_config, text_model_config):
 
 @contextlib.contextmanager
 def patch_builtin_tuple_for_export():
-  """Context manager that temporarily injects a .to() method into Python's
+  """Temporarily injects a .to() method into Python's built-in tuple type.
 
-  built-in tuple type, and safely removes it upon exiting the scope.
+  Safely removes it upon exiting the scope.
   """
   tuple_dict = gc.get_referents(tuple.__dict__)[0]
 
@@ -148,21 +152,112 @@ def patch_builtin_tuple_for_export():
       del tuple_dict['to']
 
 
+def pre_split_model_experts(model: nn.Module) -> nn.Module:
+  """Splits 3D expert weight tensors into separate parameters to bypass LiteRT constant folding."""
+  for module in model.modules():
+    # Identify native MoE Experts modules
+    if (
+        hasattr(module, 'gate_up_proj')
+        and getattr(module, 'num_experts', None) is not None
+    ):
+
+      # 1. Pre-split gate_up_proj [num_experts, out_features, in_features]
+      gate_up_splits = torch.unbind(module.gate_up_proj.data, dim=0)
+      module.split_gate_up_proj = nn.ParameterList(
+          [nn.Parameter(w) for w in gate_up_splits]
+      )
+      delattr(module, 'gate_up_proj')  # Deletes the original 3D parameter
+
+      # 2. Pre-split down_proj [num_experts, out_features, in_features]
+      down_splits = torch.unbind(module.down_proj.data, dim=0)
+      module.split_down_proj = nn.ParameterList(
+          [nn.Parameter(w) for w in down_splits]
+      )
+      delattr(module, 'down_proj')
+
+      # 3. Pre-split optional biases if they exist
+      if getattr(module, 'gate_up_bias', None) is not None:
+        gate_up_bias_splits = torch.unbind(module.gate_up_bias.data, dim=0)
+        module.split_gate_up_bias = nn.ParameterList(
+            [nn.Parameter(b) for b in gate_up_bias_splits]
+        )
+        delattr(module, 'gate_up_bias')
+
+      if getattr(module, 'down_bias', None) is not None:
+        down_bias_splits = torch.unbind(module.down_bias.data, dim=0)
+        module.split_down_bias = nn.ParameterList(
+            [nn.Parameter(b) for b in down_bias_splits]
+        )
+        delattr(module, 'down_bias')
+
+  return model
+
+
 @progress.task('Load source model')
 def load_model(
     model_path: str,
+    export_config: exportable_module.ExportableModuleConfig,
     trust_remote_code: bool = False,
     auto_model_override: str | None = None,
     task: ExportTask | str = ExportTask.TEXT_GENERATION,
 ) -> SourceModelArtifacts:
   """Loads model from checkpoint."""
 
-  config = transformers.AutoConfig.from_pretrained(
-      model_path,
-      dtype=torch.float32,
-      trust_remote_code=trust_remote_code,
-  )
+  try:
+    config = transformers.AutoConfig.from_pretrained(
+        model_path,
+        dtype=torch.float32,
+        trust_remote_code=trust_remote_code,
+    )
+  except (KeyError, ValueError):
+    # Fallback to PretrainedConfig if the model architecture is not built into
+    # transformers AutoConfig.
+    config_dict, _ = transformers.PretrainedConfig.get_config_dict(
+        model_path, trust_remote_code=trust_remote_code
+    )
+    config = transformers.PretrainedConfig.from_dict(config_dict)
+
+  # Opt-in to global access for per-layer config attributes to avoid blocking heterogeneous pipelines
+  if hasattr(config, 'allow_global_per_layer_attribute_access'):
+    config.allow_global_per_layer_attribute_access = True
+  if hasattr(config, 'text_config') and hasattr(
+      config.text_config, 'allow_global_per_layer_attribute_access'
+  ):
+    config.text_config.allow_global_per_layer_attribute_access = True
+
+  if task == ExportTask.AUTOMATIC_SPEECH_RECOGNITION:
+    model_cls = model_ext_exportables.get_speech_model_cls(config.model_type)
+    model = model_cls(model_path, override_transformers=True)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
+    return SourceModelArtifacts(
+        model=model,
+        model_config=config,
+        text_model_config=config,
+        tokenizer=tokenizer,  # pyrefly: ignore[bad-argument-type]
+    )
+
+  if task == ExportTask.TEXT_TO_SPEECH:
+    model_cls = model_ext_exportables.get_tts_model_cls(config.model_type)
+    model = model_cls(model_path, export_config=export_config)
+    try:
+      tokenizer = transformers.AutoTokenizer.from_pretrained(
+          model_path, trust_remote_code=trust_remote_code
+      )
+    except Exception:  # pylint: disable=broad-exception-caught
+      tokenizer = None
+    return SourceModelArtifacts(
+        model=model,
+        model_config=config,
+        text_model_config=config,
+        tokenizer=tokenizer,  # pyrefly: ignore[bad-argument-type]
+    )
+
   config._attn_implementation = 'lrt_transposed_attention'  # pylint: disable=protected-access
+
+  if export_config.moe_exports_implementation:
+    config._experts_implementation = export_config.moe_exports_implementation  # pylint: disable=protected-access
+    if hasattr(config, 'text_config'):
+      config.text_config._experts_implementation = export_config.moe_exports_implementation  # pylint: disable=protected-access
 
   if task == ExportTask.TEXT_GENERATION:
     auto_model_cls = transformers.AutoModelForCausalLM
@@ -174,12 +269,19 @@ def load_model(
     auto_model_cls = transformers.__dict__[auto_model_override]
 
   with model_ext_patches.get_patch_context(config.model_type):
-    model = auto_model_cls.from_pretrained(
-        model_path,
-        config=config,
-        torch_dtype=torch.float32,
-        trust_remote_code=trust_remote_code,
-    )
+    if export_config.use_random_weights:
+      model = auto_model_cls.from_config(
+          config=config,
+          torch_dtype=torch.float32,
+          trust_remote_code=trust_remote_code,
+      )
+    else:
+      model = auto_model_cls.from_pretrained(
+          model_path,
+          config=config,
+          torch_dtype=torch.float32,
+          trust_remote_code=trust_remote_code,
+      )
 
   if task == ExportTask.TEXT_GENERATION:
     model.generation_config.cache_implementation = 'static'
@@ -216,15 +318,18 @@ def load_model(
         chat_template_str = f.read()
       chat_template_dict = json.loads(chat_template_str)
       if 'chat_template' in chat_template_dict:
-        tokenizer.chat_template = chat_template_dict['chat_template']
+        tokenizer.chat_template = chat_template_dict['chat_template']  # pyrefly: ignore[missing-attribute]
     except Exception as e:  # pylint: disable=broad-exception-caught
       print(f'Failed to load chat template: {e}')
+
+  if export_config.moe_exports_implementation == 'litert_moe_sequential':
+    model = pre_split_model_experts(model)
 
   return SourceModelArtifacts(
       model=model,
       model_config=config,
       text_model_config=text_model_config,
-      tokenizer=tokenizer,
+      tokenizer=tokenizer,  # pyrefly: ignore[bad-argument-type]
       image_processor=image_processor,
   )
 
@@ -276,104 +381,116 @@ def export_text_prefill_decode_model(
 ):
   """Exports text model to tflite."""
   model = source_model_artifacts.model
-  text_model_config = source_model_artifacts.text_model_config
-  quantization_recipe = export_config.quantization_recipe
-  work_dir = export_config.work_dir
-  has_dynamic_shape = (
-      export_config.cache_length_dim is not None
-      or export_config.prefill_length_dim is not None
-  )
-  if export_config.externalize_rope:
-    model = external_rope_preprocess_model.inject_rotary_position_embedding(
-        model
+
+  # Patch model instance for export.
+  with model_ext_patches.patch_model(
+      model, source_model_artifacts.model_config.model_type, export_config
+  ):
+    text_model_config = source_model_artifacts.text_model_config
+    quantization_recipe = export_config.quantization_recipe
+    work_dir = export_config.work_dir
+    has_dynamic_shape = (
+        export_config.cache_length_dim is not None
+        or export_config.prefill_length_dim is not None
     )
-  if export_config.split_cache:
-    assert (
-        not has_dynamic_shape
-    ), 'Dynamic shape is not supported for split cache.'
-    model.set_attn_implementation('lrt_split_cache_attention')
-  else:
-    model.set_attn_implementation('lrt_transposed_attention')
-
-  prefill_module_cls, decode_module_cls = get_prefill_decode_exportable_cls(
-      source_model_artifacts.model_config, export_config
-  )
-  prefill_module = prefill_module_cls(model, export_config)
-  decode_module = decode_module_cls(model, export_config)
-  converter = converter_utils.Converter()
-  sample_prefill_inputs = prefill_module.get_sample_inputs(text_model_config)
-  for signature_name, (
-      sample_prefill_inputs,
-      prefill_dynamic_shapes,
-  ) in sample_prefill_inputs.items():
-    if has_dynamic_shape:
-      prefill_ep = torch.export.export(
-          prefill_module,
-          args=(),
-          kwargs=sample_prefill_inputs,
-          dynamic_shapes=prefill_dynamic_shapes,
+    if export_config.externalize_rope:
+      model = external_rope_preprocess_model.inject_rotary_position_embedding(
+          model
       )
-
-      prefill_ep = fx_infra.safe_run_decompositions(
-          prefill_ep, fx_infra.decomp.pre_lower_decomp()
-      )
-
-      prefill_ep = prefill_ep.run_decompositions(torch_tfl.decomps)
-
-      converter.add_signature(
-          signature_name,
-          prefill_ep.module(),
-          sample_kwargs=sample_prefill_inputs,
-          dynamic_shapes=prefill_dynamic_shapes,
-      )
+    if export_config.split_cache:
+      assert (
+          not has_dynamic_shape
+      ), 'Dynamic shape is not supported for split cache.'
+      model.set_attn_implementation('lrt_split_cache_attention')
+      # In case of the attn_implementation is not set.
+      model.config._attn_implementation = 'lrt_split_cache_attention'  # pylint: disable=protected-access  # pyrefly: ignore[missing-attribute]
     else:
-      converter.add_signature(
-          signature_name,
-          prefill_module.eval(),
-          sample_kwargs=sample_prefill_inputs,
+      model.set_attn_implementation('lrt_transposed_attention')
+
+    prefill_module_cls, decode_module_cls = get_prefill_decode_exportable_cls(
+        source_model_artifacts.model_config, export_config
+    )
+    prefill_module = prefill_module_cls(
+        model, export_config, source_model_artifacts
+    )
+    decode_module = decode_module_cls(
+        model, export_config, source_model_artifacts
+    )
+    converter = converter_utils.Converter()
+    sample_prefill_inputs = prefill_module.get_sample_inputs(text_model_config)
+    for signature_name, (
+        sample_prefill_inputs,
+        prefill_dynamic_shapes,
+    ) in sample_prefill_inputs.items():
+      if has_dynamic_shape:
+        prefill_ep = torch.export.export(
+            prefill_module,
+            args=(),
+            kwargs=sample_prefill_inputs,
+            dynamic_shapes=prefill_dynamic_shapes,
+        )
+
+        prefill_ep = fx_infra.safe_run_decompositions(
+            prefill_ep, fx_infra.decomp.pre_lower_decomp()
+        )
+
+        prefill_ep = prefill_ep.run_decompositions(torch_tfl.decomps)
+
+        converter.add_signature(
+            signature_name,
+            prefill_ep.module(),
+            sample_kwargs=sample_prefill_inputs,
+            dynamic_shapes=prefill_dynamic_shapes,
+        )
+      else:
+        converter.add_signature(
+            signature_name,
+            prefill_module.eval(),
+            sample_kwargs=sample_prefill_inputs,
+        )
+    for signature_name, (
+        sample_decode_inputs,
+        decode_dynamic_shapes,
+    ) in decode_module.get_sample_inputs(text_model_config).items():
+      if has_dynamic_shape:
+        decode_ep = torch.export.export(
+            decode_module,
+            args=(),
+            kwargs=sample_decode_inputs,
+            dynamic_shapes=decode_dynamic_shapes,
+        )
+
+        decode_ep = fx_infra.safe_run_decompositions(
+            decode_ep, fx_infra.decomp.pre_lower_decomp()
+        )
+
+        decode_ep = decode_ep.run_decompositions(torch_tfl.decomps)
+
+        converter.add_signature(
+            signature_name,
+            decode_ep.module(),
+            sample_kwargs=sample_decode_inputs,
+            dynamic_shapes=decode_dynamic_shapes,
+        )
+      else:
+        converter.add_signature(
+            signature_name,
+            decode_module.eval(),
+            sample_kwargs=sample_decode_inputs,
+        )
+
+    with patch_builtin_tuple_for_export():
+      lrt_model = converter.convert(
+          lightweight_conversion=export_config.experimental_lightweight_conversion,
+          strict_export=False,
       )
-  sample_decode_inputs, decode_dynamic_shapes = decode_module.get_sample_inputs(
-      text_model_config
-  )['decode']
-  if has_dynamic_shape:
-    decode_ep = torch.export.export(
-        decode_module,
-        args=(),
-        kwargs=sample_decode_inputs,
-        dynamic_shapes=decode_dynamic_shapes,
-    )
 
-    decode_ep = fx_infra.safe_run_decompositions(
-        decode_ep, fx_infra.decomp.pre_lower_decomp()
-    )
-
-    decode_ep = decode_ep.run_decompositions(torch_tfl.decomps)
-
-    converter.add_signature(
-        'decode',
-        decode_ep.module(),
-        sample_kwargs=sample_decode_inputs,
-        dynamic_shapes=decode_dynamic_shapes,
-    )
-  else:
-    converter.add_signature(
-        'decode',
-        decode_module.eval(),
-        sample_kwargs=sample_decode_inputs,
-    )
-
-  with patch_builtin_tuple_for_export():
-    lrt_model = converter.convert(
-        lightweight_conversion=export_config.experimental_lightweight_conversion,
-        strict_export=False,
-    )
-
-  lrt_model = mu_pass_lib.update_model(lrt_model)
+  lrt_model = mu_pass_lib.update_model(lrt_model)  # pyrefly: ignore[bad-argument-type]
   if export_config.experimental_use_mixed_precision:
     print('Applying mixed precision to model...')
     lrt_model = mu_pass_lib.apply_mixed_precision(lrt_model)
 
-  model_path = os.path.join(work_dir, 'model.tflite')
+  model_path = os.path.join(work_dir, 'model.tflite')  # pyrefly: ignore[no-matching-overload]
   lrt_model.export(model_path)
 
   del lrt_model
@@ -399,9 +516,28 @@ def maybe_quantize_model(
     quantization_recipe: str | None = None,
 ):
   """Quantizes model if recipe is provided."""
-  if not quantization_recipe:
+  if not quantization_recipe or str(quantization_recipe).strip().lower() in (
+      'none',
+      'null',
+      'false',
+      '',
+  ):
     return model_path
   return quantize_model(model_path, quantization_recipe)
+
+
+def _dynamic_wi8_emb4_afp32():
+  """Local recipe with 4-bit embedding tables and 8-bit fully connected weights."""
+  return recipe_lib.dynamic_wi4c_afp32(
+      operation_name=recipe_lib.TFLOperationName.EMBEDDING_LOOKUP,
+  ) + recipe_lib.dynamic_wi8c_afp32(
+      operation_name=recipe_lib.TFLOperationName.FULLY_CONNECTED,
+  )
+
+
+_LOCAL_QUANTIZATION_RECIPES = {
+    'dynamic_wi8_emb4_afp32': _dynamic_wi8_emb4_afp32,
+}
 
 
 @progress.task('Quantize model')
@@ -418,6 +554,8 @@ def quantize_model(
   try:
     if quantization_recipe.endswith('.json'):
       recipe = quantization_recipe
+    elif quantization_recipe in _LOCAL_QUANTIZATION_RECIPES:
+      recipe = _LOCAL_QUANTIZATION_RECIPES[quantization_recipe]()
     else:
       recipe = recipe_lib.__dict__[quantization_recipe]()
     qt.load_quantization_recipe(recipe)
@@ -441,24 +579,29 @@ def export_embedder_model(
   text_model_config = source_model_artifacts.text_model_config
   quantization_recipe = export_config.quantization_recipe
   work_dir = export_config.work_dir
-  embedder_module = external_emb_module.LiteRTExportableModuleForEmbedder(
-      model.get_input_embeddings()
-  )
-  converter = converter_utils.Converter()
-  sample_inputs = embedder_module.get_sample_inputs(
-      text_model_config, export_config
-  )
-  for signature_name, (sample_inputs, _) in sample_inputs.items():
-    converter.add_signature(
-        signature_name,
-        embedder_module.eval(),
-        sample_kwargs=sample_inputs,
+
+  # Patch model instance for export.
+  with model_ext_patches.patch_model(
+      model, source_model_artifacts.model_config.model_type, export_config
+  ):
+    embedder_module = external_emb_module.LiteRTExportableModuleForEmbedder(
+        model.get_input_embeddings()
     )
-  lrt_model = converter.convert(
-      lightweight_conversion=export_config.experimental_lightweight_conversion,
-      strict_export=False,
-  )
-  model_path = os.path.join(work_dir, 'embedder.tflite')
+    converter = converter_utils.Converter()
+    sample_inputs = embedder_module.get_sample_inputs(
+        text_model_config, export_config
+    )
+    for signature_name, (sample_inputs, _) in sample_inputs.items():
+      converter.add_signature(
+          signature_name,
+          embedder_module.eval(),
+          sample_kwargs=sample_inputs,
+      )
+    lrt_model = converter.convert(
+        lightweight_conversion=export_config.experimental_lightweight_conversion,
+        strict_export=False,
+    )
+  model_path = os.path.join(work_dir, 'embedder.tflite')  # pyrefly: ignore[no-matching-overload]
   lrt_model.export(model_path)
   quantization_recipe_list = (
       quantization_recipe.split(',') if quantization_recipe else [None]
@@ -490,11 +633,18 @@ def export_vision_encoder_models(
   work_dir = export_config.work_dir
 
   model.set_attn_implementation('eager')
-  encoder_module_cls, adapter_module_cls = (
+  encoder_module_cls, adapter_module_cls, eoi_module_cls = (
       model_ext_exportables.get_vision_exportables(model_config)
   )
   encode_module = encoder_module_cls(model, export_config)
-  adapter_module = adapter_module_cls(model, export_config, tokenizer)
+  if adapter_module_cls is not None:
+    adapter_module = adapter_module_cls(model, export_config, tokenizer)
+  else:
+    adapter_module = None
+  if eoi_module_cls is not None:
+    eoi_module = eoi_module_cls(model, export_config, tokenizer)
+  else:
+    eoi_module = None
   converter = converter_utils.Converter()
   sample_inputs = encode_module.get_sample_inputs(
       model_config,
@@ -508,7 +658,7 @@ def export_vision_encoder_models(
         sample_kwargs=sample_inputs,
     )
   lrt_model = converter.convert(strict_export=False)
-  vision_encoder_path = os.path.join(work_dir, 'vision_encoder.tflite')
+  vision_encoder_path = os.path.join(work_dir, 'vision_encoder.tflite')  # pyrefly: ignore[no-matching-overload]
   lrt_model.export(vision_encoder_path)
   quantization_recipe_list = (
       quantization_recipe.split(',') if quantization_recipe else [None]
@@ -517,31 +667,145 @@ def export_vision_encoder_models(
     vision_encoder_path = maybe_quantize_model(vision_encoder_path, recipe)
     gc.collect()
 
-  converter = converter_utils.Converter()
-  sample_inputs = adapter_module.get_sample_inputs(
-      model_config,
-      image_processor=image_processor,
-      **export_config.extra_kwargs,
-  )
-  for signature_name, (sample_inputs, _) in sample_inputs.items():
-    converter.add_signature(
-        signature_name,
-        adapter_module.eval(),
-        sample_kwargs=sample_inputs,
+  if adapter_module:
+    converter = converter_utils.Converter()
+    sample_inputs = adapter_module.get_sample_inputs(
+        model_config,
+        image_processor=image_processor,
+        **export_config.extra_kwargs,
     )
-  lrt_model = converter.convert(strict_export=False)
-  adapter_path = os.path.join(work_dir, 'vision_adapter.tflite')
-  lrt_model.export(adapter_path)
-  quantization_recipe_list = (
-      quantization_recipe.split(',') if quantization_recipe else [None]
-  )
-  for recipe in quantization_recipe_list:
-    adapter_path = maybe_quantize_model(adapter_path, recipe)
-    gc.collect()
+    for signature_name, (sample_inputs, _) in sample_inputs.items():
+      converter.add_signature(
+          signature_name,
+          adapter_module.eval(),
+          sample_kwargs=sample_inputs,
+      )
+    lrt_model = converter.convert(strict_export=False)
+    adapter_path = os.path.join(work_dir, 'vision_adapter.tflite')  # pyrefly: ignore[no-matching-overload]
+    lrt_model.export(adapter_path)
+    quantization_recipe_list = (
+        quantization_recipe.split(',') if quantization_recipe else [None]
+    )
+    for recipe in quantization_recipe_list:
+      adapter_path = maybe_quantize_model(adapter_path, recipe)
+      gc.collect()
+  else:
+    adapter_path = None
+
+  if eoi_module:
+    converter = converter_utils.Converter()
+    sample_inputs = eoi_module.get_sample_inputs(
+        model_config,
+        **export_config.extra_kwargs,
+    )
+    for signature_name, (sample_inputs, _) in sample_inputs.items():
+      converter.add_signature(
+          signature_name,
+          eoi_module.eval(),
+          sample_kwargs=sample_inputs,
+      )
+    lrt_model = converter.convert(strict_export=False)
+    eoi_path = os.path.join(work_dir, 'eoi.tflite')  # pyrefly: ignore[no-matching-overload]
+    lrt_model.export(eoi_path)
+  else:
+    eoi_path = None
+
   return dataclasses.replace(
       exported_model_artifacts,
       vision_encoder_model_path=vision_encoder_path,
       vision_adapter_model_path=adapter_path,
+      eoi_model_path=eoi_path,
+  )
+
+
+@progress.task('Export ASR models')
+def export_asr_models(
+    source_model_artifacts: SourceModelArtifacts,
+    export_config: exportable_module.ExportableModuleConfig,
+    exported_model_artifacts: ExportedModelArtifacts,
+):
+  """Exports ASR models."""
+  asr_model = source_model_artifacts.model
+  model_config = source_model_artifacts.model_config
+  quantization_recipe = export_config.quantization_recipe
+  work_dir = export_config.work_dir
+
+  exportables = model_ext_exportables.get_speech_exportables(model_config)
+  encode_module_cls = exportables[0]
+  decode_module_cls: Any = exportables[1] if len(exportables) > 1 else None
+
+  encode_module = encode_module_cls(asr_model, export_config)
+  encoder_sample_inputs_dict = encode_module.get_sample_inputs(model_config)
+  encoder_inputs, _ = encoder_sample_inputs_dict['encode']
+
+  decode_module = None
+  if decode_module_cls is not None:
+    with torch.no_grad():
+      encoder_output = encode_module(*encoder_inputs)
+    decode_module = decode_module_cls(
+        asr_model, export_config, encoder_output=encoder_output
+    )
+
+  converter = converter_utils.Converter()
+
+  converter.add_signature(
+      'encode',
+      encode_module.eval(),
+      sample_args=encoder_inputs,
+  )
+
+  if decode_module is not None:
+    decoder_sample_inputs_dict = decode_module.get_sample_inputs(model_config)
+    for signature_name, (sample_args, _) in decoder_sample_inputs_dict.items():
+      converter.add_signature(
+          signature_name,
+          decode_module.eval(),
+          sample_args=sample_args,
+      )
+
+  with patch_builtin_tuple_for_export():
+    lrt_model = converter.convert(
+        lightweight_conversion=export_config.experimental_lightweight_conversion,
+        strict_export=False,
+    )
+
+  lrt_model = mu_pass_lib.update_model(lrt_model)  # pyrefly: ignore[bad-argument-type]
+  if export_config.experimental_use_mixed_precision:
+    print('Applying mixed precision to model...')
+    lrt_model = mu_pass_lib.apply_mixed_precision(lrt_model)
+
+  model_path = os.path.join(work_dir, 'asr_model.tflite')  # pyrefly: ignore[no-matching-overload]
+  lrt_model.export(model_path)
+
+  del lrt_model
+  del converter
+  gc.collect()
+
+  quantization_recipe_list = (
+      quantization_recipe.split(',') if quantization_recipe else [None]
+  )
+  for recipe in quantization_recipe_list:
+    model_path = maybe_quantize_model(model_path, recipe)
+    gc.collect()
+
+  return dataclasses.replace(
+      exported_model_artifacts,
+      prefill_decode_model_path=model_path,
+  )
+
+
+@progress.task('Export TTS models')
+def export_tts_models(
+    source_model_artifacts: SourceModelArtifacts,
+    export_config: exportable_module.ExportableModuleConfig,
+    exported_model_artifacts: ExportedModelArtifacts,
+):
+  """Exports TTS models."""
+  tts_model = source_model_artifacts.model
+  artifacts = tts_model.export(export_config)
+  return dataclasses.replace(
+      exported_model_artifacts,
+      additional_model_paths=artifacts,
   )
 
 
@@ -570,7 +834,7 @@ def export_auxiliary_model(
   # Attention Mask
   sliding_window_sizes = [getattr(text_model_config, 'sliding_window', None)]
   attention_mask_module = split_cache_module.SplitAttentionMaskBuilder(
-      export_config.cache_length,
+      export_config,
       sliding_window_sizes=sliding_window_sizes,
   )
   sample_inputs = attention_mask_module.get_sample_inputs(
@@ -594,7 +858,7 @@ def export_auxiliary_model(
         sample_kwargs=sample_input,
     )
   lrt_model = converter.convert(strict_export=False)
-  model_path = os.path.join(work_dir, 'auxiliary.tflite')
+  model_path = os.path.join(work_dir, 'auxiliary.tflite')  # pyrefly: ignore[no-matching-overload]
   lrt_model.export(model_path)
   return dataclasses.replace(
       exported_model_artifacts,
@@ -626,7 +890,7 @@ def export_additional_models_impl(
         sample_kwargs=sample_inputs,
     )
   lrt_model = converter.convert(strict_export=False)
-  model_path = os.path.join(work_dir, f'{name}.tflite')
+  model_path = os.path.join(work_dir, f'{name}.tflite')  # pyrefly: ignore[no-matching-overload]
   lrt_model.export(model_path)
   quantization_recipe_list = (
       quantization_recipe.split(',') if quantization_recipe else [None]
@@ -713,15 +977,15 @@ def export_tokenizer(
     tokenizer_path = tokenizer.vocab_file
     if tokenizer_path.endswith('tokenizer.model'):
       with open(tokenizer_path, 'rb') as f:
-        with open(os.path.join(work_dir, 'tokenizer.model'), 'wb') as f_out:
+        with open(os.path.join(work_dir, 'tokenizer.model'), 'wb') as f_out:  # pyrefly: ignore[no-matching-overload]
           f_out.write(f.read())
-      tokenizer_path = os.path.join(work_dir, 'tokenizer.model')
+      tokenizer_path = os.path.join(work_dir, 'tokenizer.model')  # pyrefly: ignore[no-matching-overload]
       return dataclasses.replace(
           exported_model_artifacts,
           tokenizer_model_path=tokenizer_path,
       )
   try:
-    tokenizer_path = tokenizer.save_pretrained(work_dir, legacy_format=False)
+    tokenizer_path = tokenizer.save_pretrained(work_dir, legacy_format=False)  # pyrefly: ignore[bad-argument-type]
     # TODO(weiyiw): This is rough... polish it.
     if isinstance(tokenizer_path, tuple):
       tokenizer_path = [
@@ -738,7 +1002,7 @@ def export_tokenizer(
     # Fallback to convert tokenizer to sentencepiece.
     print('Failed to export tokenizer. Converting to sentencepiece.')
     spm_serialized = tokenizer_lib.convert(tokenizer)
-    tokenizer_path = os.path.join(work_dir, 'tokenizer.spiece')
+    tokenizer_path = os.path.join(work_dir, 'tokenizer.spiece')  # pyrefly: ignore[no-matching-overload]
     with open(tokenizer_path, 'wb') as f:
       f.write(spm_serialized)
   return dataclasses.replace(
@@ -753,7 +1017,12 @@ def aot_compile_model(
     export_config: exportable_module.ExportableModuleConfig,
     exported_model_artifacts: ExportedModelArtifacts,
 ):
-  """AOT compiles the model."""
+  """AOT compiles the model.
+
+  DEPRECATED: This legacy compilation workflow (which compiles individual
+  sub-models before packaging) is deprecated and will be removed soon. Please
+  use the LiteRT-LM package compiler `compile_litertlm` instead.
+  """
   del source_model_artifacts  # Unused.
   assert export_config.aot_backend is not None
   assert export_config.aot_soc_model is not None
@@ -762,7 +1031,7 @@ def aot_compile_model(
       'soc_model': export_config.aot_soc_model,
   }
   if export_config.aot_compilation_config_dict is not None:
-    config['compilation_config'] = export_config.aot_compilation_config_dict
+    config['compilation_config'] = export_config.aot_compilation_config_dict  # pyrefly: ignore[bad-assignment]
 
   backend_class = import_vendor.import_vendor(export_config.aot_backend)
   backend = backend_class.create(config)
@@ -789,3 +1058,32 @@ def aot_compile_model(
       exported_model_artifacts,
       prefill_decode_model_path=output_path,
   )
+
+
+@progress.task('NPU Package Compilation')
+def compile_litertlm_bundle(
+    source_model_artifacts: SourceModelArtifacts,
+    export_config: exportable_module.ExportableModuleConfig,
+    exported_model_artifacts: ExportedModelArtifacts,
+):
+  """Compiles the packaged .litertlm file using the new NPU compiler."""
+
+  model_name = source_model_artifacts.model_config.model_type
+  litert_lm_model_path = exported_model_artifacts.litert_lm_model_path
+  assert litert_lm_model_path is not None, 'LiteRT-LM model path not found.'
+
+  backend = export_config.aot_backend
+  soc_model = export_config.aot_soc_model
+  assert backend is not None, 'aot_backend is required for compilation.'
+  assert soc_model is not None, 'aot_soc_model is required for compilation.'
+
+  litert_lm_npu_compiler.compile_litertlm(
+      input_litertlm=litert_lm_model_path,
+      output_litertlm=litert_lm_model_path,
+      backend=backend,
+      soc_model=soc_model,
+      compile_configs=export_config.compile_configs,
+      model_name=model_name,
+      overwrite=True,
+  )
+  return exported_model_artifacts

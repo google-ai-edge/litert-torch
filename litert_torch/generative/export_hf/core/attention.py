@@ -18,9 +18,11 @@ import math
 from typing import Optional
 import jaxtyping as jt
 from litert_torch.generative.custom_ops import bmm_4d as bmm_lib
+from litert_torch.generative.export_hf.experimental.composites import sdpa as gpu_sdpa
 import torch
 import torch.nn.functional as F
 import transformers
+from litert_torch.backend import composite
 
 
 def scaled_dot_product_attention_transposed(
@@ -71,7 +73,13 @@ def scaled_dot_product_attention_transposed(
   else:
     assert k_ts_idx == 3, "k_ts_idx must be 2 or 3."
     bmm_fn = lambda x, y: torch.einsum("abth,abhs->abts", x, y)
-  logits = bmm_fn(query, key)
+  if isinstance(key, tuple):
+    key_past, key_slice = key
+    logits0 = bmm_fn(query, key_past)
+    logits1 = bmm_fn(query, key_slice)
+    logits = torch.cat([logits0, logits1], dim=-1)
+  else:
+    logits = bmm_fn(query, key)
 
   _, _, gt, _ = logits.shape
   g = gt // t
@@ -87,13 +95,33 @@ def scaled_dot_product_attention_transposed(
     mask = torch.cat(mask_to_bc, dim=-2)  # 1, 1, gt, s
 
   padded_logits = logits + mask
-  probs = F.softmax(padded_logits, dim=-1).type_as(key)
+  # TODO(weiyiw): Re-enable this with when compiler is updated
+  if padded_logits.dtype != torch.float32:
+    attrs = {"axis": -1}
+    builder = composite.StableHLOCompositeBuilder(
+        name="odml.softmax", attr=attrs
+    )
+    padded_logits = builder.mark_inputs(padded_logits)
+  else:
+    builder = None
+  probs = F.softmax(padded_logits, dim=-1)
+  if builder is not None:
+    probs = builder.mark_outputs(probs)
+
+  probs = probs.type_as(key[0] if isinstance(key, tuple) else key)
   if v_ts_idx == 3:
     bmm_fn = bmm_lib.bmm_4d
   else:
     assert v_ts_idx == 2, "v_ts_idx must be 2 or 3."
     bmm_fn = lambda x, y: torch.einsum("abts,absh->abth", x, y)
-  encoded = bmm_fn(probs, value)
+  if isinstance(value, tuple):
+    probs0, probs1 = probs[..., :-t], probs[..., -t:]
+    value_past, value_slice = value
+    encoded0 = bmm_fn(probs0, value_past)
+    encoded1 = bmm_fn(probs1, value_slice)
+    encoded = encoded0 + encoded1
+  else:
+    encoded = bmm_fn(probs, value)
 
   return encoded  # 1, bk, gt, h
 
@@ -136,6 +164,31 @@ def transposed_attention(
         "Timestamp indices not passed to attention module. The model is not"
         " passing the kwargs correctly."
     )
+
+  apply_gpu_composites = kwargs.get("apply_gpu_composites", False)
+  sdpa_use_composite = kwargs.get("sdpa_use_composite", False)
+  if apply_gpu_composites or sdpa_use_composite:
+    is_global = kwargs.get("is_global", None)
+    if is_global is None:
+      is_sliding = getattr(module, "is_sliding", False)
+      is_global = not is_sliding
+    sdpa_out = gpu_sdpa.scaled_dot_product_attention_transposed(
+        query=query,
+        key=key,
+        value=value,
+        head_size=h,
+        k_ts_idx=key_ts_idx,
+        v_ts_idx=value_ts_idx,
+        mask=attention_mask,
+        scale=scaling,
+        softcap=softcap,
+        param_tensor=kwargs.get("param_tensor", None),
+        is_global=is_global,
+        sdpa_use_composite=sdpa_use_composite,
+    )
+    # b, kg, t, h
+    sdpa_out = sdpa_out.reshape(b, -1, seq_len, h).permute(0, 2, 1, 3)
+    return sdpa_out, None
 
   # 1, bk, gt, h
   sdpa_out = scaled_dot_product_attention_transposed(

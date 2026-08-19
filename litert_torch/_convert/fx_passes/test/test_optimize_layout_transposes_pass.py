@@ -164,6 +164,26 @@ class TestOptimizeLayoutTransposesPass(googletest.TestCase):
     ).get_text()
     self.assertEqual(ir_text.count("stablehlo.custom_call @mark_tensor"), 4)
 
+  def test_conv1d_sequential_layout_optimization(self):
+    """Tests that chained 1D convolutions maintain layout optimization and eager parity."""
+
+    class TinyConv1D(torch.nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.conv1 = torch.nn.Conv1d(32, 4, 3, padding=1)
+        self.conv2 = torch.nn.Conv1d(4, 1, 3, padding=1)
+
+      def forward(self, x):
+        return self.conv2(torch.relu(self.conv1(x)))
+
+    model = TinyConv1D().eval()
+    forward_args = lambda: (torch.rand(1, 32, 16),)
+    exported_program = export_with_pass(model, forward_args())
+    self.assert_outputs_allclose(
+        model, exported_program.module(), forward_args()
+    )
+
 
 if __name__ == "__main__":
   googletest.main()

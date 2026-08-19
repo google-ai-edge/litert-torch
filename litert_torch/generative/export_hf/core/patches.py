@@ -31,12 +31,15 @@ class RMSNorm(torch.nn.Module):
     self.hidden_size = hidden_size
 
   def forward(self, hidden_states):
-    return normalization.rms_norm_with_hlfb(
+    dtype = hidden_states.dtype
+    hidden_states = hidden_states.to(torch.float32)
+    hidden_states = normalization.rms_norm_with_hlfb(
         hidden_states,
         self.weight,
         self.variance_epsilon,
         torch.ones((self.hidden_size,), dtype=torch.float32),
     )
+    return hidden_states.to(dtype)
 
   def extra_repr(self):
     return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"

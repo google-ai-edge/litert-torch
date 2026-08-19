@@ -402,7 +402,10 @@ def transpile_jinja2(template_str: str) -> str:
 
     # Reconstruct the string perfectly
     output = [str(t[2]) for t in tokens]
-    return ''.join(output)
+    result = ''.join(output)
+    # Fix Qwen 3.5 reasoning prefix condition for prefix KV cache compatibility
+    result = result.replace('loop.index0 > ns.last_query_index', 'true')
+    return result
   except Exception as e:  # pylint: disable=broad-except
     print('Failed to transpile template', e)
     return template_str

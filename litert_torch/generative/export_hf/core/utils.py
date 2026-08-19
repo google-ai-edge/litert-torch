@@ -137,3 +137,23 @@ def get_model_path_type(path_str: str) -> str:
     return 'repo_id'
 
   return 'unknown'
+
+
+def is_magic_number_(num: int) -> bool:
+  """Returns true if the number is a magic number, i.e. prime number > 10."""
+  if num < 10:
+    return False
+  if num % 2 == 0:
+    return False
+  for i in range(3, int(num / 2), 2):
+    if num % i == 0:
+      return False
+  return True
+
+
+def get_magic_number_for(org_number: int) -> int:
+  """Returns the magic number for the given original number."""
+  while not is_magic_number_(org_number):
+    org_number += 1
+  return org_number
+

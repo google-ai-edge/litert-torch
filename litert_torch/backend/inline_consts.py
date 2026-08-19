@@ -28,12 +28,33 @@ import torch
 config = _config.config
 
 
+@dataclasses.dataclass(frozen=True)
+class _ConstantFingerprint:
+  """Unique fingerprint of a torch.Tensor constant for caching."""
+
+  device: str
+  shape: tuple[int, ...]
+  stride: tuple[int, ...]
+  data_ptr: int
+  storage_offset: int
+
+  @classmethod
+  def from_tensor(cls, tensor: torch.Tensor) -> '_ConstantFingerprint':
+    return cls(
+        device=str(tensor.device),
+        shape=tensor.shape,
+        stride=tensor.stride(),
+        data_ptr=tensor.untyped_storage().data_ptr(),
+        storage_offset=tensor.storage_offset(),
+    )
+
+
 @dataclasses.dataclass
 class InlineConstsContext(lowerings.context.LoweringContextPlugin):
   """The context object for inlining constants."""
 
   enable_resource_constants: bool = False
-  constant_cache: dict[int, ir.Attribute] = dataclasses.field(
+  constant_cache: dict[_ConstantFingerprint, ir.Attribute] = dataclasses.field(
       default_factory=dict
   )
 
@@ -48,15 +69,6 @@ class InlineConstsContext(lowerings.context.LoweringContextPlugin):
       )
       lctx.add_plugin(cls())
     return lctx.get_plugin(cls)
-
-
-def _tensor_fingerprint(tensor: torch.Tensor) -> int:
-  return (
-      str(tensor.device),
-      tensor.shape,
-      tensor.stride(),
-      tensor.untyped_storage().data_ptr(),
-  )
 
 
 def _tensor_to_mlir_compatible_array(tensor: torch.Tensor) -> np.ndarray:
@@ -137,7 +149,7 @@ def tensor_lowering_placeholder_lowering(
   const_ctx = InlineConstsContext.get(lctx)
   x = x.contiguous().detach().cpu()
 
-  x_fingerprint = _tensor_fingerprint(x)
+  x_fingerprint = _ConstantFingerprint.from_tensor(x)
   elty = lowering_utils.torch_dtype_to_ir_element_type(x.dtype)
   tensor_type = ir.RankedTensorType.get(x.shape, elty)
 

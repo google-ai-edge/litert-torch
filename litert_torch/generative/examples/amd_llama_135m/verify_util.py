@@ -52,13 +52,13 @@ def verify_amd_llama_135m(
     cached_config_file = transformers.utils.cached_file(
         checkpoint_dir, transformers.utils.CONFIG_NAME
     )
-    reauthored_checkpoint = pathlib.Path(cached_config_file).parent
+    reauthored_checkpoint = pathlib.Path(cached_config_file).parent  # pyrefly: ignore[bad-argument-type]
   else:
     reauthored_checkpoint = os.path.join(checkpoint_dir, weight_filename)
 
   logging.info("Building the reauthored model from: %s", reauthored_checkpoint)
   reauthored_model = amd_llama_135m.build_model(
-      checkpoint_path=reauthored_checkpoint,
+      checkpoint_path=reauthored_checkpoint,  # pyrefly: ignore[bad-argument-type]
       custom_loader=custom_loader,
       mask_cache_size=verifier.DEFAULT_KV_CACHE_MAX_LEN,
   )

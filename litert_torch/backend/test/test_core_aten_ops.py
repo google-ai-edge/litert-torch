@@ -602,6 +602,26 @@ class TestCoreAtenOps(parameterized.TestCase):
   def test_convert_op(self, op, args, kwargs):
     self._run_export_convert_and_compare(op, args, kwargs)
 
+  def test_conv_transpose1d(self):
+    x = torch.randn(1, 1, 16)
+    weight = torch.randn(1, 1, 4)
+    bias = torch.randn(1)
+    self._run_export_convert_and_compare(
+        torch.ops.aten.convolution.default,
+        (x, weight, bias, [2], [0], [1], True, [0], 1),
+        dict(),
+    )
+
+  def test_conv_transpose2d_output_padding(self):
+    x = torch.randn(1, 1, 8, 8)
+    weight = torch.randn(1, 1, 3, 3)
+    bias = torch.randn(1)
+    self._run_export_convert_and_compare(
+        torch.ops.aten.convolution.default,
+        (x, weight, bias, [2, 2], [0, 0], [1, 1], True, [1, 1], 1),
+        dict(),
+    )
+
 
 if __name__ == "__main__":
   googletest.main()

@@ -22,6 +22,7 @@ from litert_torch.backend.lowerings import utils as lowering_utils
 from litert_converter.mlir import ir
 import torch
 from torch.nn import functional as F
+from transformers.activations import ACT2FN
 
 _MOE_CUSTOM_OP_NAME = "moe"
 
@@ -121,7 +122,7 @@ def _moe_experts_reference(
   selected_linear = linear_w[indices]
   gate = torch.einsum("bskhd,bsd->bskh", selected_gate, src_flat)
   ff1 = torch.einsum("bskhd,bsd->bskh", selected_ff1, src_flat)
-  hidden = F.gelu(gate) * ff1
+  hidden = F.gelu(gate, approximate="tanh") * ff1
   expert_output = torch.einsum("bskdh,bskh->bskd", selected_linear, hidden)
   scale = per_expert_scale.reshape(num_experts)[indices].to(torch.float32)
   expert_output = expert_output * scale.unsqueeze(-1)
@@ -460,3 +461,70 @@ def litert_moe_experts_forward(self, hidden_states, top_k_index, top_k_weights):
       hidden_dim=self.intermediate_dim,
   )
   return output.reshape(hidden_states.shape)
+
+
+def litert_sequential_experts_forward(
+    self: torch.nn.Module,
+    hidden_states: torch.Tensor,
+    top_k_index: torch.Tensor,
+    top_k_weights: torch.Tensor,
+) -> torch.Tensor:
+  """LiteRT-compatible forward that leverages pre-split leaf parameters."""
+  final_hidden_states = torch.zeros_like(hidden_states)
+
+  # Check if weights were pre-split in PyTorch to bypass dynamic slicing ops
+  use_pre_split = hasattr(self, "split_gate_up_proj") and hasattr(
+      self, "split_down_proj"
+  )
+
+  for expert_idx in range(self.num_experts):
+    # 1. Compute masking weights
+    expert_idx_tensor = torch.tensor(
+        expert_idx, dtype=torch.int32, device=hidden_states.device
+    )
+    expert_mask = top_k_index == expert_idx_tensor
+    expert_weight = (expert_mask.to(hidden_states.dtype) * top_k_weights).sum(
+        dim=-1, keepdim=True
+    )
+
+    # 2. Extract weights (Pre-split leaves vs. Runtime slicing fallback)
+    if use_pre_split:
+      gate_up_w = self.split_gate_up_proj[expert_idx]
+      down_w = self.split_down_proj[expert_idx]
+      gate_up_bias_slice = (
+          self.split_gate_up_bias[expert_idx]
+          if getattr(self, "split_gate_up_bias", None) is not None
+          else None
+      )
+      down_bias_slice = (
+          self.split_down_bias[expert_idx]
+          if getattr(self, "split_down_bias", None) is not None
+          else None
+      )
+    else:
+      gate_up_w = self.gate_up_proj[expert_idx]
+      down_w = self.down_proj[expert_idx]
+      gate_up_bias_slice = (
+          self.gate_up_bias[expert_idx]
+          if getattr(self, "gate_up_bias", None) is not None
+          else None
+      )
+      down_bias_slice = (
+          self.down_bias[expert_idx]
+          if getattr(self, "down_bias", None) is not None
+          else None
+      )
+
+    # 3. Dense computation
+    gate_up_out = F.linear(hidden_states, gate_up_w, bias=gate_up_bias_slice)
+    gate, up = gate_up_out.chunk(2, dim=-1)
+
+    act_fn = (
+        getattr(self, "act_fn", None) or ACT2FN[self.config.hidden_activation]
+    )
+    expert_out = F.linear(act_fn(gate) * up, down_w, bias=down_bias_slice)
+
+    # 4. Mask and accumulate
+    final_hidden_states += expert_out * expert_weight
+
+  return final_hidden_states

@@ -88,10 +88,8 @@ fx_infra.decomp.update_pre_lower_decomp(
         torch.ops.aten.native_group_norm,
         torch.ops.aten.native_dropout,
         torch.ops.aten.reflection_pad1d,
-        torch.ops.aten.reflection_pad2d,
         torch.ops.aten.reflection_pad3d,
         torch.ops.aten.replication_pad1d,
-        torch.ops.aten.replication_pad2d,
         torch.ops.aten.replication_pad3d,
         torch.ops.aten.upsample_bilinear2d.vec,
         torch.ops.aten.addmm,
@@ -146,3 +144,91 @@ if hasattr(torch.ops.aten, "_safe_softmax"):
       torch.ops.aten._safe_softmax.default,
       torch.softmax,
   )
+
+
+# Promote 1D convolution to 2D in FX layer to prevent rank 3D-4D-3D round trips
+def _conv1d_decomp(
+    x,
+    weight,
+    bias=None,
+    stride=1,
+    padding=0,
+    dilation=1,
+    groups=1,
+):
+  """Decomposes 1D convolution to 2D convolution by expanding spatial dims."""
+  if x.dim() == 3:
+    if isinstance(stride, (int, torch.SymInt)):
+      stride = [stride]
+    if isinstance(padding, (int, torch.SymInt)):
+      padding = [padding]
+    if isinstance(dilation, (int, torch.SymInt)):
+      dilation = [dilation]
+    x4 = x.unsqueeze(-2)
+    w4 = weight.unsqueeze(-2)
+    out = torch.ops.aten.convolution.default(
+        x4,
+        w4,
+        bias,
+        [1, *stride],
+        [0, *padding],
+        [1, *dilation],
+        False,
+        [0],
+        groups,
+    )
+    return out.squeeze(-2)
+  return NotImplemented
+
+
+def _convolution_decomp(
+    x,
+    weight,
+    bias=None,
+    stride=1,
+    padding=0,
+    dilation=1,
+    transposed=False,
+    output_padding=0,
+    groups=1,
+):
+  """Decomposes rank-3 convolution to 2D convolution by expanding spatial dims."""
+  if x.dim() == 3:
+    if isinstance(stride, (int, torch.SymInt)):
+      stride = [stride]
+    if isinstance(padding, (int, torch.SymInt)):
+      padding = [padding]
+    if isinstance(dilation, (int, torch.SymInt)):
+      dilation = [dilation]
+
+    if isinstance(output_padding, (int, torch.SymInt)):
+      output_padding = [output_padding]
+    x4 = x.unsqueeze(-2)
+    w4 = weight.unsqueeze(-2)
+    out = torch.ops.aten.convolution.default(
+        x4,
+        w4,
+        bias,
+        [1, *stride],
+        [0, *padding],
+        [1, *dilation],
+        transposed,
+        [0, *output_padding],
+        groups,
+    )
+    return out.squeeze(-2)
+  return NotImplemented
+
+
+fx_infra.decomp.add_pre_convert_decomp(
+    torch.ops.aten.convolution.default,
+    _convolution_decomp,
+)
+fx_infra.decomp.add_pre_convert_decomp(
+    torch.ops.aten.conv1d.default,
+    _conv1d_decomp,
+)
+fx_infra.decomp.add_pre_convert_decomp(
+    torch.ops.aten.conv1d,
+    _conv1d_decomp,
+)

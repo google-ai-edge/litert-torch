@@ -229,6 +229,72 @@ class TestConvertComposites(googletest.TestCase):
         model_coverage.compare_tflite_torch(edge_model, torch_module, args)
     )
 
+  def test_convert_pad_reflect(self):
+    """Tests conversion of reflection pad2d."""
+    torch_module = _func_to_torch_module(
+        lambda x: torch.nn.functional.pad(x, [1, 1, 2, 2], mode='reflect')
+    )
+    tracing_args = (torch.randn(1, 3, 10, 10),)
+    edge_model = litert_torch.convert(torch_module, tracing_args)
+
+    self.assertTrue(
+        model_coverage.compare_tflite_torch(
+            edge_model, torch_module, tracing_args
+        )
+    )
+
+  def test_convert_pad_replicate(self):
+    """Tests conversion of replication pad2d."""
+    torch_module = _func_to_torch_module(
+        lambda x: torch.nn.functional.pad(x, [1, 1, 2, 2], mode='replicate')
+    )
+    tracing_args = (torch.randn(1, 3, 10, 10),)
+    edge_model = litert_torch.convert(torch_module, tracing_args)
+
+    self.assertTrue(
+        model_coverage.compare_tflite_torch(
+            edge_model, torch_module, tracing_args
+        )
+    )
+
+  def test_convert_conv2d_reflect_padding(self):
+    """Tests conversion of Conv2d with reflect padding_mode."""
+    torch_module = torch.nn.Conv2d(
+        in_channels=3,
+        out_channels=16,
+        kernel_size=3,
+        stride=1,
+        padding=1,
+        padding_mode='reflect',
+    ).eval()
+    tracing_args = (torch.randn(1, 3, 10, 10),)
+    edge_model = litert_torch.convert(torch_module, tracing_args)
+
+    self.assertTrue(
+        model_coverage.compare_tflite_torch(
+            edge_model, torch_module, tracing_args
+        )
+    )
+
+  def test_convert_conv2d_replicate_padding(self):
+    """Tests conversion of Conv2d with replicate padding_mode."""
+    torch_module = torch.nn.Conv2d(
+        in_channels=3,
+        out_channels=16,
+        kernel_size=3,
+        stride=1,
+        padding=1,
+        padding_mode='replicate',
+    ).eval()
+    tracing_args = (torch.randn(1, 3, 10, 10),)
+    edge_model = litert_torch.convert(torch_module, tracing_args)
+
+    self.assertTrue(
+        model_coverage.compare_tflite_torch(
+            edge_model, torch_module, tracing_args
+        )
+    )
+
 
 if __name__ == '__main__':
   googletest.main()
