@@ -15,4 +15,4 @@
 
 # The next version of litert-torch.
 # The minor version code should be bumped after every release.
-__version__ = "0.10.0"
+__version__ = "0.9.4"
