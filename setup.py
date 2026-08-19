@@ -95,7 +95,7 @@ setup(
         "transformers",
         "kagglehub",
         "tabulate",
-        "torch>=2.4.0,<2.13.0",
+        "torch>=2.4.0,<2.14.0",
         "ai-edge-litert[model-utils]>=2.2.0,<2.3.0",
         "ai-edge-quantizer==0.8.*",
         "litert-converter==0.3.*",
