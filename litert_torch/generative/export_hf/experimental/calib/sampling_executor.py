@@ -522,12 +522,18 @@ class Executor:
         self.prefill_runners[input_size],
     )
 
+    prefill_cache_update_inputs = {
+        **kv_slice,
+        **decode_state.kv_cache,
+        'input_pos': positions,
+    }
+    if (
+        'valid_mask'
+        in self.prefill_cache_update_runners[input_size].get_input_details()
+    ):
+      prefill_cache_update_inputs['valid_mask'] = valid_mask
     new_kv_cache = try_run_signature_with_quant_dequant(
-        {
-            **kv_slice,
-            **decode_state.kv_cache,
-            'input_pos': positions,
-        },
+        prefill_cache_update_inputs,
         self.prefill_cache_update_runners[input_size],
     )
 
@@ -612,12 +618,15 @@ class Executor:
 
     logits = kv_slice.pop('logits')
 
+    decode_cache_update_inputs = {
+        **kv_slice,
+        **decode_state.kv_cache,
+        'input_pos': positions,
+    }
+    if 'valid_mask' in self.decode_cache_update_runner.get_input_details():
+      decode_cache_update_inputs['valid_mask'] = np.ones((1, 1), dtype=np.bool)
     new_kv_cache = try_run_signature_with_quant_dequant(
-        {
-            **kv_slice,
-            **decode_state.kv_cache,
-            'input_pos': positions,
-        },
+        decode_cache_update_inputs,
         self.decode_cache_update_runner,
     )
 
