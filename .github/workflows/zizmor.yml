@@ -22,7 +22,7 @@ jobs:
     name: Run Zizmor Security Scan
     runs-on: ubuntu-latest
     permissions:
-      security-events: write # Required to upload SARIF results # zizmor: ignore[excessive-permissions]
+      security-events: write # Required to upload SARIF results
       contents: read
     steps:
       - name: Checkout repository

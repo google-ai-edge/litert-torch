@@ -26,9 +26,9 @@ jobs:
 
     runs-on: ubuntu-latest
     permissions:
-      issues: write # Required to comment on issues # Required to comment on issues # zizmor: ignore[excessive-permissions]
-      pull-requests: write # Required to update PRs # Required to update PRs # zizmor: ignore[excessive-permissions]
-      actions: write # Required to manage actions # Required to manage actions # zizmor: ignore[excessive-permissions]
+      issues: write # Required to comment on issues # Required to comment on issues
+      pull-requests: write # Required to update PRs # Required to update PRs
+      actions: write # Required to manage actions # Required to manage actions
 
     steps:
     - uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9
