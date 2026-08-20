@@ -23,18 +23,19 @@ from typing import Any, Dict, List, Tuple
 
 from absl import app
 from absl import flags
-import numpy as np
-import torch
-from transformers import AutoModelForCausalLM
-from transformers import AutoTokenizer
-
-from ai_edge_litert import interpreter
 from litert_torch.generative.export_hf import export as litert_torch_export
 from litert_torch.generative.export_hf.core import exportable_module_config
 from litert_torch.generative.export_hf.core.export_lib import SourceModelArtifacts
 from litert_torch.generative.export_hf.model_ext.qwen3_5.exportable_module import create_qwen3_5_attention_mask
 from litert_torch.generative.export_hf.model_ext.qwen3_5.exportable_module import LiteRTExportableModuleForQwen3_5Generate
 from litert_torch.generative.export_hf.model_ext.qwen3_5.exportable_module import LiteRTExportableModuleForQwen3_5Prefill
+import numpy as np
+import torch
+from transformers import AutoModelForCausalLM
+from transformers import AutoTokenizer
+
+gated_delta_rule_kernels = None
+from ai_edge_litert import interpreter
 
 
 _MODEL_ID = flags.DEFINE_string(
@@ -270,15 +271,19 @@ def run_raw_tflite_pipeline(
     prefill_kwargs["tokens"] = tokens
 
   prefill_details = prefill_runner.get_input_details()
+  prefill_kwargs = {
+      k: v for k, v in prefill_kwargs.items() if k in prefill_details
+  }
   for k in list(prefill_kwargs.keys()):
-    if k in prefill_details and hasattr(prefill_kwargs[k], "astype"):
+    if hasattr(prefill_kwargs[k], "astype"):
       prefill_kwargs[k] = prefill_kwargs[k].astype(prefill_details[k]["dtype"])
 
   prefill_out = prefill_runner(**prefill_kwargs)
 
   updated_kv = {}
   for k, v in prefill_out.items():
-    updated_kv[k] = v
+    if "logits" not in k and k != "output_0":
+      updated_kv[k] = v
 
   next_token_id = int(input_ids.cpu().numpy()[0, prefill_prompt_len])
   generated_tokens = []
@@ -313,8 +318,11 @@ def run_raw_tflite_pipeline(
       dec_kwargs["tokens"] = np.array([[next_token_id]], dtype=np.int64)
 
     decode_details = decode_runner.get_input_details()
+    dec_kwargs = {
+        k: v for k, v in dec_kwargs.items() if k in decode_details
+    }
     for k in list(dec_kwargs.keys()):
-      if k in decode_details and hasattr(dec_kwargs[k], "astype"):
+      if hasattr(dec_kwargs[k], "astype"):
         dec_kwargs[k] = dec_kwargs[k].astype(decode_details[k]["dtype"])
 
     dec_out = decode_runner(**dec_kwargs)

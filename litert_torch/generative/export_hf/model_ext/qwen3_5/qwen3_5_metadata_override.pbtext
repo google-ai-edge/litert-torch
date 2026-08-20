@@ -1,4 +1,7 @@
 stop_tokens {
+  token_str: "<|im_end|>"
+}
+stop_tokens {
   token_ids {
     ids: 248044
   }
