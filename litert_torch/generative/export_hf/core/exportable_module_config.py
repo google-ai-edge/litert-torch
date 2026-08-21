@@ -69,6 +69,8 @@ class ExportableModuleConfig:
   fuse_gate_up: bool = False
   fuse_qkv: bool = False
   use_rope_composite: bool = False
+  use_qkv_norm_rope_composite: bool = False
+  use_sdpa_composite: bool = False
   input_sec: float = 1.0
   # If >= 0, the model runs in stateful mode after this many tokens.
   stateful_after: int = -1

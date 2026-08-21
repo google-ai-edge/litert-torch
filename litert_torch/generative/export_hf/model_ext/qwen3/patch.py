@@ -17,6 +17,7 @@
 
 import contextlib
 from litert_torch.generative.export_hf.core.speech import asr_model
+from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope as qkv_norm_rope_composite
 from litert_torch.generative.export_hf.experimental.composites import rope as rope_composite
 from litert_torch.generative.export_hf.model_ext import patches as patches_lib
 from litert_torch.generative.layers import normalization
@@ -49,7 +50,10 @@ class Qwen3RMSNorm(torch.nn.Module):
 class FusedQwen3MLP(torch.nn.Module):
   """Fused Gate + Up MLP layer."""
 
-  def __init__(self, original_mlp: modeling_qwen3.Qwen3MLP):
+  def __init__(
+      self,
+      original_mlp: modeling_qwen3.Qwen3MLP,
+  ):
     super().__init__()
     self.gate_proj = original_mlp.gate_proj
     self.up_proj = original_mlp.up_proj
@@ -87,13 +91,14 @@ class FusedQwen3MLP(torch.nn.Module):
 
 
 class FusedQwen3Attention(torch.nn.Module):
-  """Fused Attention layer (Q + K + V and/or RoPE Composite)."""
+  """Fused QKV Attention Layer for Qwen3 model."""
 
   def __init__(
       self,
       original_attn: modeling_qwen3.Qwen3Attention,
       fuse_qkv: bool = False,
       use_rope_composite: bool = False,
+      use_qkv_norm_rope_composite: bool = False,
   ):
     super().__init__()
     self.o_proj = original_attn.o_proj
@@ -102,7 +107,24 @@ class FusedQwen3Attention(torch.nn.Module):
 
     self.config = original_attn.config
     self.layer_idx = original_attn.layer_idx
-    self.head_dim = original_attn.head_dim
+    num_heads = getattr(
+        original_attn,
+        "num_heads",
+        getattr(self.config, "num_attention_heads", 16),
+    )
+    self.num_heads: int = int(num_heads) if isinstance(num_heads, int) else 16
+    num_kv_heads = getattr(
+        original_attn,
+        "num_key_value_heads",
+        getattr(self.config, "num_key_value_heads", 8),
+    )
+    self.num_key_value_heads = self.num_kv_heads = (
+        int(num_kv_heads) if isinstance(num_kv_heads, int) else 8
+    )
+    head_dim = getattr(
+        original_attn, "head_dim", getattr(self.config, "head_dim", 128)
+    )
+    self.head_dim: int = int(head_dim) if isinstance(head_dim, int) else 128
     self.num_key_value_groups = original_attn.num_key_value_groups
     self.scaling = original_attn.scaling
     self.attention_dropout = original_attn.attention_dropout
@@ -111,6 +133,7 @@ class FusedQwen3Attention(torch.nn.Module):
 
     self.fuse_qkv = fuse_qkv
     self.use_rope_composite = use_rope_composite
+    self.use_qkv_norm_rope_composite = use_qkv_norm_rope_composite
 
     self.q_proj = original_attn.q_proj
     self.k_proj = original_attn.k_proj
@@ -154,31 +177,23 @@ class FusedQwen3Attention(torch.nn.Module):
       past_key_values=None,
       **kwargs,
   ):
-    if self.fuse_qkv:
-      qkv = self.qkv_proj(hidden_states)
-      q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
-    else:
-      q = self.q_proj(hidden_states)
-      k = self.k_proj(hidden_states)
-      v = self.v_proj(hidden_states)
-
     input_shape = hidden_states.shape[:-1]
-    hidden_shape = (*input_shape, -1, self.head_dim)
+    hidden_shape_q = (*input_shape, self.num_heads, self.head_dim)
+    hidden_shape_kv = (*input_shape, self.num_key_value_heads, self.head_dim)
 
-    query_states = self.q_norm(q.view(hidden_shape)).transpose(1, 2)
-    key_states = self.k_norm(k.view(hidden_shape)).transpose(1, 2)
-    value_states = v.view(hidden_shape).transpose(1, 2)
-
-    if getattr(self, "use_rope_composite", False):
+    if getattr(self, "use_qkv_norm_rope_composite", False) and self.fuse_qkv:
       position_ids = kwargs.get("position_ids", None)
       if position_ids is None:
-        seq_len = query_states.shape[2]
+        seq_len = hidden_states.shape[1]
         position_ids = torch.arange(
-            seq_len, device=query_states.device
+            seq_len, device=hidden_states.device
         ).unsqueeze(0)
 
       rope_base = 1000000.0
-      if hasattr(self.config, "rope_parameters") and self.config.rope_parameters:
+      if (
+          hasattr(self.config, "rope_parameters")
+          and self.config.rope_parameters
+      ):
         if isinstance(self.config.rope_parameters, dict):
           val = self.config.rope_parameters.get("rope_theta", rope_base)
           rope_base = float(val) if val is not None else rope_base
@@ -203,6 +218,69 @@ class FusedQwen3Attention(torch.nn.Module):
       if is_local:
         rope_base = float(getattr(self.config, "local_rope_theta", 10000.0))
 
+      qkv = self.qkv_proj(hidden_states)
+      query_states, key_states, value_states = (
+          qkv_norm_rope_composite.apply_qkv_norm_rope(
+              qkv,
+              position_ids,
+              self.q_norm.weight,
+              self.k_norm.weight,
+              num_heads=self.num_heads,
+              num_kv_heads=self.num_key_value_heads,
+              head_dim=self.head_dim,
+              base=rope_base,
+              eps=float(self.q_norm.variance_epsilon),
+          )
+      )
+    elif getattr(self, "use_rope_composite", False):
+      position_ids = kwargs.get("position_ids", None)
+      if position_ids is None:
+        seq_len = hidden_states.shape[1]
+        position_ids = torch.arange(
+            seq_len, device=hidden_states.device
+        ).unsqueeze(0)
+
+      rope_base = 1000000.0
+      if (
+          hasattr(self.config, "rope_parameters")
+          and self.config.rope_parameters
+      ):
+        if isinstance(self.config.rope_parameters, dict):
+          val = self.config.rope_parameters.get("rope_theta", rope_base)
+          rope_base = float(val) if val is not None else rope_base
+        elif hasattr(self.config.rope_parameters, "rope_theta"):
+          rope_base = float(
+              getattr(self.config.rope_parameters, "rope_theta", rope_base)
+          )
+      elif hasattr(self.config, "rope_theta"):
+        rope_base = float(getattr(self.config, "rope_theta", rope_base))
+
+      is_local = False
+      num_local = getattr(self.config, "num_local_layers_per_global", 0)
+      if num_local > 0 and (self.layer_idx + 1) % (num_local + 1) != 0:
+        is_local = True
+      elif hasattr(self.config, "layer_types") and self.config.layer_types:
+        if (
+            self.layer_idx < len(self.config.layer_types)
+            and self.config.layer_types[self.layer_idx] == "sliding_attention"
+        ):
+          is_local = True
+
+      if is_local:
+        rope_base = float(getattr(self.config, "local_rope_theta", 10000.0))
+
+      if self.fuse_qkv:
+        qkv = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+      else:
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
+
+      query_states = self.q_norm(q.view(hidden_shape_q)).transpose(1, 2)
+      key_states = self.k_norm(k.view(hidden_shape_kv)).transpose(1, 2)
+      value_states = v.view(hidden_shape_kv).transpose(1, 2)
+
       query_states = rope_composite.apply_mldrift_compatible_rope(
           query_states, position_ids, base=rope_base, head_dim=self.head_dim
       )
@@ -210,6 +288,17 @@ class FusedQwen3Attention(torch.nn.Module):
           key_states, position_ids, base=rope_base, head_dim=self.head_dim
       )
     else:
+      if self.fuse_qkv:
+        qkv = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+      else:
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
+
+      query_states = self.q_norm(q.view(hidden_shape_q)).transpose(1, 2)
+      key_states = self.k_norm(k.view(hidden_shape_kv)).transpose(1, 2)
+      value_states = v.view(hidden_shape_kv).transpose(1, 2)
       assert position_embeddings is not None
       cos, sin = position_embeddings
       query_states, key_states = modeling_qwen3.apply_rotary_pos_emb(
@@ -266,13 +355,18 @@ def qwen3_litert_patch():
 @contextlib.contextmanager
 def patch_qwen3_model(model, export_config):
   """Dynamic model patch for Qwen3 export."""
-  fuse_gate_up = export_config.fuse_gate_up
-  fuse_qkv = export_config.fuse_qkv
-  use_rope = export_config.use_rope_composite
+  fuse_gate_up = getattr(export_config, "fuse_gate_up", False)
+  fuse_qkv = getattr(export_config, "fuse_qkv", False)
+  use_rope = getattr(export_config, "use_rope_composite", False)
+  use_qkv_norm_rope = getattr(
+      export_config, "use_qkv_norm_rope_composite", False
+  )
   print(
       "Qwen3 model patch applied. "
       f"fuse_gate_up={fuse_gate_up}, fuse_qkv={fuse_qkv}, "
-      f"use_rope_composite={use_rope}"
+      f"use_rope_composite={use_rope}, "
+      f"use_qkv_norm_rope_composite={use_qkv_norm_rope}, "
+      ""
   )
 
   replaced_modules = []
@@ -280,20 +374,16 @@ def patch_qwen3_model(model, export_config):
   def replace_modules(module):
     for child_name, child in module.named_children():
       if fuse_gate_up and isinstance(child, modeling_qwen3.Qwen3MLP):
-        print(f"Fusing MLP: {child_name}")
         fused = FusedQwen3MLP(child)
         setattr(module, child_name, fused)
         replaced_modules.append((module, child_name, child))
       elif isinstance(child, modeling_qwen3.Qwen3Attention):
-        if fuse_qkv or use_rope:
-          print(
-              f"Replacing Attention: {child_name} "
-              f"(fuse_qkv={fuse_qkv}, use_rope={use_rope})"
-          )
+        if fuse_qkv or use_rope or use_qkv_norm_rope:
           fused = FusedQwen3Attention(
               child,
-              fuse_qkv=fuse_qkv,
+              fuse_qkv=fuse_qkv or use_qkv_norm_rope,
               use_rope_composite=use_rope,
+              use_qkv_norm_rope_composite=use_qkv_norm_rope,
           )
           setattr(module, child_name, fused)
           replaced_modules.append((module, child_name, child))
@@ -306,4 +396,3 @@ def patch_qwen3_model(model, export_config):
   finally:
     for module, name, original in reversed(replaced_modules):
       setattr(module, name, original)
-

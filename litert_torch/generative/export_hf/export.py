@@ -92,6 +92,8 @@ def export(
     enable_gpu_dynamic_prefill: bool | None = None,
     enable_gpu_dynamic_cache: bool | None = None,
     use_rope_composite: bool | None = None,
+    use_qkv_norm_rope_composite: bool | None = None,
+    use_sdpa_composite: bool | None = None,
     externalize_embedder: bool | None = None,
     single_token_embedder: bool | None = None,
     k_ts_idx: int | None = None,
@@ -153,6 +155,8 @@ def export(
     enable_gpu_dynamic_cache: Whether to enable GPU dynamic shapes (magic
       numbers) for cache length.
     use_rope_composite: Whether to enable the RoPE composite.
+    use_qkv_norm_rope_composite: Whether to enable the QKV norm rope composite.
+    use_sdpa_composite: Whether to enable the fused transposed SDPA composite.
     externalize_embedder: Whether to externalize the embedder.
     single_token_embedder: Whether to use a single token embedder.
     k_ts_idx: The index of time step dimension in the key tensor.

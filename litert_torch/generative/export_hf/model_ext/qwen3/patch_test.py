@@ -14,6 +14,7 @@
 # ==============================================================================
 """Tests for Qwen3 model export patches."""
 
+import litert_torch.generative.export_hf  # pylint: disable=unused-import
 from absl.testing import parameterized
 from litert_torch.generative.export_hf.core import exportable_module_config
 from litert_torch.generative.export_hf.model_ext.qwen3 import patch
@@ -150,13 +151,13 @@ class PatchTest(parameterized.TestCase):
         f"Expected: {expected_output}\nActual: {actual_output}",
     )
 
-  def test_fused_qwen3_attention_local_rope_composite(self):
+  def test_fused_qwen3_attention_qkv_norm_rope_composite(self):
     config = _get_dummy_qwen3_config()
-    config.num_local_layers_per_global = 3
-    config.local_rope_theta = 10000.0
     original_attn = modeling_qwen3.Qwen3Attention(config, layer_idx=0)
     fused_attn = patch.FusedQwen3Attention(
-        original_attn, use_rope_composite=True
+        original_attn,
+        fuse_qkv=True,
+        use_qkv_norm_rope_composite=True,
     )
 
     batch_size = 2
@@ -164,8 +165,19 @@ class PatchTest(parameterized.TestCase):
     hidden_states = torch.randn(batch_size, seq_len, config.hidden_size)
     position_ids = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1)
 
+    rope_base = 1000000.0
+    if hasattr(config, "rope_parameters") and config.rope_parameters:
+      if isinstance(config.rope_parameters, dict):
+        rope_base = float(config.rope_parameters.get("rope_theta", rope_base))
+      elif hasattr(config.rope_parameters, "rope_theta"):
+        rope_base = float(
+            getattr(config.rope_parameters, "rope_theta", rope_base)
+        )
+    elif hasattr(config, "rope_theta"):
+      rope_base = float(getattr(config, "rope_theta", rope_base))
+
     cos, sin = rotary_pos_emb.build_rope(
-        position_ids[0], n_elem=config.head_dim, base=10000
+        position_ids[0], n_elem=config.head_dim, base=int(rope_base)
     )
     cos = torch.cat([cos, cos], dim=-1)
     sin = torch.cat([sin, sin], dim=-1)
@@ -186,7 +198,7 @@ class PatchTest(parameterized.TestCase):
 
     self.assertTrue(
         torch.allclose(expected_output, actual_output, rtol=1e-5, atol=1e-5),
-        "Local RoPE Composite Attention Output Mismatch.\n"
+        "QKV NormRoPE Composite Attention Output Mismatch.\n"
         f"Expected: {expected_output}\nActual: {actual_output}",
     )
 
@@ -205,17 +217,18 @@ class PatchTest(parameterized.TestCase):
         output_dir=None,
         fuse_gate_up=True,
         fuse_qkv=True,
-        use_rope_composite=True,
+        use_qkv_norm_rope_composite=True,
     )
 
     with patch.patch_qwen3_model(model, export_config):
-      # Verify inside context they are replaced with Fused classes
       self.assertIsInstance(model.model.layers[0].mlp, patch.FusedQwen3MLP)
       self.assertIsInstance(
           model.model.layers[0].self_attn, patch.FusedQwen3Attention
       )
       self.assertTrue(model.model.layers[0].self_attn.fuse_qkv)
-      self.assertTrue(model.model.layers[0].self_attn.use_rope_composite)
+      self.assertTrue(
+          model.model.layers[0].self_attn.use_qkv_norm_rope_composite
+      )
 
     # Verify outside context they are restored
     self.assertIsInstance(model.model.layers[0].mlp, modeling_qwen3.Qwen3MLP)
