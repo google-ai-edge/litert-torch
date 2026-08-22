@@ -157,6 +157,27 @@ class GetExamplePromptTest(absltest.TestCase):
     )
     self.assertIn('hello', prompt)
 
+  def test_boilerplate_substring_prompt_is_not_dropped(self):
+    """A prompt that happens to appear in the template's own boilerplate must
+    not defeat the check that the template preserved it."""
+
+    class _DroppingTx(_FakeTxTokenizer):
+
+      def apply_chat_template(self, messages, tokenize=False,
+                              add_generation_prompt=False):
+        del messages, tokenize, add_generation_prompt
+        return 'User: <end_of_utterance>\nAssistant:'
+
+    prompt = quant_utils.get_example_prompt(
+        {'text': 'User:'}, True, _FakeTokenizer(_DroppingTx())
+    )
+    self.assertEqual(
+        prompt,
+        quant_utils.PROMPT_TEMPLATE_PREFIX
+        + 'User:'
+        + quant_utils.PROMPT_TEMPLATE_SUFFIX,
+    )
+
   def test_non_string_prompt_raises(self):
     with self.assertRaises(TypeError):
       quant_utils.get_example_prompt({'inputs': ['a', 'b']}, True,

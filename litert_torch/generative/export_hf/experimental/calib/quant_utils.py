@@ -96,6 +96,22 @@ def _has_chat_template(tokenizer: tokenizer_lib.Tokenizer | None) -> bool:
   return tx is not None and bool(getattr(tx, 'chat_template', None))
 
 
+_CONTENT_PROBE = 'KIMAIRA_CALIBRATION_PROBE'
+
+
+def _template_keeps_content(tokenizer: tokenizer_lib.Tokenizer | None) -> bool:
+  """Returns whether the chat template reproduces plain-string content."""
+  try:
+    rendered = tokenizer.tx_tokenizer.apply_chat_template(  # pytype: disable=attribute-error
+        [{'role': 'user', 'content': _CONTENT_PROBE}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+  except Exception:  # pylint: disable=broad-except
+    return False
+  return isinstance(rendered, str) and _CONTENT_PROBE in rendered
+
+
 def _wrap_one_prompt(
     prompt: str, tokenizer: tokenizer_lib.Tokenizer | None
 ) -> str:
@@ -116,26 +132,30 @@ def _wrap_one_prompt(
   if not isinstance(prompt, str):
     raise TypeError(f'Expected a string prompt, got {type(prompt).__name__}.')
   if _has_chat_template(tokenizer):
-    formatted = None
-    try:
-      formatted = tokenizer.tx_tokenizer.apply_chat_template(  # pytype: disable=attribute-error
-          [{'role': 'user', 'content': prompt}],
-          tokenize=False,
-          add_generation_prompt=True,
-      )
-    except Exception as e:  # pylint: disable=broad-except
-      print(f'WARNING: chat template failed ({e}); using default turn markers.')
-    if formatted is not None:
-      # Some templates expect list-shaped content and drop a plain string,
-      # which would calibrate on empty user turns.
-      if isinstance(formatted, str) and (
-          not prompt.strip() or prompt.strip() in formatted
-      ):
-        return formatted
+    # Probe the template with a sentinel before trusting it with the real
+    # prompt. Templates that expect list-shaped content drop a plain string, and
+    # checking for the prompt in the output does not catch that: a prompt like
+    # 'User:' is a substring of some templates' own boilerplate, so the check
+    # passes while the content is gone.
+    if not _template_keeps_content(tokenizer):
       print(
-          'WARNING: chat template did not preserve the prompt; using default'
-          ' turn markers.'
+          'WARNING: chat template does not preserve plain-string content; using'
+          ' default turn markers.'
       )
+    else:
+      try:
+        formatted = tokenizer.tx_tokenizer.apply_chat_template(  # pytype: disable=attribute-error
+            [{'role': 'user', 'content': prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        if isinstance(formatted, str):
+          return formatted
+        print('WARNING: chat template did not return a string; using default'
+              ' turn markers.')
+      except Exception as e:  # pylint: disable=broad-except
+        print(f'WARNING: chat template failed ({e}); using default turn'
+              ' markers.')
   elif not _warned_no_chat_template:
     _warned_no_chat_template = True
     print(
@@ -199,7 +219,7 @@ def get_example_prompt(
       else:
         prompt = '\n'.join([msg.get('content', '') for msg in user_messages])
         if enable_formatting:
-          prompt = _wrap_one_prompt(prompt, tokenizer)
+          prompt = PROMPT_TEMPLATE_PREFIX + prompt + PROMPT_TEMPLATE_SUFFIX
           print(f'\n--- Formatted prompt (fallback): {prompt} ---')
         return prompt
 
