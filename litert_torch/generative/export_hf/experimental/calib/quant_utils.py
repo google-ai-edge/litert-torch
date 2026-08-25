@@ -46,9 +46,11 @@ class gfile:
   @staticmethod
   def IsDirectory(path): return os.path.isdir(path)
 
-# Following BARD250 format.
+# Following BARD250 format. These are Gemma's turn markers; they are only a
+# fallback for calibration runs that have no chat template to work from.
 PROMPT_TEMPLATE_PREFIX = '<start_of_turn>user\n'
 PROMPT_TEMPLATE_SUFFIX = '<end_of_turn>\n<start_of_turn>model\n'
+_warned_no_chat_template = False
 
 BASE_SAVE_DIR = ''
 
@@ -88,6 +90,81 @@ def read_from_jsonl(input_file: str) -> list[dict[str, Any]]:
   return examples
 
 
+def _has_chat_template(tokenizer: tokenizer_lib.Tokenizer | None) -> bool:
+  """Returns whether the tokenizer can render a chat template."""
+  tx = getattr(tokenizer, 'tx_tokenizer', None)
+  return tx is not None and bool(getattr(tx, 'chat_template', None))
+
+
+_CONTENT_PROBE = 'KIMAIRA_CALIBRATION_PROBE'
+
+
+def _template_keeps_content(tokenizer: tokenizer_lib.Tokenizer | None) -> bool:
+  """Returns whether the chat template reproduces plain-string content."""
+  try:
+    rendered = tokenizer.tx_tokenizer.apply_chat_template(  # pytype: disable=attribute-error
+        [{'role': 'user', 'content': _CONTENT_PROBE}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+  except Exception:  # pylint: disable=broad-except
+    return False
+  return isinstance(rendered, str) and _CONTENT_PROBE in rendered
+
+
+def _wrap_one_prompt(
+    prompt: str, tokenizer: tokenizer_lib.Tokenizer | None
+) -> str:
+  """Wraps a user turn using the model's own chat template.
+
+  Calibration sets the activation ranges the quantized model has to live with,
+  so its prompts need the control tokens the runtime will actually feed. Falls
+  back to the Gemma constants when no usable template is available.
+
+  Args:
+    prompt: The user turn text.
+    tokenizer: Tokenizer whose chat template should be applied, if any.
+
+  Returns:
+    The wrapped prompt.
+  """
+  global _warned_no_chat_template
+  if not isinstance(prompt, str):
+    raise TypeError(f'Expected a string prompt, got {type(prompt).__name__}.')
+  if _has_chat_template(tokenizer):
+    # Probe the template with a sentinel before trusting it with the real
+    # prompt. Templates that expect list-shaped content drop a plain string, and
+    # checking for the prompt in the output does not catch that: a prompt like
+    # 'User:' is a substring of some templates' own boilerplate, so the check
+    # passes while the content is gone.
+    if not _template_keeps_content(tokenizer):
+      print(
+          'WARNING: chat template does not preserve plain-string content; using'
+          ' default turn markers.'
+      )
+    else:
+      try:
+        formatted = tokenizer.tx_tokenizer.apply_chat_template(  # pytype: disable=attribute-error
+            [{'role': 'user', 'content': prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        if isinstance(formatted, str):
+          return formatted
+        print('WARNING: chat template did not return a string; using default'
+              ' turn markers.')
+      except Exception as e:  # pylint: disable=broad-except
+        print(f'WARNING: chat template failed ({e}); using default turn'
+              ' markers.')
+  elif not _warned_no_chat_template:
+    _warned_no_chat_template = True
+    print(
+        'WARNING: no chat template available for this tokenizer; calibrating'
+        " with Gemma's turn markers, which is wrong for other model families."
+    )
+  return PROMPT_TEMPLATE_PREFIX + prompt + PROMPT_TEMPLATE_SUFFIX
+
+
 def format_prompt(
     prompt: str | list[str], enable_formatting: bool
 ) -> str | list[str]:
@@ -110,27 +187,27 @@ def get_example_prompt(
   if isinstance(example, str):
     prompt = example
     if enable_formatting:
-      prompt = PROMPT_TEMPLATE_PREFIX + prompt + PROMPT_TEMPLATE_SUFFIX
+      prompt = _wrap_one_prompt(prompt, tokenizer)
     return prompt
 
   if isinstance(example, dict):
     if 'text' in example and isinstance(example['text'], str):
       prompt = example['text']
       if enable_formatting:
-        prompt = PROMPT_TEMPLATE_PREFIX + prompt + PROMPT_TEMPLATE_SUFFIX
+        prompt = _wrap_one_prompt(prompt, tokenizer)
       return prompt
 
     if 'prompt' in example and isinstance(example['prompt'], str):
       prompt = example['prompt']
       if enable_formatting:
-        prompt = PROMPT_TEMPLATE_PREFIX + prompt + PROMPT_TEMPLATE_SUFFIX
+        prompt = _wrap_one_prompt(prompt, tokenizer)
       return prompt
 
     if 'messages' in example:
       user_messages = [
           msg for msg in example['messages'] if msg.get('role') == 'user'
       ]
-      if tokenizer and tokenizer.tx_tokenizer and enable_formatting:
+      if _has_chat_template(tokenizer) and enable_formatting:
         prompt = tokenizer.tx_tokenizer.apply_chat_template(
             user_messages,
             tokenize=False,
@@ -149,7 +226,7 @@ def get_example_prompt(
     if 'inputs' in example and example['inputs']:
       prompt = example['inputs']
       if enable_formatting:
-        prompt = PROMPT_TEMPLATE_PREFIX + prompt + PROMPT_TEMPLATE_SUFFIX
+        prompt = _wrap_one_prompt(prompt, tokenizer)
         print(f'\n--- Formatted prompt: {prompt} ---')
       return prompt
 
