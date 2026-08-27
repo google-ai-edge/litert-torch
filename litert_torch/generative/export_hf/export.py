@@ -150,6 +150,8 @@ def export(
     prefill_lengths: The lengths of the prefill input, separated by comma.
     cache_length: The length of the cache.
     quantization_recipe: The quantization recipes to use, separated by comma.
+      For int4 weights, use the blockwise `dynamic_wi4b32_afp32`; the
+      channelwise `dynamic_wi4_afp32` can severely degrade small LLMs.
     enable_dynamic_shape: Whether to enable dynamic shape.
     enable_gpu_dynamic_prefill: Whether to enable GPU dynamic shapes (magic
       numbers) for prefill lengths.
