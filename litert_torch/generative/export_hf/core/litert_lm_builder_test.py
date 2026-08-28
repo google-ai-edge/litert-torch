@@ -18,7 +18,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module
-from litert_torch.generative.export_hf.core import litert_lm_builder
+from litert_torch.generative.export_hf.core import litert_lm_builder as litertlm_builder
 
 _EMPTY_CHAT_TEMPLATES = ((None, None), (None, None), (None, None))
 
@@ -88,7 +88,7 @@ class _FakeModel:
 
 
 def _build_llm_metadata(tokenizer, chat_templates=_EMPTY_CHAT_TEMPLATES):
-  return litert_lm_builder.build_llm_metadata(
+  return litertlm_builder.build_llm_metadata(
       source_model_artifacts=export_lib.SourceModelArtifacts(
           model=_FakeModel(),
           model_config=None,
@@ -110,7 +110,7 @@ class TokenizerPrependsBosTest(parameterized.TestCase):
     tokenizer = _FakeTokenizer(
         bos_token="<s>", bos_token_id=1, prepends_bos=True
     )
-    self.assertTrue(litert_lm_builder._tokenizer_prepends_bos(tokenizer))
+    self.assertTrue(litertlm_builder._tokenizer_prepends_bos(tokenizer))
 
   def test_false_when_declared_bos_is_not_prepended(self):
     # add_bos_token: false checkpoints (e.g. granite-4.1) declare a BOS that
@@ -121,7 +121,7 @@ class TokenizerPrependsBosTest(parameterized.TestCase):
         prepends_bos=False,
         eos_token="<|end_of_text|>",
     )
-    self.assertFalse(litert_lm_builder._tokenizer_prepends_bos(tokenizer))
+    self.assertFalse(litertlm_builder._tokenizer_prepends_bos(tokenizer))
 
   def test_true_when_chat_template_carries_the_bos(self):
     # OLMo-2-style: tokenization never prepends the BOS, but the chat
@@ -134,7 +134,7 @@ class TokenizerPrependsBosTest(parameterized.TestCase):
         eos_token="<|endoftext|>",
         template_carries_bos=True,
     )
-    self.assertTrue(litert_lm_builder._tokenizer_prepends_bos(tokenizer))
+    self.assertTrue(litertlm_builder._tokenizer_prepends_bos(tokenizer))
 
   def test_false_when_chat_template_does_not_carry_the_bos(self):
     tokenizer = _FakeTokenizer(
@@ -144,7 +144,7 @@ class TokenizerPrependsBosTest(parameterized.TestCase):
         eos_token="<|end_of_text|>",
         template_carries_bos=False,
     )
-    self.assertFalse(litert_lm_builder._tokenizer_prepends_bos(tokenizer))
+    self.assertFalse(litertlm_builder._tokenizer_prepends_bos(tokenizer))
 
   def test_true_when_shipped_template_carries_the_bos(self):
     # jinja_chat_template_override case: the shipped template is not the
@@ -157,12 +157,12 @@ class TokenizerPrependsBosTest(parameterized.TestCase):
         eos_token="<|endoftext|>",
     )
     self.assertTrue(
-        litert_lm_builder._tokenizer_prepends_bos(
+        litertlm_builder._tokenizer_prepends_bos(
             tokenizer, "{{ bos_token }}<|user|>{{ content }}"
         )
     )
     self.assertFalse(
-        litert_lm_builder._tokenizer_prepends_bos(
+        litertlm_builder._tokenizer_prepends_bos(
             tokenizer, "<|user|>{{ content }}"
         )
     )
@@ -171,7 +171,7 @@ class TokenizerPrependsBosTest(parameterized.TestCase):
     tokenizer = _FakeTokenizer(
         bos_token="<s>", bos_token_id=None, prepends_bos=False
     )
-    self.assertFalse(litert_lm_builder._tokenizer_prepends_bos(tokenizer))
+    self.assertFalse(litertlm_builder._tokenizer_prepends_bos(tokenizer))
 
   def test_int_bos_token_used_as_id_when_id_attribute_is_missing(self):
     class _IntBosTokenizer:
@@ -182,13 +182,13 @@ class TokenizerPrependsBosTest(parameterized.TestCase):
         return _FakeEncoding([5, 7, 8])
 
     self.assertTrue(
-        litert_lm_builder._tokenizer_prepends_bos(_IntBosTokenizer())
+        litertlm_builder._tokenizer_prepends_bos(_IntBosTokenizer())
     )
 
   def test_true_when_tokenizer_cannot_be_probed(self):
     # Preserves the previous behavior for tokenizers we cannot call.
     self.assertTrue(
-        litert_lm_builder._tokenizer_prepends_bos(
+        litertlm_builder._tokenizer_prepends_bos(
             _UnprobeableTokenizer(bos_token="<s>")
         )
     )
