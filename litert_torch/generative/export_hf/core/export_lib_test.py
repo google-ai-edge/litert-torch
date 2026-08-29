@@ -18,11 +18,13 @@ import json
 import os
 import shutil
 import tempfile
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
 
 from litert_torch.generative.export_hf.core import export_lib
+from litert_torch.generative.export_hf.core import litert_lm_builder
 
 
 class ExportLibTest(parameterized.TestCase):
@@ -191,6 +193,27 @@ class ExportLibTest(parameterized.TestCase):
           enable_dynamic_shape=True,
           enable_gpu_dynamic_cache=True,
       )
+
+  def test_build_llm_metadata_tiny_gemma_override(self):
+    source_model_artifacts = mock.MagicMock()
+    source_model_artifacts.model.config.model_type = "gemma3"
+    source_model_artifacts.tokenizer = mock.MagicMock()
+    del source_model_artifacts.tokenizer.bos_token
+    del source_model_artifacts.tokenizer.eos_token
+    export_config = export_lib.exportable_module_config.ExportableModuleConfig(
+        model="dummy_model",
+        litert_lm_model_type_override="tiny_gemma",
+    )
+    exported_model_artifacts = mock.MagicMock()
+
+    metadata = litert_lm_builder.build_llm_metadata(
+        source_model_artifacts=source_model_artifacts,
+        export_config=export_config,
+        chat_templates=None,
+        exported_model_artifacts=exported_model_artifacts,
+        litert_lm_model_type_override="tiny_gemma",
+    )
+    self.assertTrue(metadata.llm_model_type.HasField("tiny_gemma"))
 
 
 if __name__ == "__main__":
