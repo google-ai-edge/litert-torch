@@ -82,6 +82,7 @@ class ExportableModuleConfig:
   vision_encoder_quantization_recipe: str | None = "dynamic_wi8_afp32"
   litert_lm_model_type_override: str | None = None
   litert_lm_llm_metadata_override: str | None = None
+  litert_lm_system_metadata: dict[str, Any] | None = None
   tokenizer_path_override: str | None = None
   llm_metadata_max_num_tokens_override: int | None = None
   sampler_top_p: float | None = None
