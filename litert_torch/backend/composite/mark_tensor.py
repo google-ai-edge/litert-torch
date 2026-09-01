@@ -50,7 +50,7 @@ def _assert_valid_composite_attr(attr: CompositeAttrType):
     )
     if isinstance(v, (list, tuple)):
       eltys = {type(el) for el in v}
-      if len(eltys) > 1 or next(iter(eltys)) not in (int, float, bool):
+      if len(eltys) > 1 or (eltys and next(iter(eltys)) not in (int, float, bool)):
         raise invalid_attr_value_error
     elif type(v) not in (str, float, int, bool):
       raise invalid_attr_value_error
@@ -62,7 +62,7 @@ def serialize_composite_attr(attr: Union[CompositeAttrType, None]):
   if attr is None:
     return None
   _assert_valid_composite_attr(attr)
-  return tuple(attr.items())
+  return json.dumps(attr)
 
 
 @torch._dynamo.assume_constant_result
@@ -70,6 +70,8 @@ def deserialize_composite_attr(serialized_attr) -> CompositeAttrType:
   """Deserialize dynamo-tracable composite attribute into its raw value."""
   if serialized_attr is None:
     return None
+  if isinstance(serialized_attr, str):
+    return json.loads(serialized_attr)
   return dict(serialized_attr)
 
 
