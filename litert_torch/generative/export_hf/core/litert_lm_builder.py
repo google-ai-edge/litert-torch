@@ -116,6 +116,57 @@ def parse_chat_template(tokenizer):
     return (None, None), (None, None), (None, None)
 
 
+def _tokenizer_prepends_bos(tokenizer, chat_template=None) -> bool:
+  """Checks whether the model input actually starts with the BOS token.
+
+  A declared `bos_token` does not guarantee the model ever sees it: a
+  tokenizer with `add_bos_token: false` declares a BOS that HF-side
+  tokenization never prepends, and writing it as `start_token` makes the
+  runtime prepend a token the checkpoint never sees in that position. When
+  the BOS is also the EOS, the model reads the prompt as a finished document
+  and can degenerate into echoing it.
+
+  Two probes cover the ways the model input gets a BOS: plain tokenization
+  (covers `add_bos_token: true` and post-processors), and the rendered chat
+  template (covers templates that begin with the BOS, e.g. `{{ bos_token }}`
+  — the template prefix is stripped in parse_chat_template, or rendered
+  empty by the runtime's jinja engine, and restored from `start_token`, so
+  such models still need the field).
+
+  Args:
+    tokenizer: Tokenizer of the source model.
+    chat_template: The jinja chat template being shipped, when it is not
+      `tokenizer.chat_template` (e.g. jinja_chat_template_override).
+
+  Returns:
+    True if either probe yields the BOS token id first, or if the tokenizer
+    cannot be probed (preserving the previous behavior of trusting the
+    declared `bos_token`).
+  """
+  try:
+    input_ids = tokenizer('x').input_ids
+    bos_token_id = getattr(tokenizer, 'bos_token_id', None)
+    if bos_token_id is None and isinstance(tokenizer.bos_token, int):
+      bos_token_id = tokenizer.bos_token
+    if bos_token_id is None:
+      return False
+    if len(input_ids) > 0 and input_ids[0] == bos_token_id:
+      return True
+    chat_template = chat_template or getattr(tokenizer, 'chat_template', None)
+    if chat_template:
+      rendered = tokenizer.apply_chat_template(
+          [{'role': 'user', 'content': 'x'}],
+          chat_template=chat_template,
+          tokenize=False,
+          add_generation_prompt=False,
+      )
+      input_ids = tokenizer(rendered, add_special_tokens=False).input_ids
+      return len(input_ids) > 0 and input_ids[0] == bos_token_id
+    return False
+  except Exception:  # pylint: disable=broad-except
+    return True
+
+
 def build_llm_metadata(
     source_model_artifacts: export_lib.SourceModelArtifacts,
     export_config: exportable_module.ExportableModuleConfig,
@@ -130,7 +181,14 @@ def build_llm_metadata(
 
   llm_metadata = llm_metadata_pb2.LlmMetadata()
 
-  if hasattr(tokenizer, 'bos_token') and tokenizer.bos_token:
+  if (
+      hasattr(tokenizer, 'bos_token')
+      and tokenizer.bos_token
+      and _tokenizer_prepends_bos(
+          tokenizer,
+          chat_templates if isinstance(chat_templates, str) else None,
+      )
+  ):
     if isinstance(tokenizer.bos_token, int):
       llm_metadata.start_token.token_ids.ids.append(tokenizer.bos_token)
     elif isinstance(tokenizer.bos_token, str):
