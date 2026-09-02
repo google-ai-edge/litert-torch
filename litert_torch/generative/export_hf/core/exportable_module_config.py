@@ -43,6 +43,29 @@ class ExportableModuleConfig:
   prefill_lengths: list[int] = dataclasses.field(default_factory=lambda: [128])
   cache_length: int = 4096
   sliding_window_ring_buffer_size: int | None = None
+  # Optional distinct KV-cache length for the decode signature. When None,
+  # decode reuses `cache_length` (default, single shared size). When set, the
+  # prefill signature keeps `cache_length` while decode is exported against
+  # `decode_cache_length`. This lets both signatures target the same total
+  # context on the full_attention (global) layers (e.g. context=16384: prefill
+  # cache=16256 + chunk 128, decode cache=16383 + 1). Sliding_attention layers
+  # are unaffected -- they use the fixed `sliding_window_ring_buffer_size` ring
+  # for both signatures. NOTE: the LiteRT-LM runtime currently shares a single
+  # physical KV buffer across signatures, so a model with differing global
+  # lengths is export-only (not runnable) without matching runtime changes.
+  decode_cache_length: int | None = None
+  # Optional distinct ring-buffer (local past) size for the DECODE signature of
+  # sliding_attention layers. When None, decode reuses
+  # `sliding_window_ring_buffer_size` (shared size, unchanged default). When set,
+  # the prefill signature keeps `sliding_window_ring_buffer_size` while decode is
+  # exported against this size, letting both signatures reach the same sliding
+  # window: e.g. window=1024 as prefill 896 + chunk 128 and decode 1023 + 1. The
+  # window bound W (= model `sliding_window`) is unchanged for both signatures;
+  # only the physical ring size S differs. This is the ring-buffer equivalent of
+  # the global split-context `decode_cache_length`, and carries the same
+  # export-only caveat (the runtime shares one physical local KV buffer across
+  # signatures).
+  decode_sliding_window_ring_buffer_size: int | None = None
   # For quantization
   quantization_recipe: str | None = "dynamic_wi8_afp32"
   # For dynamic shape

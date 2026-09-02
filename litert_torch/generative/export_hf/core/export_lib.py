@@ -373,6 +373,28 @@ def get_prefill_decode_exportable_cls(
     )
 
 
+def _decode_export_config(
+    export_config: exportable_module.ExportableModuleConfig,
+) -> exportable_module.ExportableModuleConfig:
+  """Returns the export config to use for the decode signature.
+
+  Substitutes `decode_cache_length` and `decode_sliding_window_ring_buffer_size`
+  for their prefill counterparts; see `ExportableModuleConfig` for what each
+  means. Returns `export_config` itself when neither is set, so callers can
+  `is`-check to skip rebuilding decode-only modules.
+  """
+  replacements = {}
+  if export_config.decode_cache_length is not None:
+    replacements['cache_length'] = export_config.decode_cache_length
+  if export_config.decode_sliding_window_ring_buffer_size is not None:
+    replacements['sliding_window_ring_buffer_size'] = (
+        export_config.decode_sliding_window_ring_buffer_size
+    )
+  if not replacements:
+    return export_config
+  return dataclasses.replace(export_config, **replacements)
+
+
 @progress.task('Export text prefill-decode model')
 def export_text_prefill_decode_model(
     source_model_artifacts: SourceModelArtifacts,
@@ -414,7 +436,7 @@ def export_text_prefill_decode_model(
         model, export_config, source_model_artifacts
     )
     decode_module = decode_module_cls(
-        model, export_config, source_model_artifacts
+        model, _decode_export_config(export_config), source_model_artifacts
     )
     converter = converter_utils.Converter()
     sample_prefill_inputs = prefill_module.get_sample_inputs(text_model_config)
@@ -833,24 +855,49 @@ def export_auxiliary_model(
     )
   # Attention Mask
   sliding_window_sizes = [getattr(text_model_config, 'sliding_window', None)]
-  attention_mask_module = split_cache_module.SplitAttentionMaskBuilder(
+  # Mask widths are baked into the builder at construction, so a decode-only
+  # size needs its own builder for the `decode_mask` signature.
+  decode_config = _decode_export_config(export_config)
+  prefill_mask_module = split_cache_module.SplitAttentionMaskBuilder(
       export_config,
       sliding_window_sizes=sliding_window_sizes,
   )
-  sample_inputs = attention_mask_module.get_sample_inputs(
+  decode_mask_module = (
+      prefill_mask_module
+      if decode_config is export_config
+      else split_cache_module.SplitAttentionMaskBuilder(
+          decode_config,
+          sliding_window_sizes=sliding_window_sizes,
+      )
+  )
+  sample_inputs = prefill_mask_module.get_sample_inputs(
       text_model_config, export_config
   )
   for signature_name, (sample_input, _) in sample_inputs.items():
+    mask_module = (
+        decode_mask_module
+        if signature_name == 'decode_mask'
+        else prefill_mask_module
+    )
     converter.add_signature(
         signature_name,
-        attention_mask_module.eval(),
+        mask_module.eval(),
         sample_kwargs=sample_input,
     )
   # Cache Update
+  # CacheUpdate is stateless; its sizes come from the sample inputs, so the
+  # decode sample must be re-derived to match the decode signature.
   cache_update_module = split_cache_module.CacheUpdate()
   sample_inputs = cache_update_module.get_sample_inputs(
       text_model_config, export_config
   )
+  if decode_config is not export_config:
+    decode_cache_update_inputs = cache_update_module.get_sample_inputs(
+        text_model_config, decode_config
+    )
+    sample_inputs['decode_cache_update'] = decode_cache_update_inputs[
+        'decode_cache_update'
+    ]
   for signature_name, (sample_input, _) in sample_inputs.items():
     converter.add_signature(
         signature_name,

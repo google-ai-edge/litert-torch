@@ -87,6 +87,7 @@ def export(
     trust_remote_code: bool = False,
     prefill_lengths: list[int] | None = None,
     cache_length: int | None = None,
+    decode_cache_length: int | None = None,
     quantization_recipe: str | None = None,
     enable_dynamic_shape: bool | None = None,
     enable_gpu_dynamic_prefill: bool | None = None,
@@ -121,6 +122,7 @@ def export(
     experimental_lightweight_conversion: bool = False,
     experimental_transpile_chat_template_for_minijinja: bool = False,
     sliding_window_ring_buffer_size: int | None = None,
+    decode_sliding_window_ring_buffer_size: int | None = None,
     use_litert_lm_compiler: bool = False,
     compile_configs: str | None = None,
     calibration_dataset_dir: str | None = None,
@@ -149,6 +151,13 @@ def export(
     trust_remote_code: Whether to trust remote code.
     prefill_lengths: The lengths of the prefill input, separated by comma.
     cache_length: The length of the cache.
+    decode_cache_length: Optional distinct KV-cache length for the decode
+      signature's full_attention (global) layers. When unset, decode reuses
+      cache_length. When set, prefill uses cache_length and decode uses this
+      value so both reach the same total context (e.g. context=16384: prefill
+      16256 + chunk 128, decode 16383 + 1). Sliding layers are unaffected (they
+      use sliding_window_ring_buffer_size for both). Export-only unless the
+      runtime is changed to allow per-signature KV-cache sizes.
     quantization_recipe: The quantization recipes to use, separated by comma.
     enable_dynamic_shape: Whether to enable dynamic shape.
     enable_gpu_dynamic_prefill: Whether to enable GPU dynamic shapes (magic
@@ -184,7 +193,16 @@ def export(
     experimental_lightweight_conversion: Whether to use lightweight conversion,
       which might speed up large model conversion, but might not work for all
       models.
-    sliding_window_ring_buffer_size: The size of the sliding window ring buffer.
+    sliding_window_ring_buffer_size: The size of the sliding window ring buffer
+      (the local past cache) used for both signatures by default.
+    decode_sliding_window_ring_buffer_size: Optional distinct ring-buffer (local
+      past) size for the decode signature's sliding_attention layers. When unset,
+      decode reuses sliding_window_ring_buffer_size. When set, prefill uses
+      sliding_window_ring_buffer_size and decode uses this value so both reach the
+      same sliding window (e.g. window=1024: prefill 896 + chunk 128, decode
+      1023 + 1). The window bound (= model sliding_window) is unchanged for both.
+      Ring-buffer equivalent of decode_cache_length; export-only unless the
+      runtime is changed to allow per-signature local cache sizes.
     sampler_top_p: The top_p sampling parameter.
     sampler_temperature: The temperature sampling parameter.
     sampler_top_k: The top_k sampling parameter.
