@@ -14,5 +14,9 @@
 # ==============================================================================
 from litert_torch.testing import export
 from litert_torch.testing import model_coverage
+from litert_torch.testing import test_utils
 
 export_with_tensor_inputs_only = export.export_with_tensor_inputs_only
+V1_V2_PARAMETERS = test_utils.V1_V2_PARAMETERS
+V1V2TestCase = test_utils.V1V2TestCase
+parameterized_class = test_utils.parameterized_class
