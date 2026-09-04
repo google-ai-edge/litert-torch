@@ -55,8 +55,10 @@ class DecoderOnlyModel(nn.Module):
   This model is used for re-authoring. model_config is used to specify the
   details of model architecture and parameters.
 
-  It assumes that the attention configs for ROPE, i.e. head_dim, rotary_base,
-  and rotary_percentage are the same for all layers.
+  RoPE parameters (head_dim, rotary_base, rotary_percentage) are assumed to be
+  the same across all RoPE-enabled layers; per-layer application of RoPE is
+  controlled by AttentionConfig.enable_rope (set to False for NoPE layers, e.g.
+  every 4th layer in SmolLM3).
   """
 
   def __init__(self, config: cfg.ModelConfig, mask_cache_size: int = 0):
