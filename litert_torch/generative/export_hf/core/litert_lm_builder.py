@@ -355,6 +355,10 @@ def build_llm_metadata(
       llm_metadata.llm_model_type.CopyFrom(
           llm_model_type_pb2.LlmModelType(gemma3=llm_model_type_pb2.Gemma3())
       )
+    case 'gemma4':
+      llm_metadata.llm_model_type.CopyFrom(
+          llm_model_type_pb2.LlmModelType(gemma4=llm_model_type_pb2.Gemma4())
+      )
     case 'function_gemma':
       llm_metadata.llm_model_type.CopyFrom(
           llm_model_type_pb2.LlmModelType(
