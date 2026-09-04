@@ -15,6 +15,7 @@
 """The pre-lower pass to make exported program's constant inputs into MLIR ElementsAttrs."""
 
 import dataclasses
+import hashlib
 import logging
 import math
 from litert_torch import _config
@@ -30,22 +31,35 @@ config = _config.config
 
 @dataclasses.dataclass(frozen=True)
 class _ConstantFingerprint:
-  """Unique fingerprint of a torch.Tensor constant for caching."""
+  """Unique content-based fingerprint of a torch.Tensor constant for caching.
+
+  The fingerprint must NOT be keyed on a storage address such as
+  ``tensor.untyped_storage().data_ptr()``: the storage backing one constant
+  can be freed and the same address later reused by a different, unrelated
+  constant, producing a false cache hit that silently aliases two distinct
+  constants. See https://github.com/google-ai-edge/litert-torch/issues/1061.
+  """
 
   device: str
   shape: tuple[int, ...]
-  stride: tuple[int, ...]
-  data_ptr: int
-  storage_offset: int
+  dtype: str
+  digest: str
 
   @classmethod
   def from_tensor(cls, tensor: torch.Tensor) -> '_ConstantFingerprint':
+    flat = tensor.detach().cpu().contiguous().reshape(-1)
+    if flat.numel():
+      # Reinterpret as raw bytes so the hash is dtype-agnostic (works for
+      # dtypes numpy cannot represent directly, e.g. bfloat16).
+      flat = flat.view(torch.uint8)
+    digest = hashlib.blake2b(
+        memoryview(flat.numpy()).cast('B'), digest_size=16
+    ).hexdigest()
     return cls(
         device=str(tensor.device),
-        shape=tensor.shape,
-        stride=tensor.stride(),
-        data_ptr=tensor.untyped_storage().data_ptr(),
-        storage_offset=tensor.storage_offset(),
+        shape=tuple(tensor.shape),
+        dtype=str(tensor.dtype),
+        digest=digest,
     )
 
 
