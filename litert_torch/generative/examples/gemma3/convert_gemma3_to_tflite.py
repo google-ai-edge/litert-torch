@@ -38,7 +38,9 @@ def main(_):
   else:
     raise ValueError(f'Unsupported model size: {_MODEL_SIZE.value}')
 
-  converter.build_and_convert_to_tflite_from_flags(model_builder)
+  output_name_prefix = f'gemma3-{_MODEL_SIZE.value}'  
+
+  converter.build_and_convert_to_tflite_from_flags(model_builder, output_name_prefix=output_name_prefix)
 
 
 if __name__ == '__main__':
