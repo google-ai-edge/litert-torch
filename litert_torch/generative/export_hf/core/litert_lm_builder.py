@@ -48,7 +48,19 @@ _STOP_TOKEN_PREFIXES = [
 
 
 def parse_chat_template(tokenizer):
-  """Parses chat template."""
+  """Parses the chat template into (system, user, model) (prefix, suffix) pairs.
+
+  Each pair is what the template renders around that role's content. The
+  model prefix is the generation prompt (`add_generation_prompt=True`): the
+  runtime sends `prompt_templates.model.prefix` after every user turn to
+  start the model's reply, so it must be the string the template renders at
+  generation time, not the opening of an assistant turn in history. See
+  `_generation_prompt`.
+
+  Returns:
+    None if the tokenizer has no chat template; a tuple of three
+    `[prefix, suffix]` lists, each `[None, None]` when parsing failed.
+  """
   if tokenizer.chat_template is None:
     return None
   try:
@@ -107,6 +119,9 @@ def parse_chat_template(tokenizer):
           f'Model prompt {_PH} not found in chat template:'
           f' {model_prompt_substr}'
       )
+    model_prompt_parts[0] = _generation_prompt(
+        tokenizer, messages[:-1], user_prompt, model_prompt_parts[0]
+    )
     return sys_prompt_parts, user_prompt_parts, model_prompt_parts
   except ValueError as e:
     print(f'Failed to parse chat template: {e}')
@@ -114,6 +129,62 @@ def parse_chat_template(tokenizer):
   except Exception as e:  # pylint: disable=broad-except
     print(f'Failed to parse chat template: {e}')
     return (None, None), (None, None), (None, None)
+
+
+def _generation_prompt(tokenizer, messages, user_prompt, history_prefix):
+  """Returns the assistant prefix the chat template renders at generation time.
+
+  The runtime appends `prompt_templates.model.prefix` after every user turn
+  as the generation prompt, i.e. the string `apply_chat_template(...,
+  add_generation_prompt=True)` adds after the last user turn. For most
+  templates that is the same string that opens an assistant turn in history,
+  but thinking templates diverge there: Qwen3-*-Thinking-2507 opens a
+  generation with `<think>\n` and renders a past assistant turn with the
+  reasoning already closed (`<think>\n\n</think>\n\n`). A prefix read from
+  the history turn then tells the model its thinking is over before it
+  started, and the reasoning spills into the answer text.
+
+  Args:
+    tokenizer: Tokenizer whose chat template is being parsed.
+    messages: The conversation up to and including the last user turn.
+    user_prompt: `messages` rendered with `add_generation_prompt=False`.
+    history_prefix: The prefix of an assistant turn rendered in history; used
+      when the template cannot render a generation prompt.
+
+  Returns:
+    The generation prompt, or `history_prefix` when the template does not
+    render one (renders nothing after the user turn, does not extend the
+    user rendering, or raises).
+  """
+  try:
+    rendered = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        enable_thinking=False,
+        add_generation_prompt=True,
+    )
+  except Exception as e:  # pylint: disable=broad-except
+    print(
+        f'WARNING: Cannot render the generation prompt ({e}); using the'
+        f' assistant history prefix {history_prefix!r} as model prefix.'
+    )
+    return history_prefix
+  if not rendered.startswith(user_prompt) or rendered == user_prompt:
+    print(
+        'WARNING: Chat template renders no generation prompt after the user'
+        f' turn; using the assistant history prefix {history_prefix!r} as'
+        ' model prefix.'
+    )
+    return history_prefix
+  generation_prefix = rendered[len(user_prompt) :]
+  if generation_prefix != history_prefix:
+    print(
+        f'Chat template opens a generation with {generation_prefix!r} but an'
+        f' assistant turn in history with {history_prefix!r}; using the'
+        ' generation prompt as model prefix. The runtime renders past'
+        ' assistant turns from the same prefix.'
+    )
+  return generation_prefix
 
 
 def _tokenizer_prepends_bos(tokenizer, chat_template=None) -> bool:

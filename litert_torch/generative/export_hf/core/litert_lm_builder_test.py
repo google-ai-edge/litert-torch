@@ -85,6 +85,60 @@ class _UnprobeableTokenizer:
     self.chat_template = None
 
 
+class _FakeChatMlTokenizer:
+  """ChatML tokenizer stub whose assistant opener depends on the render mode.
+
+  Thinking templates render an assistant turn differently in history and at
+  generation time: Qwen3-*-Thinking-2507 opens a generation with `<think>\n`
+  but renders a past turn with the reasoning closed (`<think>\n\n</think>\n\n`).
+  `history_opener` / `generation_opener` reproduce that shape.
+  """
+
+  bos_token = None
+  eos_token = "<|im_end|>"
+
+  def __init__(
+      self,
+      history_opener="",
+      generation_opener=None,
+      renders_generation_prompt=True,
+  ):
+    self.chat_template = "<jinja>"  # Present; the stub renders in Python.
+    self._history_opener = history_opener
+    self._generation_opener = (
+        history_opener if generation_opener is None else generation_opener
+    )
+    self._renders_generation_prompt = renders_generation_prompt
+
+  def apply_chat_template(
+      self,
+      messages,
+      tokenize=False,
+      add_generation_prompt=False,
+      **kwargs,
+  ):
+    del tokenize, kwargs
+    rendered = ""
+    for message in messages:
+      opener = self._history_opener if message["role"] == "assistant" else ""
+      rendered += (
+          f"<|im_start|>{message['role']}\n{opener}{message['content']}"
+          "<|im_end|>\n"
+      )
+    if add_generation_prompt and self._renders_generation_prompt:
+      rendered += f"<|im_start|>assistant\n{self._generation_opener}"
+    return rendered
+
+
+class _RaisingOnGenerationPromptTokenizer(_FakeChatMlTokenizer):
+  """Template that fails to render with add_generation_prompt=True."""
+
+  def apply_chat_template(self, messages, add_generation_prompt=False, **kw):
+    if add_generation_prompt:
+      raise ValueError("add_generation_prompt is not supported")
+    return super().apply_chat_template(messages, **kw)
+
+
 class _FakeModel:
   generation_config = None
 
@@ -281,6 +335,82 @@ class BuildLlmMetadataStartTokenTest(parameterized.TestCase):
         source_artifacts, export_config, "", exported_artifacts
     )
     self.assertTrue(metadata.llm_model_type.HasField("qwen3"))
+
+
+class ParseChatTemplateTest(parameterized.TestCase):
+
+  def test_model_prefix_is_the_generation_prompt(self):
+    # Regression test for https://github.com/google-ai-edge/litert-torch/issues/1209:
+    # the runtime sends model.prefix as the generation prompt, so it must be
+    # what the template renders with add_generation_prompt=True, not the
+    # opening of an assistant turn in history (Qwen3-*-Thinking-2507 shape).
+    tokenizer = _FakeChatMlTokenizer(
+        history_opener="<think>\n\n</think>\n\n", generation_opener="<think>\n"
+    )
+    system, user, model = litert_lm_builder.parse_chat_template(tokenizer)
+    self.assertEqual(system, ["<|im_start|>system\n", "<|im_end|>\n"])
+    self.assertEqual(user, ["<|im_start|>user\n", "<|im_end|>\n"])
+    self.assertEqual(
+        model, ["<|im_start|>assistant\n<think>\n", "<|im_end|>\n"]
+    )
+
+  def test_model_prefix_unchanged_when_history_and_generation_agree(self):
+    # Plain ChatML (and hybrid Qwen3 with enable_thinking=False): the history
+    # opener is the generation prompt, so the parse is unchanged.
+    tokenizer = _FakeChatMlTokenizer()
+    _, _, model = litert_lm_builder.parse_chat_template(tokenizer)
+    self.assertEqual(model, ["<|im_start|>assistant\n", "<|im_end|>\n"])
+
+  def test_model_prefix_falls_back_to_history_when_no_generation_prompt(self):
+    # A template that ignores add_generation_prompt renders nothing after the
+    # user turn; the history opener is the only prefix available.
+    tokenizer = _FakeChatMlTokenizer(
+        history_opener="<think></think>", renders_generation_prompt=False
+    )
+    _, _, model = litert_lm_builder.parse_chat_template(tokenizer)
+    self.assertEqual(
+        model, ["<|im_start|>assistant\n<think></think>", "<|im_end|>\n"]
+    )
+
+  def test_model_prefix_falls_back_to_history_when_render_raises(self):
+    # Rendering the generation prompt must not turn a parseable template into
+    # the all-None result that drops prompt_templates from the metadata.
+    tokenizer = _RaisingOnGenerationPromptTokenizer(
+        history_opener="<think></think>"
+    )
+    system, user, model = litert_lm_builder.parse_chat_template(tokenizer)
+    self.assertEqual(system, ["<|im_start|>system\n", "<|im_end|>\n"])
+    self.assertEqual(user, ["<|im_start|>user\n", "<|im_end|>\n"])
+    self.assertEqual(
+        model, ["<|im_start|>assistant\n<think></think>", "<|im_end|>\n"]
+    )
+
+  def test_no_chat_template(self):
+    tokenizer = _FakeChatMlTokenizer()
+    tokenizer.chat_template = None
+    self.assertIsNone(litert_lm_builder.parse_chat_template(tokenizer))
+
+
+class BuildLlmMetadataPromptTemplatesTest(parameterized.TestCase):
+
+  def test_model_prefix_written_from_the_generation_prompt(self):
+    tokenizer = _FakeChatMlTokenizer(
+        history_opener="<think>\n\n</think>\n\n", generation_opener="<think>\n"
+    )
+    llm_metadata = _build_llm_metadata(
+        tokenizer,
+        chat_templates=litert_lm_builder.parse_chat_template(tokenizer),
+    )
+    self.assertEqual(
+        llm_metadata.prompt_templates.model.prefix,
+        "<|im_start|>assistant\n<think>\n",
+    )
+    self.assertEqual(llm_metadata.prompt_templates.model.suffix, "<|im_end|>\n")
+    self.assertEqual(
+        llm_metadata.prompt_templates.user.prefix, "<|im_start|>user\n"
+    )
+    stop_tokens = [t.token_str for t in llm_metadata.stop_tokens]
+    self.assertIn("<|im_end|>\n", stop_tokens)
 
 
 if __name__ == "__main__":
