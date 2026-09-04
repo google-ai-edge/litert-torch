@@ -1,5 +1,5 @@
 absl-py
-torch==2.12.0
+torch==2.13.0
 torchvision==0.27.0
 torchaudio==2.11.0
 torchao>=0.17.0
