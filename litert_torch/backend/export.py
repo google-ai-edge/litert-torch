@@ -252,7 +252,10 @@ def _convert_i64_to_i32(exported_program: torch.export.ExportedProgram):
   is_modified = False
 
   def in_i32(x: int):
-    return -2147483648 <= x <= 2147483647
+    try:
+      return -2147483648 <= x <= 2147483647
+    except TypeError:
+      return False
 
   def to_int32(x: torch.Tensor):
     return torch.ops.aten._to_copy.default(x, dtype=torch.int32)

@@ -189,6 +189,14 @@ class Converter:
       ValueError: If the arguments are not provided as expected. See the example
       in this functions's comment.
     """
+    if dynamic_shapes is not None:
+      raise NotImplementedError(
+          "Dynamic shapes are not yet supported by the LiteRT-Torch"
+          " converter. Please export with static sample inputs and ensure"
+          " the model is traced with representative dimensions. See"
+          " https://github.com/google-ai-edge/litert-torch/issues/870"
+      )
+
     if module is not None:
       if (
           sample_args is not None or sample_kwargs is not None
