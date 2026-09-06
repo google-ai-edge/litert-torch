@@ -24,8 +24,9 @@ handled so `conv_state`, `recurrent_state`, and `kv_cache` reflect only valid
 tokens.
 """
 
-from typing import Any, Dict, List, Optional, Tuple, Union
 import copy
+from typing import Any, Dict, List, Optional, Tuple, Union
+from litert_torch.generative.export_hf.model_ext.qwen3_5 import gated_delta_rule
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -255,6 +256,7 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
     A = torch.empty(num_v_heads).uniform_(0, 16)
     self.A_log = nn.Parameter(torch.log(A))
     self.norm = Qwen3_5RMSNormGated(head_v_dim, eps=rms_norm_eps)
+    self.rms_norm_eps = float(rms_norm_eps)
     self.out_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
     self.in_proj_qkv = nn.Linear(hidden_size, self.conv_dim, bias=False)
@@ -289,6 +291,42 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
           batch_size, self.num_v_heads, self.head_k_dim, self.head_v_dim,
           dtype=hidden_states.dtype, device=hidden_states.device
       )
+    if getattr(self, "use_fused_gdn", True):
+      mask_arg = (
+          valid_mask
+          if valid_mask is not None
+          else torch.ones(
+              (batch_size, seq_len),
+              dtype=torch.int32,
+              device=hidden_states.device,
+          )
+      )
+      out, new_conv_state, new_recurrent_state = (
+          gated_delta_rule.gated_delta_net(
+              self.in_proj_qkv(hidden_states),
+              self.in_proj_z(hidden_states),
+              self.in_proj_b(hidden_states),
+              self.in_proj_a(hidden_states),
+              conv_state,
+              recurrent_state,
+              self.conv1d.weight,
+              self.A_log,
+              self.dt_bias,
+              self.norm.weight,
+              mask_arg,
+              head_k_dim=self.head_k_dim,
+              head_v_dim=self.head_v_dim,
+              num_k_heads=self.num_k_heads,
+              num_v_heads=self.num_v_heads,
+              rms_norm_eps=self.rms_norm_eps,
+              mode=getattr(self, "gdn_mode", 0),
+          )
+      )
+      if past_key_values is not None:
+        layer_cache = past_key_values.layers[self.layer_idx]
+        layer_cache.conv_states.copy_(new_conv_state)  # pyrefly: ignore[missing-attribute]
+        layer_cache.recurrent_states.copy_(new_recurrent_state)  # pyrefly: ignore[missing-attribute]
+      return self.out_proj(out)
 
     mixed_qkv = self.in_proj_qkv(hidden_states).transpose(
         1, 2
