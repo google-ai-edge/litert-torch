@@ -25,8 +25,9 @@ import abc
 import dataclasses
 import os
 import re
+from typing import Any
 from typing import Callable
-
+import numpy as np
 import numpy.typing as npt
 
 from ai_edge_litert import interpreter as interpreter_lib  # pylint: disable=g-direct-tensorflow-import
@@ -176,6 +177,94 @@ class LiteRTModel(Model):
         return outputs['output_0']
       else:
         return tuple(outputs[f'output_{idx}'] for idx in range(len(outputs)))
+
+    return outputs
+
+  def run_compiled(
+      self,
+      *args: npt.ArrayLike,
+      signature_name: str = DEFAULT_SIGNATURE_NAME,
+      hardware_accel: Any = None,
+      require_fully_accelerated: bool = False,
+      **kwargs,
+  ) -> npt.ArrayLike | tuple[npt.ArrayLike, ...] | dict[str, npt.ArrayLike]:
+    """Runs inference on the LiteRT model using the LiteRT CompiledModel runtime.
+
+    Args:
+      *args: Positional arguments passed to the model signature.
+      signature_name: Name of the signature to execute.
+      hardware_accel: Optional HardwareAccelerator bitmask (e.g.
+        HardwareAccelerator.CPU, HardwareAccelerator.GPU). Defaults to CPU when
+        None.
+      require_fully_accelerated: If True, raises RuntimeError if any ops in the
+        model failed to delegate to the requested hardware accelerator.
+      **kwargs: Keyword arguments passed to the model signature.
+
+    Returns:
+      The model output(s) as numpy array(s).
+
+    Raises:
+      RuntimeError: If require_fully_accelerated is True and the model is not
+        fully accelerated on the requested hardware accelerator.
+      ValueError: If an invalid signature name is provided.
+    """
+    try:
+      from ai_edge_litert.litert_wrapper.compiled_model_wrapper import compiled_model as cm_lib  # pylint: disable=g-import-not-at-top
+    except ImportError:
+      from ai_edge_litert import compiled_model as cm_lib  # pylint: disable=g-import-not-at-top
+
+    kwargs_cm = {}
+    if hardware_accel is not None:
+      kwargs_cm['hardware_accel'] = hardware_accel
+
+    cm = cm_lib.CompiledModel.from_buffer(self.model_content(), **kwargs_cm)
+    if require_fully_accelerated and not cm.is_fully_accelerated():
+      raise RuntimeError(
+          'Model is not fully accelerated on the requested hardware'
+          ' accelerator.'
+      )
+
+    sig_list = cm.get_signature_list()
+    if signature_name not in sig_list:
+      raise ValueError(
+          f'Invalid signature name provided: {signature_name}. Available:'
+          f' {list(sig_list.keys())}'
+      )
+
+    inputs = {f'args_{idx}': np.asarray(args[idx]) for idx in range(len(args))}
+    for k, v in kwargs.items():
+      inputs[k] = np.asarray(v)
+
+    input_map = {}
+    for name in sig_list[signature_name]['inputs']:
+      buf = cm.create_input_buffer_by_name(signature_name, name)
+      buf.write(np.ascontiguousarray(inputs[name]))
+      input_map[name] = buf
+
+    output_map = {}
+    for name in sig_list[signature_name]['outputs']:
+      output_map[name] = cm.create_output_buffer_by_name(signature_name, name)
+
+    try:
+      cm.run_by_name(signature_name, input_map, output_map)
+      outputs = {}
+      for name, buf in output_map.items():
+        details = buf.get_tensor_details()
+        shape = details['shape']
+        dtype = details['dtype']
+        num_elements = int(np.prod(shape))
+        outputs[name] = buf.read(num_elements, dtype).reshape(shape)
+    finally:
+      for buf in input_map.values():
+        buf.destroy()
+      for buf in output_map.values():
+        buf.destroy()
+
+    output_heuristic = lambda key: bool(re.search(r'output_\d+', key))
+    if all(output_heuristic(key) for key in outputs.keys()):
+      if len(outputs) == 1:
+        return outputs['output_0']
+      return tuple(outputs[f'output_{idx}'] for idx in range(len(outputs)))
 
     return outputs
 
