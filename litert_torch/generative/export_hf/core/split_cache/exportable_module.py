@@ -123,16 +123,59 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
     model_config = self.model.model.config
     if hasattr(model_config, 'text_config'):
       model_config = model_config.text_config
-    embed_size_per_head = (
-        getattr(model_config, 'head_dim', None)
-        or model_config.hidden_size // model_config.num_attention_heads  # pyrefly: ignore[unsupported-operation]
-    )
-    if hasattr(model_config, 'global_head_dim'):
-      global_embed_size_per_head = (
-          model_config.global_head_dim or embed_size_per_head
+    embed_size_per_head = getattr(model_config, 'head_dim', None)
+    if embed_size_per_head is None and hasattr(model_config, 'per_layer_config'):
+      try:
+        if 'sliding_attention' in getattr(model_config, 'layer_types', []):
+          sliding_attn_config = model_config.per_layer_config[
+              'sliding_attention'
+          ]
+          embed_size_per_head = getattr(
+              sliding_attn_config, 'head_dim', None
+          )
+      except (KeyError, ValueError, TypeError, AttributeError):
+        pass
+    if embed_size_per_head is None:
+      try:
+        embed_size_per_head = getattr(model_config, 'head_dim', None)
+      except (AttributeError, RuntimeError):
+        if hasattr(model_config, 'allow_global_per_layer_attribute_access'):
+          setattr(model_config, 'allow_global_per_layer_attribute_access', True)
+        try:
+          embed_size_per_head = getattr(model_config, 'head_dim', None)
+        except (AttributeError, RuntimeError):
+          embed_size_per_head = None
+    if embed_size_per_head is None:
+      embed_size_per_head = (
+          model_config.hidden_size // model_config.num_attention_heads  # pyrefly: ignore[unsupported-operation]
       )
-    else:
-      global_embed_size_per_head = embed_size_per_head
+
+    global_head_dim = getattr(model_config, 'global_head_dim', None)
+    if global_head_dim is None and hasattr(model_config, 'per_layer_config'):
+      per_layer_config = model_config.per_layer_config
+      try:
+        if 'full_attention' in getattr(model_config, 'layer_types', []):
+          full_attn_config = per_layer_config['full_attention']
+          global_head_dim = getattr(full_attn_config, 'head_dim', None)
+      except (KeyError, ValueError, TypeError, AttributeError):
+        pass
+      if global_head_dim is None:
+        layer_types = getattr(model_config, 'layer_types', None)
+        if isinstance(layer_types, (list, tuple)):
+          for idx, layer_type in enumerate(layer_types):
+            if layer_type == 'full_attention':
+              try:
+                layer_cfg = per_layer_config[idx]  # pyrefly: ignore[bad-index]
+                if isinstance(layer_cfg, dict):
+                  global_head_dim = layer_cfg.get('head_dim')
+                else:
+                  global_head_dim = getattr(layer_cfg, 'head_dim', None)
+                if global_head_dim is not None:
+                  break
+              except (IndexError, TypeError, KeyError):
+                pass
+
+    global_embed_size_per_head = global_head_dim or embed_size_per_head
 
     sample_inputs = {
         'embeddings': torch.ones(  # pyrefly: ignore[no-matching-overload]

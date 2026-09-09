@@ -224,24 +224,55 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
       cache_length = (
           export_config.sliding_window_ring_buffer_size or cache_length
       )
-    if hasattr(model_config, "num_global_key_value_heads") and hasattr(
-        model_config, "layer_types"
+    per_layer_cfg = None
+    per_layer_config = getattr(model_config, "per_layer_config", None)
+    if (
+        per_layer_config is not None
+        and layer_index is not None
+        and layer_index < len(per_layer_config)
     ):
-      layer_type = model_config.layer_types[layer_index]
-      if layer_type == "full_attention":
-        num_kv_heads = model_config.num_global_key_value_heads or num_kv_heads
-    embed_size_per_head = (
-        getattr(model_config, "head_dim", None)
-        or model_config.hidden_size // model_config.num_attention_heads
-    )
-    if hasattr(model_config, "global_head_dim") and hasattr(
-        model_config, "layer_types"
-    ):
-      layer_type = model_config.layer_types[layer_index]
-      if layer_type == "full_attention":
-        embed_size_per_head = (
-            model_config.global_head_dim or embed_size_per_head
+      per_layer_cfg = per_layer_config[layer_index]
+
+    if per_layer_cfg is not None:
+      if isinstance(per_layer_cfg, dict):
+        num_kv_heads = per_layer_cfg.get("num_key_value_heads", num_kv_heads)
+        embed_size_per_head = per_layer_cfg.get("head_dim", None)
+      else:
+        num_kv_heads = getattr(
+            per_layer_cfg, "num_key_value_heads", num_kv_heads
         )
+        embed_size_per_head = getattr(per_layer_cfg, "head_dim", None)
+    else:
+      if hasattr(model_config, "num_global_key_value_heads") and hasattr(
+          model_config, "layer_types"
+      ):
+        layer_type = model_config.layer_types[layer_index]
+        if layer_type == "full_attention":
+          num_kv_heads = model_config.num_global_key_value_heads or num_kv_heads
+      embed_size_per_head = getattr(model_config, "head_dim", None)
+      if hasattr(model_config, "global_head_dim") and hasattr(
+          model_config, "layer_types"
+      ):
+        layer_type = model_config.layer_types[layer_index]
+        if layer_type == "full_attention":
+          embed_size_per_head = (
+              model_config.global_head_dim or embed_size_per_head
+          )
+
+    if embed_size_per_head is None:
+      try:
+        embed_size_per_head = getattr(model_config, "head_dim", None)
+      except (AttributeError, RuntimeError):
+        if hasattr(model_config, "allow_global_per_layer_attribute_access"):
+          setattr(model_config, "allow_global_per_layer_attribute_access", True)
+        try:
+          embed_size_per_head = getattr(model_config, "head_dim", None)
+        except (AttributeError, RuntimeError):
+          embed_size_per_head = None
+    if embed_size_per_head is None:
+      embed_size_per_head = (
+          model_config.hidden_size // model_config.num_attention_heads
+      )
 
     if k_ts_idx == 2:
       k_cache_shape = (
