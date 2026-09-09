@@ -22,6 +22,8 @@ from transformers.models.lfm2 import modeling_lfm2
 class Lfm2ShortConv(modeling_lfm2.Lfm2ShortConv):
   """Short convolutions for LFM2, suitable for LiteRT inference."""
 
+  L_cache: int
+
   def __init__(
       self,
       config: modeling_lfm2.Lfm2Config,
