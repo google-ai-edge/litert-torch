@@ -440,6 +440,7 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
     kwargs = inst.call_args[1]
     self.assertTrue(kwargs['mediatek_enable_gemma_compiler_optimizations'])
     self.assertEqual(kwargs['mediatek_performance_mode_type'], 'turbo_boost')
+    self.assertNotIn('mediatek_option_bundle', kwargs)
 
   @mock.patch(
       'litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler.ApplyPlugin'
@@ -630,7 +631,481 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
     input_model = kwargs.get('input_model') or args[0]
     self.assertIn('prefill_decode', str(input_model.path))
 
+  @mock.patch(
+      'litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler.ApplyPlugin'
+  )
+  def test_generic_defaults_qualcomm_encoders(self, mock_apply_plugin_class):
+    compiled_instances = []
 
+    def apply_plugin_init_side_effect(*args, **kwargs):
+      instance_mock = mock.MagicMock()
+
+      def compile_call_side_effect(*args, **kwargs):
+        input_model = kwargs.get('input_model') or args[0]
+        output_model = kwargs.get('output_model') or args[1]
+        model_path = input_model.path
+        compiled_path = output_model.path
+        with open(model_path, 'rb') as orig_f:
+          model_bytes = orig_f.read()
+        with open(compiled_path, 'wb') as f:
+          f.write(model_bytes)
+
+      instance_mock.side_effect = compile_call_side_effect
+      compiled_instances.append(instance_mock)
+      return instance_mock
+
+    mock_apply_plugin_class.side_effect = apply_plugin_init_side_effect
+
+    text_enc_bytes = build_dummy_tflite_model([('serving_default', 0)])
+    audio_enc_bytes = build_dummy_tflite_model([('serving_default', 0)])
+    vision_enc_bytes = build_dummy_tflite_model([('serving_default', 0)])
+
+    text_enc_path = os.path.join(self.test_dir, 'text_encoder.tflite')
+    audio_enc_path = os.path.join(self.test_dir, 'audio_encoder.tflite')
+    vision_enc_path = os.path.join(self.test_dir, 'vision_encoder.tflite')
+
+    with open(text_enc_path, 'wb') as f:
+      f.write(text_enc_bytes)
+    with open(audio_enc_path, 'wb') as f:
+      f.write(audio_enc_bytes)
+    with open(vision_enc_path, 'wb') as f:
+      f.write(vision_enc_bytes)
+
+    metadata_path = os.path.join(self.test_dir, 'metadata.pb')
+    with open(metadata_path, 'wb') as f:
+      f.write(llm_metadata_pb2.LlmMetadata().SerializeToString())
+    tokenizer_path = os.path.join(self.test_dir, 'tokenizer.model')
+    with open(tokenizer_path, 'w') as f:
+      f.write('dummy')
+
+    input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
+    builder = litertlm_builder.LitertLmFileBuilder()
+    builder.add_tflite_model(
+        text_enc_path, litertlm_builder.TfLiteModelType.TEXT_ENCODER
+    )
+    builder.add_tflite_model(
+        audio_enc_path,
+        litertlm_builder.TfLiteModelType.AUDIO_ENCODER_HW,
+        backend_constraint='cpu',
+    )
+    builder.add_tflite_model(
+        vision_enc_path,
+        litertlm_builder.TfLiteModelType.VISION_ENCODER,
+        prefer_activation_type='fp16',
+    )
+    builder.add_llm_metadata(metadata_path)
+    builder.add_sentencepiece_tokenizer(tokenizer_path)
+    with open(input_litertlm_path, 'wb') as f:
+      builder.build(f)
+
+    output_litertlm_path = os.path.join(self.test_dir, 'output.litertlm')
+
+    litert_lm_npu_compiler.compile_litertlm(
+        input_litertlm=input_litertlm_path,
+        output_litertlm=output_litertlm_path,
+        backend='qualcomm',
+        soc_model='SM8750',
+    )
+
+    # By default, text_encoder and audio_encoder_hw are compiled, while vision is skipped
+    self.assertLen(compiled_instances, 2)
+    for inst in compiled_instances:
+      inst.assert_called_once()
+      args, kwargs = inst.call_args
+      self.assertEqual(kwargs['qualcomm_optimization_level'], 'O3')
+      self.assertEqual(kwargs['qualcomm_log_level'], 'off')
+      self.assertTrue(kwargs['qualcomm_enable_weight_sharing'])
+
+  @mock.patch(
+      'litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler.ApplyPlugin'
+  )
+  def test_compile_encoders_optional_flags(self, mock_apply_plugin_class):
+    compiled_instances = []
+
+    def apply_plugin_init_side_effect(*args, **kwargs):
+      instance_mock = mock.MagicMock()
+
+      def compile_call_side_effect(*args, **kwargs):
+        input_model = kwargs.get('input_model') or args[0]
+        output_model = kwargs.get('output_model') or args[1]
+        model_path = input_model.path
+        compiled_path = output_model.path
+        with open(model_path, 'rb') as orig_f:
+          model_bytes = orig_f.read()
+        with open(compiled_path, 'wb') as f:
+          f.write(model_bytes)
+
+      instance_mock.side_effect = compile_call_side_effect
+      compiled_instances.append(instance_mock)
+      return instance_mock
+
+    mock_apply_plugin_class.side_effect = apply_plugin_init_side_effect
+
+    text_enc_bytes = build_dummy_tflite_model([('serving_default', 0)])
+    audio_enc_bytes = build_dummy_tflite_model([('serving_default', 0)])
+    vision_enc_bytes = build_dummy_tflite_model([('serving_default', 0)])
+
+    text_enc_path = os.path.join(self.test_dir, 'text_encoder.tflite')
+    audio_enc_path = os.path.join(self.test_dir, 'audio_encoder.tflite')
+    vision_enc_path = os.path.join(self.test_dir, 'vision_encoder.tflite')
+
+    with open(text_enc_path, 'wb') as f:
+      f.write(text_enc_bytes)
+    with open(audio_enc_path, 'wb') as f:
+      f.write(audio_enc_bytes)
+    with open(vision_enc_path, 'wb') as f:
+      f.write(vision_enc_bytes)
+
+    metadata_path = os.path.join(self.test_dir, 'metadata.pb')
+    with open(metadata_path, 'wb') as f:
+      f.write(llm_metadata_pb2.LlmMetadata().SerializeToString())
+    tokenizer_path = os.path.join(self.test_dir, 'tokenizer.model')
+    with open(tokenizer_path, 'w') as f:
+      f.write('dummy')
+
+    input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
+    builder = litertlm_builder.LitertLmFileBuilder()
+    builder.add_tflite_model(
+        text_enc_path, litertlm_builder.TfLiteModelType.TEXT_ENCODER
+    )
+    builder.add_tflite_model(
+        audio_enc_path,
+        litertlm_builder.TfLiteModelType.AUDIO_ENCODER_HW,
+        backend_constraint='cpu',
+    )
+    builder.add_tflite_model(
+        vision_enc_path,
+        litertlm_builder.TfLiteModelType.VISION_ENCODER,
+        prefer_activation_type='fp16',
+    )
+    builder.add_llm_metadata(metadata_path)
+    builder.add_sentencepiece_tokenizer(tokenizer_path)
+    with open(input_litertlm_path, 'wb') as f:
+      builder.build(f)
+
+    output_litertlm_path = os.path.join(self.test_dir, 'output.litertlm')
+
+    litert_lm_npu_compiler.compile_litertlm(
+        input_litertlm=input_litertlm_path,
+        output_litertlm=output_litertlm_path,
+        backend='qualcomm',
+        soc_model='SM8750',
+        enable_audio_encoder_compilation=True,
+        enable_vision_encoder_compilation=True,
+    )
+
+    # All 3 encoders should be compiled
+    self.assertLen(compiled_instances, 3)
+    compiled_model_names = []
+    for inst in compiled_instances:
+      inst.assert_called_once()
+      args, kwargs = inst.call_args
+      input_model = kwargs.get('input_model') or args[0]
+      model_name = os.path.basename(str(input_model.path))
+      compiled_model_names.append(model_name)
+      self.assertEqual(kwargs['qualcomm_optimization_level'], 'O3')
+      self.assertEqual(kwargs['qualcomm_log_level'], 'off')
+      self.assertTrue(kwargs['qualcomm_enable_weight_sharing'])
+      if 'vision_encoder' in model_name:
+        self.assertEqual(kwargs.get('qualcomm_htp_p_point'), 22)
+
+    self.assertTrue(
+        any('text_encoder' in name for name in compiled_model_names)
+    )
+    self.assertTrue(
+        any('audio_encoder' in name for name in compiled_model_names)
+    )
+    self.assertTrue(
+        any('vision_encoder' in name for name in compiled_model_names)
+    )
+
+    # Verify repacked model.toml has backend_constraint removed from audio_encoder_hw
+    import io
+
+    try:
+      import tomllib
+    except ImportError:
+      import tomli as tomllib
+    from litert_lm_builder import litertlm_peek
+
+    dump_dir = os.path.join(self.test_dir, 'output_unpacked')
+    litertlm_peek.peek_litertlm_file(
+        output_litertlm_path, dump_dir, io.StringIO()
+    )
+    with open(os.path.join(dump_dir, 'model.toml'), 'r') as f:
+      repacked_toml = tomllib.loads(f.read())
+
+    for sec in repacked_toml.get('section', []):
+      if sec.get('model_type') == 'audio_encoder_hw':
+        self.assertNotIn('backend_constraint', sec)
+
+  @mock.patch(
+      'litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler.ApplyPlugin'
+  )
+  def test_disable_text_encoder_compilation(self, mock_apply_plugin_class):
+    compiled_instances = []
+
+    def apply_plugin_init_side_effect(*args, **kwargs):
+      instance_mock = mock.MagicMock()
+      compiled_instances.append(instance_mock)
+      return instance_mock
+
+    mock_apply_plugin_class.side_effect = apply_plugin_init_side_effect
+
+    text_enc_bytes = build_dummy_tflite_model([('serving_default', 0)])
+    text_enc_path = os.path.join(self.test_dir, 'text_encoder.tflite')
+    with open(text_enc_path, 'wb') as f:
+      f.write(text_enc_bytes)
+
+    metadata_path = os.path.join(self.test_dir, 'metadata.pb')
+    with open(metadata_path, 'wb') as f:
+      f.write(llm_metadata_pb2.LlmMetadata().SerializeToString())
+    tokenizer_path = os.path.join(self.test_dir, 'tokenizer.model')
+    with open(tokenizer_path, 'w') as f:
+      f.write('dummy')
+
+    input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
+    builder = litertlm_builder.LitertLmFileBuilder()
+    builder.add_tflite_model(
+        text_enc_path, litertlm_builder.TfLiteModelType.TEXT_ENCODER
+    )
+    builder.add_llm_metadata(metadata_path)
+    builder.add_sentencepiece_tokenizer(tokenizer_path)
+    with open(input_litertlm_path, 'wb') as f:
+      builder.build(f)
+
+    output_litertlm_path = os.path.join(self.test_dir, 'output.litertlm')
+
+    litert_lm_npu_compiler.compile_litertlm(
+        input_litertlm=input_litertlm_path,
+        output_litertlm=output_litertlm_path,
+        backend='qualcomm',
+        soc_model='SM8750',
+        disable_text_encoder_compilation=True,
+    )
+
+    # text_encoder compilation was disabled
+    self.assertEmpty(compiled_instances)
+
+  @mock.patch(
+      'litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler.ApplyPlugin'
+  )
+  def test_generic_defaults_mediatek_encoders(self, mock_apply_plugin_class):
+    compiled_instances = []
+
+    def apply_plugin_init_side_effect(*args, **kwargs):
+      instance_mock = mock.MagicMock()
+
+      def compile_call_side_effect(**kwargs):
+        input_model = kwargs.get('input_model')
+        output_model = kwargs.get('output_model')
+        model_path = input_model.path
+        compiled_path = output_model.path
+        with open(model_path, 'rb') as orig_f:
+          model_bytes = orig_f.read()
+        with open(compiled_path, 'wb') as f:
+          f.write(model_bytes)
+
+      instance_mock.side_effect = compile_call_side_effect
+      compiled_instances.append(instance_mock)
+      return instance_mock
+
+    mock_apply_plugin_class.side_effect = apply_plugin_init_side_effect
+
+    text_enc_bytes = build_dummy_tflite_model([('serving_default', 0)])
+    text_enc_path = os.path.join(self.test_dir, 'text_encoder.tflite')
+    with open(text_enc_path, 'wb') as f:
+      f.write(text_enc_bytes)
+
+    metadata_path = os.path.join(self.test_dir, 'metadata.pb')
+    with open(metadata_path, 'wb') as f:
+      f.write(llm_metadata_pb2.LlmMetadata().SerializeToString())
+    tokenizer_path = os.path.join(self.test_dir, 'tokenizer.model')
+    with open(tokenizer_path, 'w') as f:
+      f.write('dummy')
+
+    input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
+    builder = litertlm_builder.LitertLmFileBuilder()
+    builder.add_tflite_model(
+        text_enc_path, litertlm_builder.TfLiteModelType.TEXT_ENCODER
+    )
+    builder.add_llm_metadata(metadata_path)
+    builder.add_sentencepiece_tokenizer(tokenizer_path)
+    with open(input_litertlm_path, 'wb') as f:
+      builder.build(f)
+
+    output_litertlm_path = os.path.join(self.test_dir, 'output.litertlm')
+
+    litert_lm_npu_compiler.compile_litertlm(
+        input_litertlm=input_litertlm_path,
+        output_litertlm=output_litertlm_path,
+        backend='mediatek',
+        soc_model='MT6991',
+    )
+
+    self.assertLen(compiled_instances, 1)
+    inst = compiled_instances[0]
+    inst.assert_called_once()
+    _, kwargs = inst.call_args
+    self.assertEqual(kwargs['mediatek_performance_mode_type'], 'turbo_boost')
+    self.assertEqual(kwargs['mediatek_optimization_hint'], 'low_latency')
+    self.assertEqual(kwargs['mediatek_sdk_version_type'], 'version8')
+    self.assertEqual(kwargs['mediatek_option_bundle'], 'gemma-decode')
+    self.assertEqual(kwargs['soc_manufacturer'], 'MediaTek')
+    self.assertEqual(kwargs['soc_model'], 'mt6991')
+
+  @mock.patch(
+      'litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler.ApplyPlugin'
+  )
+  def test_mediatek_mt6993_sdk_version9_and_vision_encoder(
+      self, mock_apply_plugin_class
+  ):
+    compiled_instances = []
+
+    def apply_plugin_init_side_effect(*args, **kwargs):
+      instance_mock = mock.MagicMock()
+
+      def compile_call_side_effect(**kwargs):
+        input_model = kwargs.get('input_model')
+        output_model = kwargs.get('output_model')
+        model_path = input_model.path
+        compiled_path = output_model.path
+        with open(model_path, 'rb') as orig_f:
+          model_bytes = orig_f.read()
+        with open(compiled_path, 'wb') as f:
+          f.write(model_bytes)
+
+      instance_mock.side_effect = compile_call_side_effect
+      compiled_instances.append(instance_mock)
+      return instance_mock
+
+    mock_apply_plugin_class.side_effect = apply_plugin_init_side_effect
+
+    text_enc_bytes = build_dummy_tflite_model([('serving_default', 0)])
+    text_enc_path = os.path.join(self.test_dir, 'text_encoder.tflite')
+    with open(text_enc_path, 'wb') as f:
+      f.write(text_enc_bytes)
+
+    vision_enc_bytes = build_dummy_tflite_model([('serving_default', 0)])
+    vision_enc_path = os.path.join(self.test_dir, 'vision_encoder.tflite')
+    with open(vision_enc_path, 'wb') as f:
+      f.write(vision_enc_bytes)
+
+    metadata_path = os.path.join(self.test_dir, 'metadata.pb')
+    with open(metadata_path, 'wb') as f:
+      f.write(llm_metadata_pb2.LlmMetadata().SerializeToString())
+    tokenizer_path = os.path.join(self.test_dir, 'tokenizer.model')
+    with open(tokenizer_path, 'w') as f:
+      f.write('dummy')
+
+    input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
+    builder = litertlm_builder.LitertLmFileBuilder()
+    builder.add_tflite_model(
+        text_enc_path, litertlm_builder.TfLiteModelType.TEXT_ENCODER
+    )
+    builder.add_tflite_model(
+        vision_enc_path, litertlm_builder.TfLiteModelType.VISION_ENCODER
+    )
+    builder.add_llm_metadata(metadata_path)
+    builder.add_sentencepiece_tokenizer(tokenizer_path)
+    with open(input_litertlm_path, 'wb') as f:
+      builder.build(f)
+
+    output_litertlm_path = os.path.join(self.test_dir, 'output.litertlm')
+
+    litert_lm_npu_compiler.compile_litertlm(
+        input_litertlm=input_litertlm_path,
+        output_litertlm=output_litertlm_path,
+        backend='mediatek',
+        soc_model='MT6993',
+    )
+
+    # Both text_encoder and vision_encoder should be compiled
+    self.assertLen(compiled_instances, 2)
+    for inst in compiled_instances:
+      inst.assert_called_once()
+      _, kwargs = inst.call_args
+      self.assertEqual(kwargs['mediatek_performance_mode_type'], 'turbo_boost')
+      self.assertEqual(kwargs['mediatek_optimization_hint'], 'low_latency')
+      self.assertEqual(kwargs['mediatek_sdk_version_type'], 'version9')
+      self.assertEqual(kwargs['mediatek_option_bundle'], 'gemma-decode')
+      self.assertEqual(kwargs['soc_manufacturer'], 'MediaTek')
+      self.assertEqual(kwargs['soc_model'], 'mt6993')
+
+  @mock.patch(
+      'litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler.ApplyPlugin'
+  )
+  def test_mediatek_custom_option_bundle_preserved(
+      self, mock_apply_plugin_class
+  ):
+    compiled_instances = []
+
+    def apply_plugin_init_side_effect(*args, **kwargs):
+      instance_mock = mock.MagicMock()
+
+      def compile_call_side_effect(**kwargs):
+        input_model = kwargs.get('input_model')
+        output_model = kwargs.get('output_model')
+        model_path = input_model.path
+        compiled_path = output_model.path
+        with open(model_path, 'rb') as orig_f:
+          model_bytes = orig_f.read()
+        with open(compiled_path, 'wb') as f:
+          f.write(model_bytes)
+
+      instance_mock.side_effect = compile_call_side_effect
+      compiled_instances.append(instance_mock)
+      return instance_mock
+
+    mock_apply_plugin_class.side_effect = apply_plugin_init_side_effect
+
+    text_enc_bytes = build_dummy_tflite_model([('serving_default', 0)])
+    text_enc_path = os.path.join(self.test_dir, 'text_encoder.tflite')
+    with open(text_enc_path, 'wb') as f:
+      f.write(text_enc_bytes)
+
+    metadata_path = os.path.join(self.test_dir, 'metadata.pb')
+    with open(metadata_path, 'wb') as f:
+      f.write(llm_metadata_pb2.LlmMetadata().SerializeToString())
+    tokenizer_path = os.path.join(self.test_dir, 'tokenizer.model')
+    with open(tokenizer_path, 'w') as f:
+      f.write('dummy')
+
+    input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
+    builder = litertlm_builder.LitertLmFileBuilder()
+    builder.add_tflite_model(
+        text_enc_path, litertlm_builder.TfLiteModelType.TEXT_ENCODER
+    )
+    builder.add_llm_metadata(metadata_path)
+    builder.add_sentencepiece_tokenizer(tokenizer_path)
+    with open(input_litertlm_path, 'wb') as f:
+      builder.build(f)
+
+    output_litertlm_path = os.path.join(self.test_dir, 'output.litertlm')
+
+    custom_configs = {
+        'text_encoder': {
+            'compile': True,
+            'flags': [
+                '--mediatek_enable_gemma_compiler_optimizations=true',
+                '--mediatek_option_bundle=custom-bundle',
+            ],
+        }
+    }
+
+    litert_lm_npu_compiler.compile_litertlm(
+        input_litertlm=input_litertlm_path,
+        output_litertlm=output_litertlm_path,
+        backend='mediatek',
+        soc_model='MT6991',
+        compile_configs=custom_configs,
+    )
+
+    self.assertLen(compiled_instances, 1)
+    inst = compiled_instances[0]
+    inst.assert_called_once()
+    _, kwargs = inst.call_args
+    self.assertEqual(kwargs['mediatek_option_bundle'], 'custom-bundle')
 
 
 if __name__ == '__main__':
