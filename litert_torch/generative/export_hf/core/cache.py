@@ -420,7 +420,17 @@ class LiteRTLMCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
         and layer_index is not None
         and layer_index < len(per_layer_config)
     ):
-      head_dim = getattr(per_layer_config[layer_index], "head_dim", None)
+      layer_cfg = per_layer_config[layer_index]
+      if isinstance(layer_cfg, dict):
+        head_dim = layer_cfg.get("head_dim")
+        per_layer_num_kv_heads = layer_cfg.get("num_key_value_heads")
+      else:
+        head_dim = getattr(layer_cfg, "head_dim", None)
+        per_layer_num_kv_heads = getattr(
+            layer_cfg, "num_key_value_heads", None
+        )
+      if per_layer_num_kv_heads is not None:
+        num_kv_heads = per_layer_num_kv_heads
 
     if head_dim is None:
       # Try accessing globally, catching custom AmbiguousGlobalPerLayerAttributeError
