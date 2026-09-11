@@ -232,3 +232,51 @@ fx_infra.decomp.add_pre_convert_decomp(
     torch.ops.aten.conv1d,
     _conv1d_decomp,
 )
+
+
+# Override the _prelu_kernel decomposition, where(x > 0, x, w * x), which
+# legalizes to GREATER + SELECT, both rejected by the TFLite GPU delegate.
+# The relu form below is numerically identical (including NaN propagation)
+# and legalizes to RELU/MUL/SUB, which are GPU-clean.
+def _prelu_kernel_relu_form(self, weight):
+  return torch.relu(self) - weight * torch.relu(torch.neg(self))
+
+
+fx_infra.decomp.add_pre_convert_decomp(
+    torch.ops.aten._prelu_kernel.default, _prelu_kernel_relu_form
+)
+
+
+# Override the pixel_shuffle/pixel_unshuffle decompositions, which go through
+# a rank-6 reshape + permute while GPU delegates cap tensors at rank 4. The
+# forms below interleave one spatial axis at a time (folding batch and
+# channel into one dimension) so every intermediate tensor stays rank 4.
+def _pixel_shuffle_rank4(self, upscale_factor):
+  *batch, c, h, w = self.shape
+  r = upscale_factor
+  oc = c // (r * r)
+  x = self.reshape(-1, r, r, h * w)
+  x = x.transpose(2, 3)
+  x = x.reshape(-1, r, h, w * r)
+  x = x.transpose(1, 2)
+  return x.reshape(*batch, oc, h * r, w * r)
+
+
+def _pixel_unshuffle_rank4(self, downscale_factor):
+  *batch, c, height, width = self.shape
+  r = downscale_factor
+  h = height // r
+  w = width // r
+  x = self.reshape(-1, h, r, width)
+  x = x.transpose(1, 2)
+  x = x.reshape(-1, r, h * w, r)
+  x = x.transpose(2, 3)
+  return x.reshape(*batch, c * r * r, h, w)
+
+
+fx_infra.decomp.add_pre_convert_decomp(
+    torch.ops.aten.pixel_shuffle.default, _pixel_shuffle_rank4
+)
+fx_infra.decomp.add_pre_convert_decomp(
+    torch.ops.aten.pixel_unshuffle.default, _pixel_unshuffle_rank4
+)
