@@ -110,6 +110,11 @@ class AttentionConfig:
   rotary_base: int = 10_000
   # Percentage of Rotary Positional Embedding added Q and K projections.
   rotary_percentage: Optional[float] = None
+  # Whether to apply rotary positional embedding (RoPE) in this layer. Set to
+  # False for NoPE (no positional embedding) layers (e.g. every 4th layer in
+  # SmolLM3). RoPE parameters are still taken from a RoPE-enabled layer; this
+  # flag only gates whether RoPE is applied to this layer's Q/K.
+  enable_rope: bool = True
   # Whether to use ALiBi positional encoding.
   use_alibi: bool = False
   # Whether to transpose the query groups of qkv bundled tensor before
