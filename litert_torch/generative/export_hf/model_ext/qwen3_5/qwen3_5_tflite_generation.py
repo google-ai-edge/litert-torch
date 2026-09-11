@@ -23,12 +23,14 @@ from typing import Any
 
 from absl import app
 from absl import flags
+from google.protobuf import text_format
+from litert_torch.generative.export_hf import export as litert_torch_export
 import torch
 from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer
 
 import litert_lm
-from litert_torch.generative.export_hf import export as litert_torch_export
+from litert_lm_builder.runtime.proto import llm_metadata_pb2
 
 
 _MODEL_ID = flags.DEFINE_string(
@@ -63,9 +65,13 @@ _USE_JINJA = flags.DEFINE_bool(
 )
 _LLM_METADATA_OVERRIDE_PATH = flags.DEFINE_string(
     "llm_metadata_override_path",
-    None,
+    "third_party/py/litert_torch/generative/export_hf/model_ext/qwen3_5/qwen3_5_metadata_override.pbtext",
     "Path to LlmMetadataProto text proto override.",
-    readonly=True,
+)
+_USE_GPU = flags.DEFINE_bool(
+    "use_gpu",
+    False,
+    "Whether to use GPU backend.",
 )
 
 
@@ -88,7 +94,10 @@ def run_transformers_chat(
     max_new_tokens: int,
 ) -> str:
   formatted_prompt = tokenizer.apply_chat_template(
-      chat_messages, tokenize=False, add_generation_prompt=True
+      chat_messages,
+      tokenize=False,
+      add_generation_prompt=True,
+      enable_thinking=False,
   )
   inputs = tokenizer(formatted_prompt, return_tensors="pt")
   eos_ids = []
@@ -121,19 +130,54 @@ def run_tflite_generation_checks() -> None:
   os.makedirs(output_dir, exist_ok=True)
   print(f"=== Exporting {model_id} to float TFLite in: {output_dir} ===")
 
-  litert_torch_export.export(
-      model=model_id,
-      output_dir=output_dir,
-      quantization_recipe="",  # Float TFLite export
-      keep_temporary_files=True,
-      bundle_litert_lm=True,
-      cache_length=cache_length,
-      prefill_lengths=[prefill_chunk_size],
-      externalize_embedder=True,
-      single_token_embedder=True,
-      use_jinja_template=True,
-      litert_lm_llm_metadata_override=_LLM_METADATA_OVERRIDE_PATH.value,
-  )
+  base_override_path = _LLM_METADATA_OVERRIDE_PATH.value
+  print(f"=== Loading base metadata override from: {base_override_path} ===")
+  metadata = llm_metadata_pb2.LlmMetadata()
+  with open(base_override_path, "r") as f:
+    text_format.Parse(f.read(), metadata)
+
+  template_path = "third_party/py/litert_torch/generative/export_hf/model_ext/qwen3_5/qwen3_5_chat_template.jinja"
+  print(f"=== Loading modified Jinja template from: {template_path} ===")
+  with open(template_path, "r") as f:
+    chat_template_content = f.read()
+  print("=== Injecting modified Jinja chat template ===")
+  metadata.jinja_prompt_template = chat_template_content
+
+  temp_override_fd, temp_override_path = tempfile.mkstemp(suffix=".pbtext")
+  try:
+    print(
+        f"=== Debug Metadata: has_jinja={bool(metadata.jinja_prompt_template)},"
+        f" has_static={metadata.HasField('prompt_templates')} ==="
+    )
+    if metadata.jinja_prompt_template:
+      print(
+          "=== Debug Jinja template (first 100 chars):"
+          f" {metadata.jinja_prompt_template[:100]!r} ==="
+      )
+    with os.fdopen(temp_override_fd, "w") as f:
+      f.write(text_format.MessageToString(metadata))
+    print(f"=== Saved temporary metadata override to: {temp_override_path} ===")
+
+    litert_torch_export.export(
+        model=model_id,
+        output_dir=output_dir,
+        quantization_recipe="",  # Float TFLite export
+        keep_temporary_files=True,
+        bundle_litert_lm=True,
+        cache_length=cache_length,
+        prefill_lengths=[prefill_chunk_size],
+        externalize_embedder=True,
+        single_token_embedder=True,
+        use_jinja_template=True,
+        litert_lm_llm_metadata_override=temp_override_path,
+    )
+  finally:
+    if os.path.exists(temp_override_path):
+      os.remove(temp_override_path)
+      print(
+          "=== Cleaned up temporary metadata override:"
+          f" {temp_override_path} ==="
+      )
 
   exported_model_path = os.path.join(output_dir, "model.litertlm")
   if not os.path.exists(exported_model_path):
@@ -142,11 +186,22 @@ def run_tflite_generation_checks() -> None:
   print(f"\n=== Loading HF Reference Model ({model_id}) ===")
   tokenizer = AutoTokenizer.from_pretrained(model_id)
   assert tokenizer is not None
+  tokenizer.chat_template = chat_template_content
   hf_model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float32)
   hf_model.eval()
 
-  print(f"\n=== Loading LiteRT LM Engine (CPU Backend) from {exported_model_path} ===")
-  backend = litert_lm.Backend.CPU()
+  if _USE_GPU.value:
+    print(
+        "\n=== Loading LiteRT LM Engine (GPU Backend) from"
+        f" {exported_model_path} ==="
+    )
+    backend = litert_lm.Backend.GPU()
+  else:
+    print(
+        "\n=== Loading LiteRT LM Engine (CPU Backend) from"
+        f" {exported_model_path} ==="
+    )
+    backend = litert_lm.Backend.CPU()
   engine = litert_lm.Engine(
       exported_model_path,
       backend,
@@ -162,15 +217,19 @@ def run_tflite_generation_checks() -> None:
   print("---------------------------------------------------------")
   short_prompt = "Explain why the sky is blue in two sentences."
   short_chat = [{"role": "user", "content": short_prompt}]
-  hf_short_out = run_transformers_chat(hf_model, tokenizer, short_chat, max_new_tokens)
+  hf_short_out = run_transformers_chat(
+      hf_model, tokenizer, short_chat, max_new_tokens
+  )
 
   with engine.create_conversation(sampler_config=sampler_config) as conv:
-    lite_short_out = extract_litert_lm_response(conv, short_prompt, max_new_tokens)
+    lite_short_out = extract_litert_lm_response(
+        conv, short_prompt, max_new_tokens
+    )
 
   print(f"Prompt:        {short_prompt!r}")
   print(f"Transformers:  {hf_short_out!r}")
   print(f"LiteRT TFLite: {lite_short_out!r}")
-  match_short = (hf_short_out == lite_short_out)
+  match_short = hf_short_out == lite_short_out
   print(f"Exact Match:   {match_short}")
   if not match_short:
     all_passed = False
@@ -180,21 +239,30 @@ def run_tflite_generation_checks() -> None:
   print("Check 2: Long Prompt Generation (~80 tokens)")
   print("---------------------------------------------------------")
   long_prompt = (
-      "Please summarize the following explanation into a single concise sentence: "
-      "Light scatters off the Earth's atmosphere, which is denser at the bottom where it contains more molecules, "
-      "causing shorter wavelengths of blue light to bend away from the sun and scatter in all directions across the sky, "
-      "whereas longer wavelengths like red and yellow pass straight through without scattering nearly as much."
+      "Please summarize the following explanation into a single concise"
+      " sentence: Light scatters off the Earth's atmosphere, which is denser at"
+      " the bottom where it contains more molecules, causing shorter"
+      " wavelengths of blue light to bend away from the sun and scatter in all"
+      " directions across the sky, whereas longer wavelengths like red and"
+      " yellow pass straight through without scattering nearly as much."
   )
   long_chat = [{"role": "user", "content": long_prompt}]
-  hf_long_out = run_transformers_chat(hf_model, tokenizer, long_chat, max_new_tokens)
+  hf_long_out = run_transformers_chat(
+      hf_model, tokenizer, long_chat, max_new_tokens
+  )
 
   with engine.create_conversation(sampler_config=sampler_config) as conv:
-    lite_long_out = extract_litert_lm_response(conv, long_prompt, max_new_tokens)
+    lite_long_out = extract_litert_lm_response(
+        conv, long_prompt, max_new_tokens
+    )
 
-  print(f"Prompt:        {long_prompt[:60]}... (len={len(tokenizer(long_prompt)['input_ids'])})")
+  print(
+      f"Prompt:        {long_prompt[:60]}..."
+      f" (len={len(tokenizer(long_prompt)['input_ids'])})"
+  )
   print(f"Transformers:  {hf_long_out!r}")
   print(f"LiteRT TFLite: {lite_long_out!r}")
-  match_long = (hf_long_out == lite_long_out)
+  match_long = hf_long_out == lite_long_out
   print(f"Exact Match:   {match_long}")
   if not match_long:
     all_passed = False

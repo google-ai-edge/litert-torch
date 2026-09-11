@@ -1,0 +1,27 @@
+stop_tokens {
+  token_ids {
+    ids: 248044
+  }
+}
+max_num_tokens: 1280
+llm_model_type {
+  generic_model {
+  }
+}
+pad_token {
+  token_str: "<|endoftext|>"
+}
+prompt_templates {
+  user {
+    prefix: "<|im_start|>user\n"
+    suffix: "<|im_end|>\n"
+  }
+  model {
+    prefix: "<|im_start|>assistant\n"
+    suffix: "<|im_end|>\n"
+  }
+  system {
+    prefix: "<|im_start|>system\n"
+    suffix: "<|im_end|>\n"
+  }
+}

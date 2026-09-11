@@ -22,6 +22,12 @@ import torch
 import torch.nn.functional as F
 
 
+def l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
+  """Aligns with l2norm in FLA / Qwen3.5 linear attention."""
+  inv_norm = torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
+  return x * inv_norm
+
+
 def _gated_delta_update_custom_options(
     *,
     mode: int,
@@ -172,6 +178,7 @@ def gated_delta_net(
     num_v_heads: int = 16,
     rms_norm_eps: float = 1e-6,
     mode: int = 0,
+    use_fp32: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
   """Helper function to apply Gated Delta Net with conv1d outside and custom gated_delta_update op."""
   batch_size, seq_len, _ = mixed_qkv.shape
@@ -232,32 +239,37 @@ def gated_delta_net(
     g = g * vm_3d
 
   # Normalize query and key with l2norm and scale query
-  query = query * torch.rsqrt((query * query).sum(dim=-1, keepdim=True) + 1e-6)
-  key = key * torch.rsqrt((key * key).sum(dim=-1, keepdim=True) + 1e-6)
-  query = query * (1.0 / (head_k_dim**0.5))
+  query = l2norm(query, dim=-1, eps=rms_norm_eps) * (1.0 / (head_k_dim**0.5))
+  key = l2norm(key, dim=-1, eps=rms_norm_eps)
 
-  # Transpose to [B, H, N, D] for gated_delta_update
-  q_t = query.transpose(1, 2)
-  k_t = key.transpose(1, 2)
-  v_t = value.transpose(1, 2)
-  beta_t = beta.transpose(1, 2)
-  g_t = g.transpose(1, 2)
+  initial_dtype = query.dtype
+  compute_dtype = torch.float32 if use_fp32 else initial_dtype
+
+  # Transpose and cast to compute_dtype for gated_delta_update
+  q_t, k_t, v_t, beta_t, g_t = [
+      x.transpose(1, 2).contiguous().to(compute_dtype)
+      for x in (query, key, value, beta, g)
+  ]
+  recurrent_state_in = recurrent_state.to(compute_dtype)
 
   # Call custom op
   core_out, new_recurrent_state = torch.ops.litert_torch.gated_delta_update(
-      q_t, k_t, v_t, beta_t, g_t, recurrent_state, mode=mode
+      q_t, k_t, v_t, beta_t, g_t, recurrent_state_in, mode=mode
   )
 
-  # Transpose output back to [B, N, H, D_v]
-  core_out = core_out.transpose(1, 2)
+  # Transpose output back to [B, N, H, D_v] and cast back to original dtype
+  core_out = core_out.transpose(1, 2).contiguous().to(initial_dtype)
+  new_recurrent_state = new_recurrent_state.to(initial_dtype)
 
   # Apply RMSNorm
   variance = core_out.to(torch.float32).pow(2).mean(-1, keepdim=True)
-  core_out = core_out * torch.rsqrt(variance + rms_norm_eps) * norm_weight
+  core_out_norm = norm_weight * (
+      core_out * torch.rsqrt(variance + rms_norm_eps).to(initial_dtype)
+  )
 
   # Gate with z (z is [B, N, H*D_v])
   z_reshaped = z.reshape(batch_size, seq_len, num_v_heads, head_v_dim)
-  out = F.silu(z_reshaped) * core_out
+  out = core_out_norm * F.silu(z_reshaped)
 
   # Reshape to [B, N, H*D_v]
   out = out.reshape(batch_size, seq_len, -1)

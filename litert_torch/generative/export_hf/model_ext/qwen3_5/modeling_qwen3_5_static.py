@@ -231,6 +231,9 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
       conv_kernel_size: int = 4,
       rms_norm_eps: float = 1e-6,
       layer_idx: int = 0,
+      use_fused_gdn: bool = True,
+      gdn_mode: int = 0,
+      use_fp32: bool = False,
   ):
     super().__init__()
     self.layer_idx = layer_idx
@@ -257,6 +260,9 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
     self.A_log = nn.Parameter(torch.log(A))
     self.norm = Qwen3_5RMSNormGated(head_v_dim, eps=rms_norm_eps)
     self.rms_norm_eps = float(rms_norm_eps)
+    self.use_fused_gdn = use_fused_gdn
+    self.gdn_mode = gdn_mode
+    self.use_fp32 = use_fp32
     self.out_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
     self.in_proj_qkv = nn.Linear(hidden_size, self.conv_dim, bias=False)
@@ -319,13 +325,14 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
               num_k_heads=self.num_k_heads,
               num_v_heads=self.num_v_heads,
               rms_norm_eps=self.rms_norm_eps,
-              mode=getattr(self, "gdn_mode", 0),
+              mode=self.gdn_mode,
+              use_fp32=self.use_fp32,
           )
       )
       if past_key_values is not None:
         layer_cache = past_key_values.layers[self.layer_idx]
-        layer_cache.conv_states.copy_(new_conv_state)  # pyrefly: ignore[missing-attribute]
-        layer_cache.recurrent_states.copy_(new_recurrent_state)  # pyrefly: ignore[missing-attribute]
+        layer_cache.conv_states.copy_(new_conv_state)
+        layer_cache.recurrent_states.copy_(new_recurrent_state)
       return self.out_proj(out)
 
     mixed_qkv = self.in_proj_qkv(hidden_states).transpose(
@@ -412,32 +419,116 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
           .unsqueeze(2)
       )
     else:
-      # Recurrent delta rule with loop unrolling (non-chunked)
-      new_recurrent_state = recurrent_state.to(q_t.dtype)
-      ys = []
-      for t in range(seq_len):
-        q_t_step = q_t[:, :, t]
-        k_t_step = k_t[:, :, t]
-        v_t_step = v_t[:, :, t]
-        g_t_step = g_t[:, :, t]
-        beta_t_step = beta_t[:, :, t]
+      gdn_mode = self.gdn_mode
+      chunk_size = 64
+      if gdn_mode == 1 and seq_len >= chunk_size:
+        # Chunked decomposed prefill
+        num_chunks = seq_len // chunk_size
 
-        step_mask = None
-        if valid_mask is not None:
-          step_mask = valid_mask[:, t]
+        v_beta = v_t * beta_t.unsqueeze(-1)
+        k_beta = k_t * beta_t.unsqueeze(-1)
 
-        y_step, new_recurrent_state = _gated_delta_step(
-            q_t_step,
-            k_t_step,
-            v_t_step,
-            g_t_step,
-            beta_t_step,
-            new_recurrent_state,
-            step_mask,
+        q_c, k_c, v_c, k_beta_c, v_beta_c = [
+            x.reshape(
+                batch_size,
+                self.num_v_heads,
+                num_chunks,
+                chunk_size,
+                x.shape[-1],
+            )
+            for x in (q_t, k_t, v_t, k_beta, v_beta)
+        ]
+        g_c = g_t.reshape(batch_size, self.num_v_heads, num_chunks, chunk_size)
+
+        idx = torch.arange(chunk_size, device=q_t.device, dtype=torch.int32)
+        mask_triu = idx.unsqueeze(1) <= idx.unsqueeze(0)
+        mask_tril = idx.unsqueeze(1) >= idx.unsqueeze(0)
+        eye_mask = idx.unsqueeze(1) == idx.unsqueeze(0)
+
+        g_cumsum = g_c.cumsum(dim=-1)
+        diff = g_cumsum.unsqueeze(-1) - g_cumsum.unsqueeze(-2)
+        decay_mask = torch.where(
+            mask_tril, torch.where(mask_tril, diff, 0.0).exp(), 0.0
         )
-        ys.append(y_step)
 
-      core_attn_out = torch.stack(ys, dim=2)
+        attn_in = -(
+            (k_beta_c @ k_c.transpose(-1, -2)) * decay_mask
+        ).masked_fill(mask_triu, 0)
+
+        attn = attn_in.clone()
+        for i in range(1, chunk_size):
+          row = attn[..., i, :i]
+          sub = attn[..., :i, :i]
+          attn[..., i, :i] = row + (row.unsqueeze(-2) @ sub).squeeze(-2)
+
+        attn = torch.where(eye_mask, attn + 1.0, attn)
+        v_local = attn @ v_beta_c
+
+        k_beta_exp = k_beta_c * g_cumsum.exp().unsqueeze(-1)
+        k_cumdecay = attn @ k_beta_exp
+
+        new_recurrent_state = recurrent_state.to(q_t.dtype)
+        core_attn_outs = []
+        for i in range(num_chunks):
+          q_i = q_c[:, :, i]
+          k_i = k_c[:, :, i]
+          v_i = v_local[:, :, i]
+
+          exp_g = g_cumsum[:, :, i].exp()
+          attn_inter = (q_i * exp_g.unsqueeze(-1)) @ new_recurrent_state
+
+          v_prime = k_cumdecay[:, :, i] @ new_recurrent_state
+          v_new = v_i - v_prime
+
+          attn_i = (q_i @ k_i.transpose(-1, -2)) * decay_mask[:, :, i]
+
+          core_attn_outs.append(attn_inter + attn_i @ v_new)
+
+          exp_last = g_cumsum[:, :, i, -1, None, None].exp()
+          exp_diff = (
+              (g_cumsum[:, :, i, -1, None] - g_cumsum[:, :, i])
+              .exp()
+              .unsqueeze(-1)
+          )
+          k_scaled = k_i * exp_diff
+
+          new_recurrent_state = (
+              new_recurrent_state * exp_last
+              + k_scaled.transpose(-1, -2) @ v_new
+          )
+
+        core_attn_out = torch.stack(core_attn_outs, dim=2)
+        core_attn_out = core_attn_out.reshape(
+            batch_size, self.num_v_heads, seq_len, self.head_v_dim
+        )
+
+      else:
+        # Recurrent delta rule with loop unrolling (non-chunked)
+        new_recurrent_state = recurrent_state.to(q_t.dtype)
+        ys = []
+        for t in range(seq_len):
+          q_t_step = q_t[:, :, t]
+          k_t_step = k_t[:, :, t]
+          v_t_step = v_t[:, :, t]
+          g_t_step = g_t[:, :, t]
+          beta_t_step = beta_t[:, :, t]
+
+          step_mask = None
+          if valid_mask is not None:
+            step_mask = valid_mask[:, t]
+
+          y_step, new_recurrent_state = _gated_delta_step(
+              q_t_step,
+              k_t_step,
+              v_t_step,
+              g_t_step,
+              beta_t_step,
+              new_recurrent_state,
+              step_mask,
+          )
+          ys.append(y_step)
+
+        core_attn_out = torch.stack(ys, dim=2)
 
     core_attn_out = (
         core_attn_out.transpose(1, 2).contiguous().to(hidden_states.dtype)
