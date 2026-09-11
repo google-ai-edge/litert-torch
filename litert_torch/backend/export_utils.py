@@ -212,10 +212,10 @@ def ir_element_type_to_torch_dtype(ty):
   if isinstance(ty, ir.F16Type):
     return torch.half
   if isinstance(ty, ir.IntegerType):
+    if ty.is_unsigned:
+      if ty.width == 8:
+        return torch.uint8
     if ty.is_signless:
-      if ty.is_unsigned:
-        if ty.width == 8:
-          return torch.uint8
       if ty.width == 64:
         return torch.long
       if ty.width == 32:
