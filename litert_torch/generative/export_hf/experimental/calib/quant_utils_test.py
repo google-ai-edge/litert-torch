@@ -174,6 +174,50 @@ class QuantUtilsChatTemplateTest(absltest.TestCase):
         "<start_of_turn>user\nHello error<end_of_turn>\n<start_of_turn>model\n",
     )
 
+  def test_format_chat_prompt_dropping_template_falls_back(self):
+    # SmolVLM2-style template: expects list-shaped content, so a plain string
+    # is dropped and only the template's own boilerplate is rendered.
+    mock_tx = mock.MagicMock()
+    mock_tx.chat_template = "some_template"
+    mock_tx.apply_chat_template.return_value = (
+        "<|im_start|>User: <end_of_utterance>\nAssistant:"
+    )
+
+    tok = tokenizer_lib.Tokenizer.__new__(tokenizer_lib.Tokenizer)
+    tok.spm = None
+    tok.tx_tokenizer = mock_tx
+    tok._image_preprocessor = None
+
+    res = quant_utils.get_example_prompt(
+        "Hello dropped", enable_formatting=True, tokenizer=tok
+    )
+    self.assertEqual(
+        res,
+        "<start_of_turn>user\nHello dropped<end_of_turn>\n<start_of_turn>model\n",
+    )
+
+  def test_format_chat_prompt_boilerplate_substring_prompt_falls_back(self):
+    # Regression: a prompt that happens to appear in the dropping template's
+    # own boilerplate ('User:') must not defeat the drop detection.
+    mock_tx = mock.MagicMock()
+    mock_tx.chat_template = "some_template"
+    mock_tx.apply_chat_template.return_value = (
+        "<|im_start|>User: <end_of_utterance>\nAssistant:"
+    )
+
+    tok = tokenizer_lib.Tokenizer.__new__(tokenizer_lib.Tokenizer)
+    tok.spm = None
+    tok.tx_tokenizer = mock_tx
+    tok._image_preprocessor = None
+
+    res = quant_utils.get_example_prompt(
+        {"text": "User:"}, enable_formatting=True, tokenizer=tok
+    )
+    self.assertEqual(
+        res,
+        "<start_of_turn>user\nUser:<end_of_turn>\n<start_of_turn>model\n",
+    )
+
   def test_tokenizer_loads_standalone_chat_template_json(self):
     temp_dir = self.create_tempdir().full_path
     template_data = {
