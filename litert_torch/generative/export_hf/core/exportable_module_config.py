@@ -97,7 +97,9 @@ class ExportableModuleConfig:
   assistant_model: str | None = None
   mtp_verifier_step: int = 5
 
-  moe_exports_implementation: str = "litert_moe"
+  # If set, the model will be exported with the specified MoE implementation.
+  # However it requires transformers>=5.7.0.
+  moe_exports_implementation: str | None = None
 
   # AOT Compilation.
   aot_backend: str | None = None
