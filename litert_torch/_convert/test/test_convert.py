@@ -18,9 +18,9 @@ import dataclasses
 from typing import Tuple
 
 import litert_torch
+from litert_torch import testing
 from litert_torch.backend.lowerings import _decomp_registry
 from litert_torch.quantize import pt2e_quantizer
-
 from litert_torch.testing import model_coverage
 import numpy as np
 import torch
@@ -48,7 +48,8 @@ torch.export.register_dataclass(
 )
 
 
-class TestConvert(googletest.TestCase):
+@testing.parameterized_class(testing.V1_V2_PARAMETERS)
+class TestConvert(testing.V1V2TestCase):
   """Tests conversion of various modules."""
 
   def setUp(self):

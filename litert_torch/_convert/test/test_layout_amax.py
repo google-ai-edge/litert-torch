@@ -15,13 +15,15 @@
 """Tests for NHWC layout rewrite of aten.amax (issue #1126)."""
 
 import litert_torch
+from litert_torch import testing
 import numpy as np
 import torch
 
 from absl.testing import absltest as googletest
 
 
-class TestLayoutAmax(googletest.TestCase):
+@testing.parameterized_class(testing.V1_V2_PARAMETERS)
+class TestLayoutAmax(testing.V1V2TestCase):
   """Tests for NHWC layout optimization involving aten.amax."""
 
   def setUp(self):
