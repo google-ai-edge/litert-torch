@@ -376,6 +376,7 @@ class TestCoreAtenOps(parameterized.TestCase):
       ("aten__softmax_0", torch.ops.aten._softmax, (rnd(torch.float32, (10, 10)), 1, False,), dict()),
       ("aten_split_copy_Tensor_0", torch.ops.aten.split_copy.Tensor, (rnd(torch.float32, (10, 10)), 2,), dict()),
       ("aten_split_with_sizes_0", torch.ops.aten.split_with_sizes, (rnd(torch.float32, (10, 10)), [1, 2, 3, 4],), dict()),
+      ("aten_split_with_sizes_single_output", torch.ops.aten.split_with_sizes, (rnd(torch.float32, (10, 10)), [10],), dict()),
       ("aten_sqrt_0", torch.ops.aten.sqrt, (rnd(torch.float32, (10, 10)),), dict()),
       ("aten_squeeze_copy_dim_0", torch.ops.aten.squeeze_copy.dim, (rnd(torch.float32, (10, 10)), 0,), dict()),
       ("aten_squeeze_dims_0", torch.ops.aten.squeeze.dims, (rnd(torch.float32, (10, 10)), [0, 1],), dict()),
