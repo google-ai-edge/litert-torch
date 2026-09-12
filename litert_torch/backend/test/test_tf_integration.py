@@ -38,11 +38,16 @@ class AddModel(torch.nn.Module):
     return x + y + x + y
 
 
+from unittest import mock
+
 class TensorflowIntegrationTest(googletest.TestCase):
 
   def setUp(self):
     super().setUp()
     torch.manual_seed(0)
+    self.enter_context(
+        mock.patch.dict("os.environ", {"LITERT_TORCH_FULL_TFL_DECOMPS": "0"})
+    )
 
   def test_mlir_lowered_call(self):
     """Test a simple model with MLIR lowered call."""

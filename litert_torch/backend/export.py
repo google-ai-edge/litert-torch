@@ -17,6 +17,7 @@
 import dataclasses
 import enum
 import io
+import os
 import operator
 from typing import Any, Callable, Optional
 
@@ -353,15 +354,23 @@ def exported_program_to_mlir(
   _convert_i64_to_i32(exported_program)
 
   # Last decomposition and canonicalization before lowering.
+  #
+  # By default, apply the full torch_tfl decomposition table so covered aten
+  # ops lower through deterministic tfl.* ops (the same table the export_hf
+  # path applies). Set LITERT_TORCH_FULL_TFL_DECOMPS=0 to fall back to the
+  # legacy behavior (multinomial only).
+  if os.environ.get("LITERT_TORCH_FULL_TFL_DECOMPS", "1") != "0":
+    _torch_tfl_decomps = dict(torch_tfl.decomps)
+  else:
+    _torch_tfl_decomps = {
+        op: torch_tfl.decomps[op]
+        for op in [
+            torch.ops.aten.multinomial.default,
+        ]
+    }
   exported_program = fx_infra.safe_run_decompositions(
       exported_program,
-      fx_infra.decomp.pre_lower_decomp()
-      | {
-          op: torch_tfl.decomps[op]
-          for op in [
-              torch.ops.aten.multinomial.default,
-          ]
-      },
+      fx_infra.decomp.pre_lower_decomp() | _torch_tfl_decomps,
   )
 
   # Passes below modify the exported program to a state not executable by torch.
