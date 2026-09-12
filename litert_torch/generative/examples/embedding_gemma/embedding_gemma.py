@@ -91,9 +91,10 @@ class EncoderBlock(attention.TransformerBlock):
 class EmbeddingGemma(nn.Module):
   """EmbeddingGemma-300M model."""
 
-  def __init__(self, config: cfg.ModelConfig):
+  def __init__(self, config: cfg.ModelConfig, final_l2_norm: bool = True):
     super().__init__()
     self.config = config
+    self.final_l2_norm = final_l2_norm
 
     # Token embeddings
     self.embedder = nn.Embedding(
@@ -175,12 +176,10 @@ class EmbeddingGemma(nn.Module):
   def mean_pool(self, hidden_states, attention_mask):
     """Mean pooling with attention mask."""
     if attention_mask is not None:
-      input_mask_expanded = attention_mask.unsqueeze(-1).expand(
-          hidden_states.size()
-      ).float()
-      sum_embeddings = torch.sum(
-          hidden_states * input_mask_expanded, dim=1
+      input_mask_expanded = (
+          attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
       )
+      sum_embeddings = torch.sum(hidden_states * input_mask_expanded, dim=1)
       sum_mask = torch.clamp(input_mask_expanded.sum(dim=1), min=1e-9)
       return sum_embeddings / sum_mask
     else:
@@ -196,9 +195,7 @@ class EmbeddingGemma(nn.Module):
     batch_size, seq_len = tokens.shape
 
     if attention_mask is None:
-      attention_mask = torch.ones(
-          batch_size, seq_len, device=tokens.device
-      )
+      attention_mask = torch.ones(batch_size, seq_len, device=tokens.device)
 
     x = self.embedder(tokens) * self.config.embedding_scale
 
@@ -263,8 +260,11 @@ class EmbeddingGemma(nn.Module):
     pooled_x = self.dense2(pooled_x)
 
     # L2 normalization
-    embedding = torch.nn.functional.normalize(pooled_x, p=2, dim=1)
-    return embedding
+    if self.final_l2_norm:
+      embedding = torch.nn.functional.normalize(pooled_x, p=2, dim=1)
+      return embedding
+
+    return pooled_x
 
 
 def get_model_config() -> cfg.ModelConfig:
@@ -349,11 +349,11 @@ def get_model_config() -> cfg.ModelConfig:
   return config
 
 
-def build_model(checkpoint_path) -> EmbeddingGemma:
+def build_model(checkpoint_path, final_l2_norm: bool = True) -> EmbeddingGemma:
   """Build model and load weights from HuggingFace checkpoint."""
 
   config = get_model_config()
-  model = EmbeddingGemma(config)
+  model = EmbeddingGemma(config, final_l2_norm)
 
   print(f"Loading from checkpoint: {checkpoint_path}")
 
