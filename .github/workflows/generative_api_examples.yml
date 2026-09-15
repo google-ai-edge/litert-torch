@@ -43,7 +43,7 @@ jobs:
         with:
           java-version: "17"
           distribution: "temurin"
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       - run: |
           sdkmanager "build-tools;30.0.3" "platform-tools"
           sdkmanager "platforms;android-30" "extras;android;m2repository"
