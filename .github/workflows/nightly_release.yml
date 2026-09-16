@@ -1,3 +1,4 @@
+
 # Helpful YAML parser to clarify YAML syntax:
 # https://yaml-online-parser.appspot.com/
 
@@ -9,6 +10,13 @@ on:
     - cron: "0 10 * * *"
 
   workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   run-unittests-python:
@@ -26,10 +34,15 @@ jobs:
   build-and-release-nightly:
     needs: run-unittests-python
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write # Required for OIDC authentication
+      contents: read
 
     name: Build and Release litert-torch-nightly
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Get and set nightly date
         id: date
@@ -39,7 +52,7 @@ jobs:
           echo "date=${DATE}" >> $GITHUB_OUTPUT
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
         with:
           python-version: "3.11"
 
@@ -60,7 +73,7 @@ jobs:
         run: python -m zipfile --list dist/*.whl
 
       - name: Upload to PyPI
-        run: twine upload dist/* --non-interactive -p ${{ secrets.PYPI_UPLOAD_TOKEN }}
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
 
   run-pip-install-and-import-test:
     needs: build-and-release-nightly
@@ -72,9 +85,9 @@ jobs:
     runs-on:
       labels: linux-x86-n2-16
     container:
-      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d # latest
     steps:
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
         with:
           python-version: ${{ matrix.python-version }}
 

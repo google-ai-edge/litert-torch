@@ -14,6 +14,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   block-pr-merge:
     name: Block GitHub PR Merge
@@ -40,7 +43,7 @@ jobs:
     steps:
       - name: remove-cirun
         if: ${{ contains(github.event.pull_request.labels.*.name, 'ci:run') }}
-        uses: actions/github-script@v5
+        uses: actions/github-script@211cb3fefb35a799baa5156f9321bb774fe56294 # v5
         with:
           script: |
             github.rest.issues.removeLabel({
@@ -71,6 +74,8 @@ jobs:
     needs: remove-ci-run-label
     if: contains(github.event.pull_request.labels.*.name, 'ci:model-coverage')
     uses: ./.github/workflows/model_coverage.yml
-    secrets: inherit
+    secrets:
+      PYTORCH_BENCHMARK_REPO: ${{ secrets.PYTORCH_BENCHMARK_REPO }}
+      PYTORCH_BENCHMARK_REPO_READER: ${{ secrets.PYTORCH_BENCHMARK_REPO_READER }}
     with:
       trigger-sha: ${{ github.event.pull_request.head.sha }}

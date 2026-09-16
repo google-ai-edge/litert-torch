@@ -13,6 +13,13 @@ on:
 env:
   RUN_LARGE_TESTS: true
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   run-unittests-python:
     if: |

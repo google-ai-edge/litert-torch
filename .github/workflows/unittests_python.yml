@@ -17,36 +17,48 @@ on:
       run-on-macos:
         type: boolean
         default: false
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   prepare-matrix:
+    name: Prepare Matrix
     runs-on: ubuntu-latest
     outputs:
       os: ${{ steps.set-matrix.outputs.os }}
     steps:
       - name: Set matrix
         id: set-matrix
+        env:
+          RUN_ON_MACOS: ${{ inputs.run-on-macos }}
         run: |
           os=("linux-x86-n2-16")
-          if [[ "${{ inputs.run-on-macos }}" == "true" ]]; then
+          if [[ "$RUN_ON_MACOS" == "true" ]]; then
             os+=("macos-latest")
           fi
           os=$(jq -c -n '$ARGS.positional' --args "${os[@]}")
           echo "os=${os}"
           echo "os=${os}" >> $GITHUB_OUTPUT
   test:
+    name: Test
     needs: prepare-matrix
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
         os: ${{ fromJson(needs.prepare-matrix.outputs.os) }}
     runs-on: ${{ matrix.os }}
-    container: ${{ matrix.os == 'linux-x86-n2-16' && 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest' || null }}
+    container: ${{ matrix.os == 'linux-x86-n2-16' && 'us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build@sha256:12822904942562e7deb0c91fb0eb3dd9ec87b4292881108b166e44149422b87d' || '' }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
         with:
           ref: ${{ inputs.trigger-sha }}
+          persist-credentials: false
 
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
         with:
           python-version: ${{ matrix.python-version }}
 
