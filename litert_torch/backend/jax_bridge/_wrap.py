@@ -267,11 +267,24 @@ def wrap(jaxfn: Callable[Any, Any], ir_input_names: list[str] = None):
           ir.RankedTensorType.get(result.type.shape, target_elty), result
       )
 
-    if len(results) == 1:
+    if hasattr(out_avals, "dtype"):
+      if len(results) != 1:
+        raise RuntimeError(
+            "JAX lowering returned multiple results for a tensor-valued "
+            f"ATen output: {len(results)}"
+        )
       return sanitize_result_elty(results[0], out_avals)
-    return [
+
+    flat_out_avals, out_spec = pytree.tree_flatten(out_avals)
+    if len(results) != len(flat_out_avals):
+      raise RuntimeError(
+          "JAX lowering result count does not match the ATen output "
+          f"structure: {len(results)} != {len(flat_out_avals)}"
+      )
+    sanitized_results = [
         sanitize_result_elty(result, aval)
-        for result, aval in zip(results, out_avals)
+        for result, aval in zip(results, flat_out_avals)
     ]
+    return pytree.tree_unflatten(sanitized_results, out_spec)
 
   return wrapped
