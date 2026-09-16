@@ -24,17 +24,19 @@ import transformers
 
 DEFAULT_PROMPTS = [
     "What is the meaning of life?",
-    "This is an example sentence."
+    "This is an example sentence.",
 ]
 
 _MODEL_PATH = "google/embeddinggemma-300m"
 _LONG_INPUT_PROMPT_PATH = "long_input_prompt_test.txt"
+
 
 def verify_embedding_gemma_300m(
     checkpoint_dir: str = None,
     prompts: list[str] | None = None,
     long_input_prompt_path: str = None,
     atol: float = 0.0,
+    final_l2_norm: bool = True,
 ) -> bool:
   """Verifies EmbeddingGemma-300M."""
 
@@ -50,7 +52,9 @@ def verify_embedding_gemma_300m(
 
   print(f"Loading reauthored model from: {checkpoint_dir}")
   try:
-    reauthored_model = embedding_gemma.build_model(checkpoint_dir)
+    reauthored_model = embedding_gemma.build_model(
+        checkpoint_dir, final_l2_norm=final_l2_norm
+    )
     reauthored_model.eval()
   except Exception as e:  # pylint: disable=broad-except
     print(f"Failed to build or load reauthored model: {e}")
@@ -88,7 +92,9 @@ def verify_embedding_gemma_300m(
   print("\n--- Comparing Final Embeddings ---")
   with torch.no_grad():
     # Get embeddings from the original SentenceTransformer model.
-    final_original_output = original_model(inputs)  # pytype: disable=wrong-arg-types
+    final_original_output = original_model(
+        inputs
+    )  # pytype: disable=wrong-arg-types
     original_embedding = final_original_output["sentence_embedding"]
 
     # Get embeddings from the reauthored model.
