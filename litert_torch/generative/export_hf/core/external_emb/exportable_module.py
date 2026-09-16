@@ -15,6 +15,7 @@
 """Exportable module for externalized embedding."""
 
 from litert_torch.generative.export_hf.core import exportable_module as base_exportable_module
+from litert_torch.generative.export_hf.core import lora as lora_lib
 import torch
 
 
@@ -50,7 +51,8 @@ class LiteRTExportableModuleForDecoderOnlyLMPrefillExternalEmbedder(
         **kwargs,
     )
     inputs |= self.attention_kwargs()
-    output = self.model(**inputs)
+    with lora_lib.bind_lora_weights(self.model, kwargs.get("lora")):
+      output = self.model(**inputs)
     return {"kv_cache": output.past_key_values}
 
   def _get_input(
@@ -102,7 +104,8 @@ class LiteRTExportableModuleForDecoderOnlyLMGenerateExternalEmbedder(
         **kwargs,
     )
     inputs |= self.attention_kwargs()
-    output = self.model(**inputs, output_hidden_states=self.export_verifier)
+    with lora_lib.bind_lora_weights(self.model, kwargs.get("lora")):
+      output = self.model(**inputs, output_hidden_states=self.export_verifier)
     if self.export_verifier:
       extra_outputs = {"activations": output["hidden_states"][-1]}
     else:

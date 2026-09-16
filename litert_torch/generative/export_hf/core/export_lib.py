@@ -29,6 +29,7 @@ from litert_torch.backend.experimental import torch_tfl
 from litert_torch.generative.export_hf.core import attention as _
 from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.core import exportable_module_config
+from litert_torch.generative.export_hf.core import lora as lora_lib
 from litert_torch.generative.export_hf.core import patches as _
 from litert_torch.generative.export_hf.core import utils
 from litert_torch.generative.export_hf.core import weights_loader as weights_loader_lib
@@ -591,8 +592,9 @@ def export_text_prefill_decode_model(
   )
 
   # Patch model instance for export.
-  with model_ext_patches.patch_model(
-      model, model_type, export_config
+  with (
+      model_ext_patches.patch_model(model, model_type, export_config),
+      lora_lib.patch_model_for_lora(model, export_config),
   ):
     text_model_config = source_model_artifacts.text_model_config
     quantization_recipe = export_config.quantization_recipe
@@ -616,6 +618,11 @@ def export_text_prefill_decode_model(
     else:
       model.set_attn_implementation('lrt_transposed_attention')
 
+    lora_ranks = export_config.lora_ranks or []
+    loras = [None] + [
+        lora_lib.create_zeros_lora(rank, model) for rank in lora_ranks
+    ]
+
     signatures = []
     assert export_config.cache_lengths is not None
     for cache_len in export_config.cache_lengths:
@@ -634,10 +641,24 @@ def export_text_prefill_decode_model(
             inputs,
             dynamic_shapes,
         ) in module.get_sample_inputs(text_model_config).items():
-          sig_name = signature_name
+          base_sig_name = signature_name
           if len(export_config.cache_lengths) > 1:
-            sig_name = f'{signature_name}_cache_{cache_len}'
-          signatures.append((sig_name, module, inputs, dynamic_shapes))
+            base_sig_name = f'{signature_name}_cache_{cache_len}'
+          for lora in loras:
+            if lora is None:
+              signatures.append(
+                  (base_sig_name, module, inputs, dynamic_shapes)
+              )
+              continue
+            sig_dynamic_shapes = (
+                {**dynamic_shapes, 'lora': None} if dynamic_shapes else None
+            )
+            signatures.append((
+                f'{base_sig_name}_lora_r{lora.get_rank()}',
+                module,
+                {**inputs, 'lora': lora},
+                sig_dynamic_shapes,
+            ))
 
     weights_loader = source_model_artifacts.weights_loader
     signature_modules = list({id(s[1]): s[1] for s in signatures}.values())

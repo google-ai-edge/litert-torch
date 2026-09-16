@@ -20,6 +20,7 @@ from litert_torch.generative.export_hf.core import attention as _
 from litert_torch.generative.export_hf.core import cache as cache_lib
 from litert_torch.generative.export_hf.core import cache_base as kv_cache_lib
 from litert_torch.generative.export_hf.core import exportable_module_config
+from litert_torch.generative.export_hf.core import lora as lora_lib
 from litert_torch.generative.export_hf.core import utils
 from litert_torch.generative.export_hf.core.sliding_window import attention_mask as sliding_window_attention_mask
 from litert_torch.generative.export_hf.core.split_cache import attention as _
@@ -366,6 +367,7 @@ class LiteRTExportableModuleForDecoderOnlyLM(ExportableModuleBase):
         # Other common settings
         "use_cache": True,
     })
+    lora_lib.set_lora_weights(self.model, kwargs.get("lora"))
     return ret
 
   def get_sample_kv_cache(self, model_config):
@@ -445,7 +447,8 @@ class LiteRTExportableModuleForDecoderOnlyLMPrefill(
     # Tells the attention layers whether the final hidden states are live;
     # see `core/attention.py:transposed_attention`.
     inputs["prefill_logits"] = emit_logits
-    output = self.model(**inputs)
+    with lora_lib.bind_lora_weights(self.model, kwargs.get("lora")):
+      output = self.model(**inputs)
     outputs = {"kv_cache": output.past_key_values}
     if emit_logits:
       outputs["logits"] = output.logits.to(torch.float32)
@@ -565,7 +568,8 @@ class LiteRTExportableModuleForDecoderOnlyLMGenerate(
         **kwargs,
     )
     inputs |= self.attention_kwargs()
-    output = self.model(**inputs, output_hidden_states=self.export_verifier)
+    with lora_lib.bind_lora_weights(self.model, kwargs.get("lora")):
+      output = self.model(**inputs, output_hidden_states=self.export_verifier)
     if self.export_verifier:
       extra_outputs = {"activations": output["hidden_states"][-1]}
     else:
