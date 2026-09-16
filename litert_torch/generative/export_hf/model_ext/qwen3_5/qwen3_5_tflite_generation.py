@@ -23,12 +23,14 @@ from typing import Any
 
 from absl import app
 from absl import flags
+from google.protobuf import text_format
+from litert_torch.generative.export_hf import export as litert_torch_export
 import torch
 from transformers import AutoModelForCausalLM
 from transformers import AutoTokenizer
 
 import litert_lm
-from litert_torch.generative.export_hf import export as litert_torch_export
+from litert_lm_builder.runtime.proto import llm_metadata_pb2
 
 
 _MODEL_ID = flags.DEFINE_string(
@@ -63,8 +65,15 @@ _USE_JINJA = flags.DEFINE_bool(
 )
 _LLM_METADATA_OVERRIDE_PATH = flags.DEFINE_string(
     "llm_metadata_override_path",
-    "third_party/py/litert_torch/generative/export_hf/model_ext/qwen3_5/qwen3_5_metadata_override.pbtext",
-    "Path to LlmMetadataProto text proto override.",
+    "",
+    "Path to LlmMetadataProto text proto override. If empty, resolves to"
+    " sibling qwen3_5_metadata_override.pbtext.",
+)
+_JINJA_TEMPLATE_PATH = flags.DEFINE_string(
+    "jinja_template_path",
+    "",
+    "Path to Jinja chat template file. If empty, resolves to sibling"
+    " qwen3_5_chat_template.jinja.",
 )
 _USE_GPU = flags.DEFINE_bool(
     "use_gpu",
@@ -128,19 +137,47 @@ def run_tflite_generation_checks() -> None:
   os.makedirs(output_dir, exist_ok=True)
   print(f"=== Exporting {model_id} to float TFLite in: {output_dir} ===")
 
-  litert_torch_export.export(
-      model=model_id,
-      output_dir=output_dir,
-      quantization_recipe="",  # Float TFLite export
-      keep_temporary_files=True,
-      bundle_litert_lm=True,
-      cache_length=cache_length,
-      prefill_lengths=[prefill_chunk_size],
-      externalize_embedder=True,
-      single_token_embedder=True,
-      use_jinja_template=False,
-      litert_lm_llm_metadata_override=_LLM_METADATA_OVERRIDE_PATH.value,
+  current_dir = os.path.dirname(os.path.abspath(__file__))
+  base_override_path = (
+      _LLM_METADATA_OVERRIDE_PATH.value
+      or os.path.join(current_dir, "qwen3_5_metadata_override.pbtext")
   )
+  template_path = (
+      _JINJA_TEMPLATE_PATH.value
+      or os.path.join(current_dir, "qwen3_5_chat_template.jinja")
+  )
+  print(f"=== Loading base metadata override from: {base_override_path} ===")
+  metadata = llm_metadata_pb2.LlmMetadata()
+  with open(base_override_path, "r") as f:
+    text_format.Parse(f.read(), metadata)
+
+  print(f"=== Loading modified Jinja template from: {template_path} ===")
+  with open(template_path, "r") as f:
+    chat_template_content = f.read()
+  print("=== Injecting modified Jinja chat template ===")
+  metadata.jinja_prompt_template = chat_template_content
+
+  temp_override_fd, temp_override_path = tempfile.mkstemp(suffix=".pbtext")
+  try:
+    with os.fdopen(temp_override_fd, "w") as f:
+      f.write(text_format.MessageToString(metadata))
+
+    litert_torch_export.export(
+        model=model_id,
+        output_dir=output_dir,
+        quantization_recipe="",  # Float TFLite export
+        keep_temporary_files=True,
+        bundle_litert_lm=True,
+        cache_length=cache_length,
+        prefill_lengths=[prefill_chunk_size],
+        externalize_embedder=True,
+        single_token_embedder=True,
+        use_jinja_template=True,
+        litert_lm_llm_metadata_override=temp_override_path,
+    )
+  finally:
+    if os.path.exists(temp_override_path):
+      os.remove(temp_override_path)
 
   exported_model_path = os.path.join(output_dir, "model.litertlm")
   if not os.path.exists(exported_model_path):
@@ -149,6 +186,7 @@ def run_tflite_generation_checks() -> None:
   print(f"\n=== Loading HF Reference Model ({model_id}) ===")
   tokenizer = AutoTokenizer.from_pretrained(model_id)
   assert tokenizer is not None
+  tokenizer.chat_template = chat_template_content
   hf_model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float32)
   hf_model.eval()
 
