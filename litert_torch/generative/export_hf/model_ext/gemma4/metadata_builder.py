@@ -51,7 +51,6 @@ def build_llm_metadata(
   llm_metadata.llm_model_type.gemma4.function_response_start = token_map.get(  # pyrefly: ignore[bad-assignment]
       'str_token', ''
   )
-  llm_metadata.llm_model_type.gemma4.use_template_for_fc_format = True
   think_channel = llm_metadata.channels.add()
   think_channel.channel_name = 'thought'
   think_channel.start = f"{token_map.get('soc_token', '<|channel>')}thought\n"
