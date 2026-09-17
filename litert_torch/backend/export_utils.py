@@ -211,17 +211,32 @@ def ir_element_type_to_torch_dtype(ty):
     return torch.float64
   if isinstance(ty, ir.F16Type):
     return torch.half
+  if isinstance(ty, ir.BF16Type):
+    return torch.bfloat16
   if isinstance(ty, ir.IntegerType):
-    if ty.is_signless:
-      if ty.is_unsigned:
-        if ty.width == 8:
-          return torch.uint8
+    if ty.is_unsigned:
+      if ty.width == 8:
+        return torch.uint8
+      if ty.width == 16:
+        return torch.uint16
+      if ty.width == 32:
+        return torch.uint32
       if ty.width == 64:
-        return torch.long
+        return torch.uint64
+      # Tolerant fallback for 1-bit unsigned
+      if ty.width == 1:
+        return torch.bool
+
+    if ty.is_signless or ty.is_signed:
+      if ty.width == 64:
+        return torch.long  # or torch.long
       if ty.width == 32:
         return torch.int32
       if ty.width == 16:
         return torch.int16
+      if ty.width == 8:
+        return torch.int8
       if ty.width == 1:
         return torch.bool
+
   raise RuntimeError(f"Unsupported ir element type: {ty}")

@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from litert_torch import fx_infra
 from litert_torch import model
@@ -39,12 +39,17 @@ except ImportError:
 
 def _run_convert_passes(
     exported_program: torch.export.ExportedProgram,
+    litert_converter_flags: dict[str, Any] | None = None,
 ) -> torch.export.ExportedProgram:
   exported_program = generative_fx_passes.run_generative_passes(
       exported_program
   )
 
+  flags = litert_converter_flags or {}
+  force_drq = bool(flags.get("_experimental_weight_only_as_drq", False))
+
   passes = [
+      fx_passes.LowerTorchAOPass(force_weight_only_as_drq=force_drq),
       fx_passes.EliminateDeadCodePass(),
       fx_passes.OptimizeLayoutTransposesPass(),
       fx_passes.CanonicalizePass(),
@@ -86,6 +91,7 @@ def convert_signatures(
     lightweight_conversion: bool = False,
     enable_x64: bool = True,
     runtime_constant_folding: bool | None = None,
+    _litert_converter_flags: dict[str, Any] | None = None,
 ) -> model.LiteRTModel:
   """Converts a list of `signature.Signature`s and embeds them into one `model.LiteRTModel`.
 
@@ -155,7 +161,19 @@ def convert_signatures(
 
   # Apply default fx passes
   with progress.task("Run FX Passes"):
-    exported_programs = list(map(_run_convert_passes, exported_programs))
+    exported_programs = [
+        _run_convert_passes(ep, _litert_converter_flags)
+        for ep in exported_programs
+    ]
+
+  if _litert_converter_flags is None:
+    _litert_converter_flags = {}
+  else:
+    _litert_converter_flags = dict(_litert_converter_flags)
+
+  for ep in exported_programs:
+    if ep.graph_module.meta.get("strict_qdq_mode", False):
+      _litert_converter_flags["strict_qdq_mode"] = True
 
   exporter = litert_converter.exported_programs_to_flatbuffer(
       exported_programs,
@@ -164,6 +182,7 @@ def convert_signatures(
       quant_config=quant_config,
       lightweight_conversion=lightweight_conversion,
       runtime_constant_folding=runtime_constant_folding,
+      _litert_converter_flags=_litert_converter_flags,
   )
 
   return model.LiteRTModel(exporter)
