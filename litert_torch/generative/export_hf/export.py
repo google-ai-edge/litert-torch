@@ -96,7 +96,9 @@ def export(
     use_swiglu_composite: bool | None = None,
     use_qkv_norm_rope_composite: bool | None = None,
     use_short_conv_composite: bool | None = None,
-    use_sdpa_composite: bool | None = None,
+    use_sdpa_composite: str | bool | None = None,
+    apply_gpu_composites: bool | None = None,
+    use_bool_mask: bool | None = None,
     prefill_logits: bool | None = None,
     externalize_embedder: bool | None = None,
     single_token_embedder: bool | None = None,
@@ -169,7 +171,15 @@ def export(
       numbers) for cache length.
     use_rope_composite: Whether to enable the RoPE composite.
     use_qkv_norm_rope_composite: Whether to enable the QKV norm rope composite.
-    use_sdpa_composite: Whether to enable the fused transposed SDPA composite.
+    use_sdpa_composite: Scope of the fused transposed SDPA composite. One of
+      "none" (decomposed BMM + softmax everywhere), "decode" (fuse the
+      single-token decode signature only) or "all" (additionally fuse prefill
+      with the flash-attention kernel). The legacy bool spelling is accepted and
+      maps to "all".
+    apply_gpu_composites: Master switch for GPU composite emission. Implied by
+      use_sdpa_composite.
+    use_bool_mask: Whether to use a boolean attention mask instead of
+      materializing fp32 mask constants.
     prefill_logits: Whether the prefill signature returns logits for the final
       position. Defaults to on only when multi-output composites
       (`use_qkv_norm_rope_composite` or `use_short_conv_composite`) are enabled,

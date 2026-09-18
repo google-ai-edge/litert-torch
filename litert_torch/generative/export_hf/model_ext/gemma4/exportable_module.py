@@ -49,8 +49,10 @@ class LiteRTExportableModuleForDecoderOnlyLMPrefillExternalEmbedder(
       mask,
       **kwargs,
   ):
-    if self.export_config.extra_kwargs.get("apply_gpu_composites", False):
+    if self.export_config.apply_gpu_composites:
       kwargs["apply_gpu_composites"] = True
+    if self.export_config.sdpa_composite_for_prefill:
+      kwargs["use_sdpa_composite"] = True
     inputs = self.adapt_inputs(
         None,
         embeddings,
@@ -134,8 +136,10 @@ class LiteRTExportableModuleForDecoderOnlyLMGenerateExternalEmbedder(
       mask,
       **kwargs,
   ):
-    if self.export_config.extra_kwargs.get("apply_gpu_composites", False):
+    if self.export_config.apply_gpu_composites:
       kwargs["apply_gpu_composites"] = True
+    if self.export_config.sdpa_composite_for_decode:
+      kwargs["use_sdpa_composite"] = True
     inputs = self.adapt_inputs(
         None,
         embeddings,
