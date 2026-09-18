@@ -224,11 +224,7 @@ def run_litert_lm(
       response = conversation.send_message(
           prompt, max_output_tokens=max_new_tokens
       )
-      text_pieces = []
-      for item in response.get('content', []):
-        if item.get('type') == 'text':
-          text_pieces.append(item.get('text', ''))
-      output_text = ''.join(text_pieces).strip()
+      output_text = str(response).strip()
       responses.append(output_text)
 
   return responses

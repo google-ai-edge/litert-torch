@@ -83,15 +83,9 @@ _USE_GPU = flags.DEFINE_bool(
 
 
 def extract_litert_lm_response(conv: Any, prompt: str, max_new_tokens: int) -> str:
-  response = conv.send_message(prompt, max_output_tokens=max_new_tokens)
-  if isinstance(response, str):
-    return response.strip()
-  text_pieces = []
-  if isinstance(response, dict):
-    for item in response.get("content", []):
-      if isinstance(item, dict) and item.get("type") == "text":
-        text_pieces.append(str(item.get("text", "")))
-  return "".join(text_pieces).strip()
+  return str(
+      conv.send_message(prompt, max_output_tokens=max_new_tokens)
+  ).strip()
 
 
 def run_transformers_chat(
