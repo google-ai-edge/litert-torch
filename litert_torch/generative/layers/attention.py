@@ -255,7 +255,7 @@ class CausalSelfAttention(CausalSelfAttentionBase):
           dtype=x.dtype,
           device=x.device,
       )
-    elif rope is not None:
+    elif rope is not None and self.config.enable_rope:
       # Compute rotary positional embedding for query and key.
       cos, sin = rope
       q, k = rotary_pos_emb.apply_rope_inline(q, k, cos, sin)
@@ -403,7 +403,7 @@ class CrossAttention(nn.Module):
     k = k.view(interim_shape)
     v = v.view(interim_shape)
 
-    if rope is not None:
+    if rope is not None and self.config.enable_rope:
       # Compute rotary positional embedding for query and key.
       cos, sin = rope
       q, k = rotary_pos_emb.apply_rope_inline(q, k, cos, sin)
