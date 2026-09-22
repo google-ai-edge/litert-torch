@@ -21,6 +21,7 @@ from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.core.external_emb import exportable_module as external_emb_module
 from litert_torch.generative.export_hf.core.split_cache import attention as _
 from litert_torch.generative.export_hf.core.split_cache import exportable_module as split_cache_module
+from litert_torch.generative.export_hf.model_ext.qwen3_5 import patch as qwen3_5_patch
 from litert_torch.generative.export_hf.model_ext.qwen3_5.modeling_qwen3_5_static import Qwen3_5StaticForCausalLM
 import torch
 import torch.nn as nn
@@ -172,6 +173,9 @@ class Qwen3_5ExportableMixin:
   ):
     if not isinstance(model, Qwen3_5StaticModelHFWrapper):
       model = Qwen3_5StaticModelHFWrapper(model)
+      qwen3_5_patch.apply_qwen3_5_model_patches(
+          model.static_model, export_config
+      )
     super().__init__(model, export_config, source_model_artifacts)  # pytype: disable=wrong-arg-count
     if (
         getattr(export_config, "split_cache", False)
