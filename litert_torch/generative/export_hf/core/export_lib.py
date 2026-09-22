@@ -465,8 +465,8 @@ def _build_checkpoint_weights_loader(
     model: nn.Module,
     resolved_ext: model_ext_extension.ModelExtension | None,
     *,
-    config: Any,
-    export_config: exportable_module.ExportableModuleConfig,
+    config: Any = None,
+    export_config: exportable_module.ExportableModuleConfig | None = None,
 ) -> weights_loader_lib.HFCheckpointWeightsLoader:
   """Builds an `HFCheckpointWeightsLoader` wired to `ModelExtension` hooks.
 
@@ -479,7 +479,8 @@ def _build_checkpoint_weights_loader(
     model: Meta-device model instance being exported.
     resolved_ext: Active `ModelExtension` for `model`, or `None`.
     config: Loaded HuggingFace model config, used for architecture-specific
-      weight layout adjustments (e.g. Qwen3.5 `odml.qkv_norm_rope`).
+      weight layout adjustments (e.g. Qwen3.5 `odml.qkv_norm_rope` and
+      zero-centered RMSNorm weights).
     export_config: Active `ExportableModuleConfig`, which selects composite
       weight transformations.
 
@@ -717,9 +718,16 @@ def load_model(
     raise ValueError(f'Unsupported task: {task}')
 
   weights_loader = None
-  model_dtype = export_config.get_torch_dtype()
+  model_dtype = (
+      export_config.get_torch_dtype()
+      if hasattr(export_config, 'get_torch_dtype')
+      else torch.float32
+  )
   with model_ext_patches.get_patch_context(config.model_type, export_config):
-    if export_config.use_v2 and not export_config.use_random_weights:
+    if (
+        getattr(export_config, 'use_v2', False)
+        and not export_config.use_random_weights
+    ):
       with weights_loader_lib.init_params_on_meta():
         model = _instantiate_hf_model_from_config(
             auto_model_cls,
@@ -872,12 +880,14 @@ def _v2_convert_kwargs(
   Returns:
     An empty dict if V2 is disabled.
   """
-  if not export_config.use_v2:
+  if not getattr(export_config, 'use_v2', False):
     return {}
   return {
       'use_v2': True,
       'delete_in_memory_params': delete_in_memory_params,
-      'allow_reuse_intermediates': False,
+      'allow_reuse_intermediates': getattr(
+          export_config, 'allow_reuse_intermediates', False
+      ),
       'weights_loader': weights_loader,
       'export_dir': os.path.splitext(output_path)[0] + '_intermediates',
       'output_file_path': output_path,
@@ -1043,7 +1053,9 @@ def export_text_prefill_decode_model(
                 export_config,
                 weights_loader,
                 model_path,
-                delete_in_memory_params=export_config.delete_in_memory_params,
+                delete_in_memory_params=getattr(
+                    export_config, 'delete_in_memory_params', False
+                ),
             ),
         )
 
@@ -1052,7 +1064,7 @@ def export_text_prefill_decode_model(
   # part of the default pipeline and the fp16 cast fold around fully connected
   # ops is enabled via `_v2_convert_kwargs`. `experimental_use_mixed_precision`
   # is rejected for V2 by `ExportableModuleConfig` validation.
-  if not export_config.use_v2:
+  if not getattr(export_config, 'use_v2', False):
     lrt_model = mu_pass_lib.update_model(lrt_model)  # pyrefly: ignore[bad-argument-type]
     if export_config.experimental_use_mixed_precision:
       print('Applying mixed precision to model...')
@@ -1098,6 +1110,14 @@ def export_embedder_model(
   work_dir = export_config.work_dir
   assert work_dir is not None
 
+  if getattr(export_config, 'allow_reuse_intermediates', False):
+    existing_quantized = os.path.join(work_dir, 'embedder_quantized.tflite')
+    if os.path.exists(existing_quantized):
+      return dataclasses.replace(
+          exported_model_artifacts,
+          embedder_model_path=existing_quantized,
+      )
+
   model_type = (
       source_model_artifacts.text_model_config.model_type
       if hasattr(source_model_artifacts, 'text_model_config')
@@ -1131,7 +1151,7 @@ def export_embedder_model(
         strict_export=False,
         **_v2_convert_kwargs(export_config, weights_loader, model_path),
     )
-  if not export_config.use_v2:
+  if not getattr(export_config, 'use_v2', False):
     lrt_model.export(model_path)
   quantization_recipe_list = (
       quantization_recipe.split(',') if quantization_recipe else [None]

@@ -435,8 +435,8 @@ class HFCheckpointWeightsLoader:
     Args:
       model_path: Local checkpoint directory or HuggingFace repo id.
       tie_word_embeddings: Whether `lm_head` shares the embedding table. Only
-        then is a missing `lm_head.weight` served from the embedding table;
-        the two have the same shape, so a wrong fallback would go unnoticed.
+        then is a missing `lm_head.weight` served from the embedding table; the
+        two have the same shape, so a wrong fallback would go unnoticed.
       extra_prefixes: Additional checkpoint/module prefixes (e.g.
         `('backbone.', 'decoder.')`) from
         `ModelExtension.checkpoint_key_prefixes`.
@@ -526,7 +526,9 @@ class HFCheckpointWeightsLoader:
     return self._handle(path).get_tensor(key)
 
   @staticmethod
-  def _strip_prefixes(param_name: str, prefixes: Sequence[str]) -> str:
+  def _strip_prefixes(
+      param_name: str, prefixes: Sequence[str] = _WRAPPER_PREFIXES
+  ) -> str:
     """Repeatedly strips leading `prefixes` from `param_name`."""
     stripped = param_name
     while True:
@@ -631,6 +633,36 @@ class HFCheckpointWeightsLoader:
         tensor = self._resolve_single(emb_key)
         if tensor is not None:
           break
+    if (
+        tensor is None
+        and param_name.endswith("inv_freq")
+        and self.config is not None
+    ):
+      cfg = getattr(self.config, "text_config", None) or self.config
+      if (
+          cfg is not None
+          and hasattr(cfg, "hidden_size")
+          and hasattr(cfg, "num_attention_heads")
+      ):
+        rope_params = getattr(cfg, "rope_parameters", None) or {}
+        if not isinstance(rope_params, dict):
+          rope_params = {}
+        partial_rotary_factor = float(
+            rope_params.get(
+                "partial_rotary_factor",
+                getattr(cfg, "partial_rotary_factor", 1.0),
+            )
+        )
+        head_dim = getattr(cfg, "head_dim", None) or (
+            cfg.hidden_size // cfg.num_attention_heads
+        )
+        dim = int(head_dim * partial_rotary_factor)
+        base = float(
+            rope_params.get("rope_theta", getattr(cfg, "rope_theta", 10000.0))
+        )
+        tensor = 1.0 / (
+            base ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim)
+        )
     if tensor is None:
       raise KeyError(
           f"'{param_name}' not found in checkpoint {self._checkpoint_dir}."
