@@ -282,6 +282,9 @@ class CacheTest(googletest.TestCase):
         self.v_ts_idx = 2
         self.experimental_use_fp16 = False
 
+      def get_torch_dtype(self):
+        return torch.float16 if self.experimental_use_fp16 else torch.float32
+
     model_config = MockQwenConfig()
     export_config = MockExportConfig()
 
@@ -296,6 +299,13 @@ class CacheTest(googletest.TestCase):
     self.assertIsNotNone(conv_layer.recurrent_states)
     self.assertEqual(conv_layer.conv_states.shape, (1, 2 * 16 * 2 + 4 * 16, 3))
     self.assertEqual(conv_layer.recurrent_states.shape, (1, 4, 16, 16))
+    self.assertEqual(conv_layer.conv_states.dtype, torch.float32)
+    self.assertEqual(conv_layer.recurrent_states.dtype, torch.float32)
+
+    # Test that .to(torch.float16) keeps recurrent_states as float32
+    conv_layer.to(torch.float16)
+    self.assertEqual(conv_layer.conv_states.dtype, torch.float16)
+    self.assertEqual(conv_layer.recurrent_states.dtype, torch.float32)
 
     # Test update_recurrent_state
     new_r = torch.ones_like(conv_layer.recurrent_states)

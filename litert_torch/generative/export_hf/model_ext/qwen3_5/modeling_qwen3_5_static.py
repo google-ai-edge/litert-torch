@@ -124,13 +124,14 @@ def recurrent_gated_delta_rule(
     recurrent_state: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
   """Single-token recurrent gated delta rule standalone function."""
-  g_step = g_t[:, :, 0].exp().unsqueeze(-1).unsqueeze(-1)
-  beta_step = beta_t[:, :, 0].unsqueeze(-1)
-  new_recurrent_state = recurrent_state * g_step
-  kv_mem = (new_recurrent_state * k_t[:, :, 0].unsqueeze(-1)).sum(dim=-2)
-  delta = (v_t[:, :, 0] - kv_mem) * beta_step
-  new_recurrent_state = new_recurrent_state + k_t[:, :, 0].unsqueeze(-1) * delta.unsqueeze(-2)
-  core_attn_out = (new_recurrent_state * q_t[:, :, 0].unsqueeze(-1)).sum(dim=-2).unsqueeze(2)
+  g_step = g_t[:, :, 0].exp().unsqueeze(-1).unsqueeze(-1).to(torch.float32)
+  beta_step = beta_t[:, :, 0].unsqueeze(-1).to(torch.float32)
+  r_state = recurrent_state.to(torch.float32)
+  new_recurrent_state = r_state * g_step
+  kv_mem = (new_recurrent_state * k_t[:, :, 0].unsqueeze(-1).to(torch.float32)).sum(dim=-2)
+  delta = (v_t[:, :, 0].to(torch.float32) - kv_mem) * beta_step
+  new_recurrent_state = new_recurrent_state + k_t[:, :, 0].unsqueeze(-1).to(torch.float32) * delta.unsqueeze(-2)
+  core_attn_out = (new_recurrent_state * q_t[:, :, 0].unsqueeze(-1).to(torch.float32)).sum(dim=-2).unsqueeze(2).to(q_t.dtype)
   return core_attn_out, new_recurrent_state
 
 
@@ -233,7 +234,7 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
       layer_idx: int = 0,
       use_fused_gdn: bool = True,
       gdn_mode: int = 0,
-      use_fp32: bool = False,
+      use_fp32: bool = True,
   ):
     super().__init__()
     self.layer_idx = layer_idx
@@ -295,7 +296,7 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
       )
       recurrent_state = torch.zeros(
           batch_size, self.num_v_heads, self.head_k_dim, self.head_v_dim,
-          dtype=hidden_states.dtype, device=hidden_states.device
+          dtype=torch.float32, device=hidden_states.device
       )
     if getattr(self, "use_fused_gdn", True):
       mask_arg = (
@@ -378,11 +379,18 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
     act_dtype = torch.float32 if self.use_fp32 else hidden_states.dtype
     a_val = (a.to(act_dtype) + self.dt_bias.to(act_dtype)).clamp(max=50.0)
     g = -self.A_log.to(act_dtype).exp() * torch.log1p(torch.exp(a_val))
-    if self.num_v_heads // self.num_k_heads > 1:
-      query = query.repeat_interleave(
-          self.num_v_heads // self.num_k_heads, dim=2
+    g_ratio = self.num_v_heads // self.num_k_heads
+    if g_ratio > 1:
+      query = (
+          query.reshape(batch_size * seq_len, self.num_k_heads, self.head_k_dim)
+          .repeat_interleave(g_ratio, dim=1)
+          .reshape(batch_size, seq_len, self.num_v_heads, self.head_k_dim)
       )
-      key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+      key = (
+          key.reshape(batch_size * seq_len, self.num_k_heads, self.head_k_dim)
+          .repeat_interleave(g_ratio, dim=1)
+          .reshape(batch_size, seq_len, self.num_v_heads, self.head_k_dim)
+      )
 
     if valid_mask is not None:
       vm_4d = valid_mask.view(batch_size, seq_len, 1, 1).to(query.dtype)
@@ -577,6 +585,9 @@ class Qwen3_5StaticDecoderLayer(nn.Module):
           conv_kernel_size=config.linear_conv_kernel_dim,
           rms_norm_eps=config.rms_norm_eps,
           layer_idx=layer_idx,
+          use_fused_gdn=getattr(config, "use_fused_gdn", True),
+          gdn_mode=getattr(config, "gdn_mode", 0),
+          use_fp32=getattr(config, "gdn_use_fp32", True),
       )
     elif self.block_type == "full_attention":
       self.self_attn = Qwen3_5Attention(config, layer_idx)
@@ -724,7 +735,9 @@ class Qwen3_5StaticModel(nn.Module):
       hidden_states = inputs_embeds
     else:
       hidden_states = self.embed_tokens(input_ids)
-    if positions is not None and positions.ndim == 1:
+    if isinstance(self.rotary_emb, Qwen3_5StaticRotaryEmbedding):
+      pos_for_rope = positions
+    elif positions is not None and positions.ndim == 1:
       pos_for_rope = positions.view(1, 1, -1).expand(
           3, hidden_states.shape[0], -1
       )

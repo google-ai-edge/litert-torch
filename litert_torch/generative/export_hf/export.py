@@ -102,6 +102,7 @@ def export(
     single_token_embedder: bool | None = None,
     k_ts_idx: int | None = None,
     v_ts_idx: int | None = None,
+    transpose_kv_cache: bool | None = None,
     split_cache: bool | None = None,
     cache_implementation: str | None = None,
     auto_model_override: str | None = None,
