@@ -16,6 +16,7 @@
 
 from flatbuffers import flexbuffers
 from litert_torch.backend import lowerings
+from litert_torch.backend.experimental.torch_tfl import _ops as _
 from litert_torch.backend.lowerings import utils as lowering_utils
 from litert_converter.mlir import ir
 import torch
@@ -210,16 +211,11 @@ def gated_delta_net(
   conv_out = F.silu(conv_out[:, :, -seq_len:]).transpose(1, 2)
 
   if seq_len > 1 and valid_mask is not None and valid_mask.numel() > 0:
-    num_real = valid_mask[0].to(full_qkv.dtype).sum()
-    total_len = state_len + seq_len
-    row_idx = torch.arange(
-        total_len, device=full_qkv.device, dtype=full_qkv.dtype
-    ).unsqueeze(1)
-    col_target = num_real + torch.arange(
-        state_len, device=full_qkv.device, dtype=full_qkv.dtype
-    ).unsqueeze(0)
-    selector = (row_idx == col_target).to(full_qkv.dtype)
-    new_conv_state = full_qkv @ selector
+    num_real = valid_mask[0].to(torch.float32).sum().to(torch.int32)
+    indices = num_real + torch.arange(
+        state_len, device=full_qkv.device, dtype=torch.int32
+    )
+    new_conv_state = torch.ops.tfl.gather(full_qkv, indices, 2)
   else:
     new_conv_state = full_qkv[:, :, -state_len:]
 
