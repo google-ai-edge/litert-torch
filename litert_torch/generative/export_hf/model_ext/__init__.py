@@ -23,6 +23,7 @@ from litert_torch.generative.export_hf.model_ext.lfm2_vl import patch as _
 from litert_torch.generative.export_hf.model_ext.moonshine import patch as _
 from litert_torch.generative.export_hf.model_ext.parakeet import patch as _
 from litert_torch.generative.export_hf.model_ext.qwen3 import patch as _
+from litert_torch.generative.export_hf.model_ext.qwen3_5 import patch as _
 from litert_torch.generative.export_hf.model_ext.qwen3_tts import patch as _
 from litert_torch.generative.export_hf.model_ext.whisper import patch as _
 from litert_torch.generative.layers import moe
