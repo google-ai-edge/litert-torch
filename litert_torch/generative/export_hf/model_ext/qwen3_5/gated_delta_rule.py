@@ -16,6 +16,7 @@
 
 from flatbuffers import flexbuffers
 from litert_torch.backend import lowerings
+from litert_torch.backend.experimental.torch_tfl import _ops as _
 from litert_torch.backend.lowerings import utils as lowering_utils
 from litert_converter.mlir import ir
 import torch
@@ -91,7 +92,12 @@ def gated_delta_update(
 ) -> tuple[torch.Tensor, torch.Tensor]:
   """Reference PyTorch implementation of Gated Delta Update."""
   del mode
-  batch_size, num_v_heads, seq_len, _ = q_t.shape
+  batch_size, num_v_heads, seq_len, _ = v_t.shape
+  num_k_heads = q_t.shape[1]
+  if num_v_heads != num_k_heads:
+    g_ratio = num_v_heads // num_k_heads
+    q_t = q_t.repeat_interleave(g_ratio, dim=1)
+    k_t = k_t.repeat_interleave(g_ratio, dim=1)
 
   # Recurrent path
   new_recurrent_state = recurrent_state.clone()
@@ -123,8 +129,7 @@ def _gated_delta_update_fake(
 ) -> tuple[torch.Tensor, torch.Tensor]:
   """Fake implementation for shape inference."""
   del k_t, beta_t, g_t, mode
-  batch_size, num_v_heads, seq_len, _ = q_t.shape
-  head_v_dim = v_t.shape[-1]
+  batch_size, num_v_heads, seq_len, head_v_dim = v_t.shape
   out1 = torch.empty(
       (batch_size, num_v_heads, seq_len, head_v_dim),
       dtype=q_t.dtype,
@@ -206,16 +211,11 @@ def gated_delta_net(
   conv_out = F.silu(conv_out[:, :, -seq_len:]).transpose(1, 2)
 
   if seq_len > 1 and valid_mask is not None and valid_mask.numel() > 0:
-    num_real = valid_mask[0].to(full_qkv.dtype).sum()
-    total_len = state_len + seq_len
-    row_idx = torch.arange(
-        total_len, device=full_qkv.device, dtype=full_qkv.dtype
-    ).unsqueeze(1)
-    col_target = num_real + torch.arange(
-        state_len, device=full_qkv.device, dtype=full_qkv.dtype
-    ).unsqueeze(0)
-    selector = (row_idx == col_target).to(full_qkv.dtype)
-    new_conv_state = full_qkv @ selector
+    num_real = valid_mask[0].to(torch.float32).sum().to(torch.int32)
+    indices = num_real + torch.arange(
+        state_len, device=full_qkv.device, dtype=torch.int32
+    )
+    new_conv_state = torch.ops.tfl.gather(full_qkv, indices, 2)
   else:
     new_conv_state = full_qkv[:, :, -state_len:]
 
@@ -230,10 +230,6 @@ def gated_delta_net(
   act_dtype = torch.float32 if use_fp32 else b.dtype
   a_val = (a.to(act_dtype) + dt_bias.to(act_dtype)).clamp(max=50.0)
   g = -a_log.to(act_dtype).exp() * torch.log1p(torch.exp(a_val))
-
-  if num_v_heads // num_k_heads > 1:
-    query = query.repeat_interleave(num_v_heads // num_k_heads, dim=2)
-    key = key.repeat_interleave(num_v_heads // num_k_heads, dim=2)
 
   if valid_mask is not None and valid_mask.numel() > 0:
     vm_4d = valid_mask.view(batch_size, seq_len, 1, 1).to(query.dtype)
