@@ -60,7 +60,7 @@ def build_rope(
     return None, None
 
   freq_exponents = (2.0 / n_elem) * torch.arange(
-      n_elem // 2, dtype=torch.float32
+      n_elem // 2, dtype=torch.float32, device=input_pos.device
   )
   timescale = float(base) ** freq_exponents
   radians = input_pos.clone().unsqueeze(0).unsqueeze(-1) / timescale.unsqueeze(

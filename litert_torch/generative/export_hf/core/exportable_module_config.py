@@ -32,6 +32,26 @@ class ExportTask(str, enum.Enum):
   TEXT_TO_SPEECH = "text_to_speech"
 
 
+_DTYPE_ALIASES: dict[str, torch.dtype] = {
+    "float32": torch.float32,
+    "fp32": torch.float32,
+    "float16": torch.float16,
+    "fp16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "bf16": torch.bfloat16,
+}
+
+
+def _parse_dtype(dtype: str) -> torch.dtype:
+  """Parses a dtype string (e.g. "bfloat16") into a torch.dtype."""
+  parsed = _DTYPE_ALIASES.get(str(dtype).lower().strip())
+  if parsed is None:
+    raise ValueError(
+        f"Unsupported dtype: {dtype!r}. Supported: {sorted(_DTYPE_ALIASES)}."
+    )
+  return parsed
+
+
 @dataclasses.dataclass
 class ExportableModuleConfig:
   """Config for exportable modules."""
@@ -63,6 +83,9 @@ class ExportableModuleConfig:
   auto_model_override: str | None = None
   use_jinja_template: bool = True
   bundle_litert_lm: bool = True
+  # Model weight/activation dtype ("float32", "float16" or "bfloat16"). If
+  # None, the model is loaded in float32.
+  dtype: str | None = None
   # Experimental configs
   experimental_use_mixed_precision: bool = False
   experimental_use_fp16: bool = False
@@ -138,6 +161,10 @@ class ExportableModuleConfig:
   enable_min_max_calibration_update: bool = True
   ema_smoothing_factor: float = 0.1
   static_quantization_recipe: str | None = None
+
+  # LiteRT V2 export settings
+  use_v2: bool = False
+  delete_in_memory_params: bool = False
 
   extra_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
 
@@ -257,6 +284,51 @@ class ExportableModuleConfig:
       self.sliding_window_ring_buffer_size = (
           (self.sliding_window_ring_buffer_size + 31) // 32
       ) * 32
+
+    self._validate_dtype_and_v2_options()
+
+  def _validate_dtype_and_v2_options(self) -> None:
+    """Rejects unsupported or conflicting dtype / Converter V2 options."""
+    if self.dtype is not None:
+      _parse_dtype(self.dtype)  # Raises on unsupported values.
+      if self.experimental_use_fp16:
+        raise ValueError(
+            "`dtype` and `experimental_use_fp16` cannot be set together."
+        )
+    if self.delete_in_memory_params and not self.use_v2:
+      raise ValueError("`delete_in_memory_params` requires `use_v2=True`.")
+    if not self.use_v2:
+      return
+    unsupported = []
+    if self.task != ExportTask.TEXT_GENERATION:
+      unsupported.append(f"task={self.task}")
+    if self.split_cache:
+      unsupported.append("split_cache")
+    if self.moe_exports_implementation:
+      unsupported.append("moe_exports_implementation")
+    if self.experimental_use_mixed_precision:
+      unsupported.append("experimental_use_mixed_precision")
+    if unsupported:
+      raise ValueError(
+          "`use_v2=True` does not support: " + ", ".join(unsupported)
+      )
+
+  def get_torch_dtype(self) -> torch.dtype:
+    """Returns the dtype the source model is loaded and exported in."""
+    if self.dtype is None:
+      return torch.float32
+    return _parse_dtype(self.dtype)
+
+  def get_cache_dtype(self) -> torch.dtype:
+    """Returns the KV cache dtype."""
+    if self.experimental_use_fp16:
+      return torch.float16
+    return self.get_torch_dtype()
+
+  @property
+  def is_16bit(self) -> bool:
+    """Returns whether the exported model uses 16-bit activations."""
+    return self.get_cache_dtype() in (torch.float16, torch.bfloat16)
 
   def __repr__(self):
     """Returns a pretty-printed string representation of the config."""

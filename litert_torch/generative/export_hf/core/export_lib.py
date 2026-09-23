@@ -31,6 +31,7 @@ from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.core import exportable_module_config
 from litert_torch.generative.export_hf.core import patches as _
 from litert_torch.generative.export_hf.core import utils
+from litert_torch.generative.export_hf.core import weights_loader as weights_loader_lib
 from litert_torch.generative.export_hf.core.external_emb import exportable_module as external_emb_module
 from litert_torch.generative.export_hf.core.external_rope import exportable_module as external_rope_module
 from litert_torch.generative.export_hf.core.external_rope import preprocess_model as external_rope_preprocess_model
@@ -69,6 +70,9 @@ class SourceModelArtifacts:
 
   image_processor: transformers.AutoImageProcessor | None = None
   feature_extractor: transformers.AutoFeatureExtractor | None = None
+  # Set for Converter V2 export: the model is on `meta` and weights are
+  # streamed from the checkpoint at serialization time.
+  weights_loader: weights_loader_lib.HFCheckpointWeightsLoader | None = None
 
 
 @dataclasses.dataclass
@@ -338,21 +342,44 @@ def load_model(
   if auto_model_override is not None:
     auto_model_cls = transformers.__dict__[auto_model_override]
 
+  weights_loader = None
+  model_dtype = export_config.get_torch_dtype()
   with model_ext_patches.get_patch_context(config.model_type):
-    if export_config.use_random_weights:
+    if export_config.use_v2 and not export_config.use_random_weights:
+      with weights_loader_lib.init_params_on_meta():
+        model = auto_model_cls.from_config(
+            config=config,
+            torch_dtype=model_dtype,
+            trust_remote_code=trust_remote_code,
+        )
+      input_emb = model.get_input_embeddings()
+      output_emb = model.get_output_embeddings()
+      weights_loader = weights_loader_lib.HFCheckpointWeightsLoader(
+          model_path,
+          tie_word_embeddings=(
+              input_emb is not None
+              and output_emb is not None
+              and output_emb.weight is input_emb.weight
+          ),
+      )
+    elif export_config.use_random_weights:
       model = auto_model_cls.from_config(
           config=config,
-          torch_dtype=torch.float32,
+          torch_dtype=model_dtype,
           trust_remote_code=trust_remote_code,
       )
     else:
       model = auto_model_cls.from_pretrained(
           model_path,
           config=config,
-          torch_dtype=torch.float32,
+          torch_dtype=model_dtype,
           trust_remote_code=trust_remote_code,
       )
-    model = model.to(torch.float32)
+    if model_dtype == torch.float32:
+      model = model.to(model_dtype)
+    else:
+      # Keep float32 buffers (e.g. RoPE inv_freq) in float32.
+      model = weights_loader_lib.cast_params_(model, model_dtype)
 
   if task == ExportTask.TEXT_GENERATION:
     model.generation_config.cache_implementation = 'static'
@@ -415,7 +442,38 @@ def load_model(
       tokenizer=tokenizer,  # pyrefly: ignore[bad-argument-type]
       image_processor=image_processor,
       feature_extractor=feature_extractor,
+      weights_loader=weights_loader,
   )
+
+
+def _v2_convert_kwargs(
+    export_config: exportable_module.ExportableModuleConfig,
+    weights_loader: weights_loader_lib.WeightsLoader | None,
+    output_path: str,
+    delete_in_memory_params: bool = False,
+) -> dict[str, Any]:
+  """Returns extra `Converter.convert()` kwargs for Converter V2 export.
+
+  Args:
+    export_config: The export config.
+    weights_loader: Streams weights for meta-device parameters, if any.
+    output_path: Path of the `.tflite` file Converter V2 writes.
+    delete_in_memory_params: Whether to free in-memory parameters once they
+      are serialized. Only safe if no later task needs them.
+
+  Returns:
+    An empty dict if V2 is disabled.
+  """
+  if not export_config.use_v2:
+    return {}
+  return {
+      'use_v2': True,
+      'delete_in_memory_params': delete_in_memory_params,
+      'allow_reuse_intermediates': False,
+      'weights_loader': weights_loader,
+      'export_dir': os.path.splitext(output_path)[0] + '_intermediates',
+      'output_file_path': output_path,
+  }
 
 
 def update_export_config(
@@ -482,6 +540,7 @@ def export_text_prefill_decode_model(
     text_model_config = source_model_artifacts.text_model_config
     quantization_recipe = export_config.quantization_recipe
     work_dir = export_config.work_dir
+    assert work_dir is not None
     has_dynamic_shape = (
         export_config.cache_length_dim is not None
         or export_config.prefill_length_dim is not None
@@ -500,7 +559,7 @@ def export_text_prefill_decode_model(
     else:
       model.set_attn_implementation('lrt_transposed_attention')
 
-    converter = converter_utils.Converter()
+    signatures = []
     assert export_config.cache_lengths is not None
     for cache_len in export_config.cache_lengths:
       iter_config = dataclasses.replace(export_config, cache_length=cache_len)
@@ -513,59 +572,77 @@ def export_text_prefill_decode_model(
       decode_module = decode_module_cls(
           model, iter_config, source_model_artifacts
       )
-      modules_to_export = [
-          (
-              prefill_module,
-              prefill_module.get_sample_inputs(text_model_config),
-          ),
-          (
-              decode_module,
-              decode_module.get_sample_inputs(text_model_config),
-          ),
-      ]
-      for module, sample_inputs in modules_to_export:
-        for signature_name, (inputs, dynamic_shapes) in sample_inputs.items():
+      for module in (prefill_module, decode_module):
+        for signature_name, (inputs, dynamic_shapes) in module.get_sample_inputs(
+            text_model_config
+        ).items():
           sig_name = signature_name
           if len(export_config.cache_lengths) > 1:
             sig_name = f'{signature_name}_cache_{cache_len}'
+          signatures.append((sig_name, module, inputs, dynamic_shapes))
 
-          if has_dynamic_shape:
-            ep = torch.export.export(
-                module,
-                args=(),
-                kwargs=inputs,
-                dynamic_shapes=dynamic_shapes,
-            )
-            ep = fx_infra.safe_run_decompositions(
-                ep, fx_infra.decomp.pre_lower_decomp()
-            )
-            ep = ep.run_decompositions(torch_tfl.decomps)
-            converter.add_signature(
-                sig_name,
-                ep.module(),
-                sample_kwargs=inputs,
-                dynamic_shapes=dynamic_shapes,
-            )
-          else:
-            converter.add_signature(
-                sig_name,
-                module.eval(),
-                sample_kwargs=inputs,
-            )
+    weights_loader = source_model_artifacts.weights_loader
+    signature_modules = list({id(s[1]): s[1] for s in signatures}.values())
+    model_path = os.path.join(work_dir, 'model.tflite')  # pyrefly: ignore[no-matching-overload]
+    with contextlib.ExitStack() as stack:
+      if weights_loader is not None:
+        # Parameters are on meta, so tracing runs on meta: move real buffers
+        # (e.g. RoPE inv_freq) there too and serve their values to the
+        # converter through the weights loader.
+        buffer_values = stack.enter_context(
+            weights_loader_lib.buffers_on_meta(*signature_modules)
+        )
+        weights_loader = weights_loader_lib.with_tensors(
+            weights_loader, buffer_values
+        )
+      converter = converter_utils.Converter()
+      for sig_name, module, inputs, dynamic_shapes in signatures:
+        if has_dynamic_shape:
+          ep = torch.export.export(
+              module,
+              args=(),
+              kwargs=inputs,
+              dynamic_shapes=dynamic_shapes,
+          )
+          ep = fx_infra.safe_run_decompositions(
+              ep, fx_infra.decomp.pre_lower_decomp()
+          )
+          ep = ep.run_decompositions(torch_tfl.decomps)
+          converter.add_signature(
+              sig_name,
+              ep.module(),
+              sample_kwargs=inputs,
+              dynamic_shapes=dynamic_shapes,
+          )
+        else:
+          converter.add_signature(
+              sig_name,
+              module.eval(),
+              sample_kwargs=inputs,
+          )
 
-    with patch_builtin_tuple_for_export():
-      lrt_model = converter.convert(
-          lightweight_conversion=export_config.experimental_lightweight_conversion,
-          strict_export=False,
-      )
+      with patch_builtin_tuple_for_export():
+        lrt_model = converter.convert(
+            lightweight_conversion=export_config.experimental_lightweight_conversion,
+            strict_export=False,
+            **_v2_convert_kwargs(
+                export_config,
+                weights_loader,
+                model_path,
+                delete_in_memory_params=export_config.delete_in_memory_params,
+            ),
+        )
 
-  lrt_model = mu_pass_lib.update_model(lrt_model)  # pyrefly: ignore[bad-argument-type]
-  if export_config.experimental_use_mixed_precision:
-    print('Applying mixed precision to model...')
-    lrt_model = mu_pass_lib.apply_mixed_precision(lrt_model)
-
-  model_path = os.path.join(work_dir, 'model.tflite')  # pyrefly: ignore[no-matching-overload]
-  lrt_model.export(model_path)
+  if export_config.use_v2:
+    # Converter V2 writes `model_path` directly. The mu optimization pass needs
+    # an in-memory LiteRTModel and is not applied.
+    print('Converter V2: skipping mu_pass_lib.update_model.')
+  else:
+    lrt_model = mu_pass_lib.update_model(lrt_model)  # pyrefly: ignore[bad-argument-type]
+    if export_config.experimental_use_mixed_precision:
+      print('Applying mixed precision to model...')
+      lrt_model = mu_pass_lib.apply_mixed_precision(lrt_model)
+    lrt_model.export(model_path)
 
   del lrt_model
   del converter
@@ -655,6 +732,7 @@ def export_embedder_model(
   text_model_config = source_model_artifacts.text_model_config
   quantization_recipe = export_config.quantization_recipe
   work_dir = export_config.work_dir
+  assert work_dir is not None
 
   model_type = (
       source_model_artifacts.text_model_config.model_type
@@ -664,8 +742,9 @@ def export_embedder_model(
   )
   # Patch model instance for export.
   with model_ext_patches.patch_model(model, model_type, export_config):
+    embedding = model.get_input_embeddings()
     embedder_module = external_emb_module.LiteRTExportableModuleForEmbedder(
-        model.get_input_embeddings()
+        embedding
     )
     converter = converter_utils.Converter()
     sample_inputs = embedder_module.get_sample_inputs(
@@ -677,12 +756,19 @@ def export_embedder_model(
           embedder_module.eval(),
           sample_kwargs=sample_inputs,
       )
+    weights_loader = source_model_artifacts.weights_loader
+    if weights_loader is not None:
+      weights_loader = weights_loader_lib.submodule_weights_loader(
+          weights_loader, source_model_artifacts.model, embedding
+      )
+    model_path = os.path.join(work_dir, 'embedder.tflite')  # pyrefly: ignore[no-matching-overload]
     lrt_model = converter.convert(
         lightweight_conversion=export_config.experimental_lightweight_conversion,
         strict_export=False,
+        **_v2_convert_kwargs(export_config, weights_loader, model_path),
     )
-  model_path = os.path.join(work_dir, 'embedder.tflite')  # pyrefly: ignore[no-matching-overload]
-  lrt_model.export(model_path)
+  if not export_config.use_v2:
+    lrt_model.export(model_path)
   quantization_recipe_list = (
       quantization_recipe.split(',') if quantization_recipe else [None]
   )
@@ -1182,6 +1268,11 @@ def export_additional_models(
   exportable_model_cls_dict = model_ext_exportables.get_additional_exportables(
       source_model_artifacts.model_config
   )
+  if exportable_model_cls_dict and export_config.use_v2:
+    raise NotImplementedError(
+        'Additional models are not supported with use_v2=True:'
+        f' {sorted(exportable_model_cls_dict)}.'
+    )
   for name, exportable_module_cls in exportable_model_cls_dict.items():
     with progress.task(f'Export {name} model'):
       exported_model_artifacts = export_additional_models_impl(

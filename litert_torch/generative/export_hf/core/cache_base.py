@@ -77,6 +77,13 @@ class LiteRTLMCacheMixin(cache_utils.Cache, abc.ABC):
       assert isinstance(layer, LiteRTLMCacheLayerMixin)
       layer.set_cache_runtime_args(cache_runtime_args)
 
+  def to(self, *args, **kwargs) -> "LiteRTLMCacheMixin":
+    """Moves all cache layers to the specified device/dtype."""
+    for layer in self.layers:
+      if hasattr(layer, "to"):
+        layer.to(*args, **kwargs)
+    return self
+
 
 CACHE_REGISTRY: dict[str, type[LiteRTLMCacheMixin]] = {}
 
