@@ -57,6 +57,7 @@ class ExportableModuleConfig:
   single_token_embedder: bool = False
   k_ts_idx: int | None = None
   v_ts_idx: int | None = None
+  transpose_kv_cache: bool | None = None
   split_cache: bool = False
   cache_implementation: str | None = None
   auto_model_override: str | None = None
@@ -166,7 +167,7 @@ class ExportableModuleConfig:
     if self.k_ts_idx is None:
       self.k_ts_idx = 2
     if self.v_ts_idx is None:
-      self.v_ts_idx = 3
+      self.v_ts_idx = 2 if self.transpose_kv_cache is False else 3
 
     if isinstance(self.prefill_lengths, int):
       self.prefill_lengths = [self.prefill_lengths]
