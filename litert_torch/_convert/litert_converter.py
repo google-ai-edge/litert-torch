@@ -109,6 +109,9 @@ def exported_programs_to_flatbuffer(
     lightweight_conversion: bool = False,
     enable_x64: bool = True,
     runtime_constant_folding: bool | None = None,
+    experimental_skip_optimize_pass: bool = False,
+    experimental_optimize_disabled_patterns: list[str] | None = None,
+    experimental_optimize_enabled_patterns: list[str] | None = None,
 ) -> LazyModelExporter:
   """Convert ExportedPrograms to a LiteRT model."""
   if not exported_programs:
@@ -180,6 +183,20 @@ def exported_programs_to_flatbuffer(
   # litert-torch handles inf clamping before the MLIR conversion.
   config.canonicalizing_inf_as_min_max_float = False
   safe_set_config("enable_x64", enable_x64)
+  # Experimental knobs for the tfl-optimize pass: skip it entirely, or filter
+  # individual rewrite patterns inside it by debug-name substring. Ignored
+  # (with hasattr guard) on litert-converter versions without support.
+  safe_set_config("skip_optimize_pass", experimental_skip_optimize_pass)
+  if experimental_optimize_disabled_patterns is not None:
+    safe_set_config(
+        "optimize_disabled_patterns",
+        list(experimental_optimize_disabled_patterns),
+    )
+  if experimental_optimize_enabled_patterns is not None:
+    safe_set_config(
+        "optimize_enabled_patterns",
+        list(experimental_optimize_enabled_patterns),
+    )
 
   # Run LiteRT converter passes.
   with ir_context, progress.task("Run LiteRT Converter Passes"):
@@ -212,3 +229,70 @@ def exported_programs_to_flatbuffer(
       exporter = LazyModelExporter(content=model_bytes)
 
   return exporter
+
+
+def run_selective_tfl_optimize(
+    model: model_lib.LiteRTModel,
+    *,
+    enabled_patterns: list[str] | None = None,
+    disabled_patterns: list[str] | None = None,
+    list_patterns: bool = False,
+) -> None:
+  """Runs the `tfl-optimize` pass standalone on a not-yet-serialized model.
+
+  This is meant to be combined with
+  `convert(..., experimental_skip_optimize_pass=True)`: convert without the
+  optimize pass, then apply only the optimizations you want. The model's MLIR
+  module is mutated in place; a subsequent `model.export(...)` or
+  `model.model_content()` serializes the optimized module.
+
+  Patterns are matched by substring against their MLIR debug names (the C++
+  class name of the pattern, or the TableGen def name for generated patterns).
+  Use `list_patterns=True` to print every pattern name and its filter verdict
+  to stderr.
+
+  Args:
+    model: A `LiteRTModel` fresh out of conversion (not yet serialized to
+      bytes/file, and not loaded from a file).
+    enabled_patterns: If non-empty, run ONLY patterns whose debug name contains
+      one of these substrings.
+    disabled_patterns: Skip patterns whose debug name contains any of these
+      substrings.
+    list_patterns: Print all pattern debug names with keep/skip verdicts.
+
+  Raises:
+    ValueError: If the model has already been serialized (its MLIR module is
+      gone), or the installed litert-converter does not support tfl-optimize
+      pass options.
+  """
+  exporter = model._exporter  # pylint: disable=protected-access
+  if not isinstance(exporter, LazyModelExporter) or exporter.module is None:
+    raise ValueError(
+        "run_selective_tfl_optimize requires a freshly converted model whose"
+        " MLIR module has not been serialized yet. Run it right after"
+        " convert(), before export()/model_content()/inference, and note that"
+        " quantized conversions serialize eagerly."
+    )
+
+  options = []
+  if enabled_patterns:
+    options.append("enabled-patterns=" + ",".join(enabled_patterns))
+  if disabled_patterns:
+    options.append("disabled-patterns=" + ",".join(disabled_patterns))
+  if list_patterns:
+    options.append("list-patterns=true")
+  options_text = "{" + " ".join(options) + "}" if options else ""
+  pipeline = f"builtin.module(func.func(tfl-optimize{options_text}))"
+
+  module = exporter.module
+  module_op = module.operation if isinstance(module, ir.Module) else module
+  with module_op.context, progress.task("Selective TFL Optimize"):
+    try:
+      pass_manager = passmanager.PassManager.parse(pipeline)
+    except ValueError as e:
+      raise ValueError(
+          "The installed litert-converter does not support tfl-optimize"
+          " pattern filtering options (requires a build with"
+          " enabled-patterns/disabled-patterns support)."
+      ) from e
+    pass_manager.run(module_op)
