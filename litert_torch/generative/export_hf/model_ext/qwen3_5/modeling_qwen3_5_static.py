@@ -378,11 +378,18 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
     act_dtype = torch.float32 if self.use_fp32 else hidden_states.dtype
     a_val = (a.to(act_dtype) + self.dt_bias.to(act_dtype)).clamp(max=50.0)
     g = -self.A_log.to(act_dtype).exp() * torch.log1p(torch.exp(a_val))
-    if self.num_v_heads // self.num_k_heads > 1:
-      query = query.repeat_interleave(
-          self.num_v_heads // self.num_k_heads, dim=2
+    g_ratio = self.num_v_heads // self.num_k_heads
+    if g_ratio > 1:
+      query = (
+          query.reshape(batch_size * seq_len, self.num_k_heads, self.head_k_dim)
+          .repeat_interleave(g_ratio, dim=1)
+          .reshape(batch_size, seq_len, self.num_v_heads, self.head_k_dim)
       )
-      key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+      key = (
+          key.reshape(batch_size * seq_len, self.num_k_heads, self.head_k_dim)
+          .repeat_interleave(g_ratio, dim=1)
+          .reshape(batch_size, seq_len, self.num_v_heads, self.head_k_dim)
+      )
 
     if valid_mask is not None:
       vm_4d = valid_mask.view(batch_size, seq_len, 1, 1).to(query.dtype)
@@ -577,6 +584,8 @@ class Qwen3_5StaticDecoderLayer(nn.Module):
           conv_kernel_size=config.linear_conv_kernel_dim,
           rms_norm_eps=config.rms_norm_eps,
           layer_idx=layer_idx,
+          use_fused_gdn=getattr(config, "use_fused_gdn", True),
+          gdn_mode=getattr(config, "gdn_mode", 0),
       )
     elif self.block_type == "full_attention":
       self.self_attn = Qwen3_5Attention(config, layer_idx)
@@ -724,7 +733,9 @@ class Qwen3_5StaticModel(nn.Module):
       hidden_states = inputs_embeds
     else:
       hidden_states = self.embed_tokens(input_ids)
-    if positions is not None and positions.ndim == 1:
+    if isinstance(self.rotary_emb, Qwen3_5StaticRotaryEmbedding):
+      pos_for_rope = positions
+    elif positions is not None and positions.ndim == 1:
       pos_for_rope = positions.view(1, 1, -1).expand(
           3, hidden_states.shape[0], -1
       )
