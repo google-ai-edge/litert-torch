@@ -12,6 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Experimental features for LiteRT Torch."""
+"""Converter V2 experimental API for LiteRT Torch."""
 
-from litert_torch.experimental import converter_v2
+from litert_torch._convert.converter_v2 import convert
+from litert_torch._convert.converter_v2 import convert_signatures_v2
+from litert_torch._convert.converter_v2 import Converter
+from litert_torch._convert.converter_v2 import export_to_dir
+from litert_torch._convert.converter_v2 import ParameterRegistry
+from litert_torch._convert.converter_v2 import signature
+
+__all__ = [
+    "convert",
+    "convert_signatures_v2",
+    "Converter",
+    "export_to_dir",
+    "ParameterRegistry",
+    "signature",
+]

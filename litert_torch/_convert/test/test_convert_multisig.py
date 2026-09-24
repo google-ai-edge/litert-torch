@@ -15,6 +15,7 @@
 """Tests for multi-signature conversion."""
 
 import litert_torch
+from litert_torch import testing
 from litert_torch.testing import model_coverage
 import torch
 from torch import nn
@@ -58,7 +59,8 @@ class FullyConvModel(nn.Module):
     return x
 
 
-class TestConvertMultiSignature(googletest.TestCase):
+@testing.parameterized_class(testing.V1_V2_PARAMETERS)
+class TestConvertMultiSignature(testing.V1V2TestCase):
   """Tests conversion of various modules through multi-signature conversion."""
 
   def setUp(self):
