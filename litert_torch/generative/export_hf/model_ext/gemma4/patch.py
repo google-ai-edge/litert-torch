@@ -342,6 +342,9 @@ try:
       )
       self.scale = torch.nn.Parameter(torch.ones(self.hidden_size))
       self.per_expert_scale = torch.nn.Parameter(torch.ones(config.num_experts))
+      # Cleared by `moe.bind_per_expert_scale` when the experts are lowered to
+      # the `moe` custom op, which applies `per_expert_scale` in the delegate.
+      self.fold_per_expert_scale = True
 
     def forward(
         self, hidden_states: torch.Tensor
@@ -359,22 +362,24 @@ try:
           dim=-1,
       )  # both [B*S, K]
 
-      expert_ids = torch.arange(
-          self.config.num_experts,
-          dtype=top_k_index.dtype,
-          device=top_k_index.device,
-      )
-
-      match_mask = top_k_index.unsqueeze(-1) == expert_ids
-      float_mask = match_mask.to(self.per_expert_scale.dtype)
-      scales = torch.matmul(float_mask, self.per_expert_scale)
-
       # Normalize the top-k weights so they sum to 1 per token
       top_k_weights /= top_k_weights.sum(dim=-1, keepdim=True)
-      top_k_weights = top_k_weights * scales
+
+      if self.fold_per_expert_scale:
+        # Dynamic indexing (`per_expert_scale[top_k_index]`) is not exportable,
+        # so gather the scales with a one-hot matmul instead.
+        expert_ids = torch.arange(
+            self.config.num_experts,
+            dtype=top_k_index.dtype,
+            device=top_k_index.device,
+        )
+
+        match_mask = top_k_index.unsqueeze(-1) == expert_ids
+        float_mask = match_mask.to(self.per_expert_scale.dtype)
+        scales = torch.matmul(float_mask, self.per_expert_scale)
+        top_k_weights = top_k_weights * scales
 
       return router_probabilities, top_k_weights, top_k_index
-
 
   @patches_lib.register_model_patch(["gemma4", "gemma4_text"])
   @contextlib.contextmanager

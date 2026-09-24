@@ -472,6 +472,47 @@ class PatchTest(parameterized.TestCase):
         f"Max diff: {max_diff}",
     )
 
+  def test_bind_per_expert_scale_matches_router_folding(self):
+    config = _get_dummy_gemma4_text_config()
+    config.num_experts = 4
+    config.top_k_experts = 2
+    config.moe_intermediate_size = 32
+
+    torch.manual_seed(42)
+    block = torch.nn.Module()
+    block.router = patch.LiteRTGemma4TextRouter(config)
+    block.experts = modeling_gemma4.Gemma4TextExperts(config)
+    block.experts.config = config
+    with torch.no_grad():
+      block.experts.gate_up_proj.normal_()
+      block.experts.down_proj.normal_()
+      block.router.per_expert_scale.uniform_(0.5, 1.5)
+
+    hidden_states = torch.randn(6, config.hidden_size)
+
+    with torch.no_grad():
+      # Baseline: the router folds `per_expert_scale` into `top_k_weights` and
+      # the custom op receives an all-ones scale.
+      _, folded_weights, top_k_index = block.router(hidden_states)
+      expected_output = moe.litert_moe_experts_forward(
+          block.experts, hidden_states, top_k_index, folded_weights
+      )
+
+      moe.bind_per_expert_scale(block)
+      self.assertFalse(block.router.fold_per_expert_scale)
+
+      _, unfolded_weights, top_k_index = block.router(hidden_states)
+      actual_output = moe.litert_moe_experts_forward(
+          block.experts, hidden_states, top_k_index, unfolded_weights
+      )
+
+    self.assertFalse(torch.allclose(folded_weights, unfolded_weights))
+    self.assertTrue(
+        torch.allclose(expected_output, actual_output, rtol=1e-5, atol=1e-5),
+        "Per-expert scale binding changed the MoE output.\n"
+        f"Max diff: {(expected_output - actual_output).abs().max().item()}",
+    )
+
 
 if __name__ == "__main__":
   googletest.main()

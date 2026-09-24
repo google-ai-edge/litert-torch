@@ -407,6 +407,7 @@ def load_model(
     model = pre_split_model_experts(model)
   elif export_config.moe_exports_implementation == 'litert_moe':
     model = pre_flatten_model_experts(model)
+    model = moe.bind_per_expert_scale(model)
 
   return SourceModelArtifacts(
       model=model,

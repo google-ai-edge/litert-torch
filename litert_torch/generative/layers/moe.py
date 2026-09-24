@@ -56,6 +56,58 @@ def flatten_expert_scale(scale: torch.Tensor) -> torch.Tensor:
   )
 
 
+# Attribute that holds the router's `per_expert_scale` parameter on the sibling
+# experts module. The parameter is wrapped in a list so that
+# `torch.nn.Module.__setattr__` does not re-register it on the experts module,
+# which would duplicate it in the state dict and emit a second constant at
+# export time.
+_PER_EXPERT_SCALE_ATTR = "_litert_per_expert_scale"
+
+
+def bind_per_expert_scale(model: torch.nn.Module) -> torch.nn.Module:
+  """Routes `router.per_expert_scale` into the `moe` custom op input.
+
+  The router folds the per-expert scale into `top_k_weights` with a one-hot
+  matmul against the routing indices, which materializes an
+  `[tokens, top_k, num_experts]` tensor for every MoE layer. The `moe` custom op
+  already takes the full per-expert scale vector as a dedicated input and
+  applies it inside the GPU and CPU delegate kernels, so the host-side matmul is
+  pure overhead. Bind each experts module to its sibling router's scale and turn
+  off the router-side folding so the scale is applied exactly once.
+
+  Args:
+    model: Model to bind. Modules owning both a `router` and an `experts` child
+      are treated as MoE blocks.
+
+  Returns:
+    The same model, mutated in place.
+  """
+  for module in model.modules():
+    router = getattr(module, "router", None)
+    experts = getattr(module, "experts", None)
+    if router is None or experts is None:
+      continue
+    per_expert_scale = getattr(router, "per_expert_scale", None)
+    if per_expert_scale is None:
+      continue
+    setattr(experts, _PER_EXPERT_SCALE_ATTR, [per_expert_scale])
+    router.fold_per_expert_scale = False
+  return model
+
+
+def _per_expert_scale_input(experts: torch.nn.Module) -> torch.Tensor:
+  """Returns the `[1, 1, 1, num_experts]` scale for the `moe` custom op."""
+  bound = getattr(experts, _PER_EXPERT_SCALE_ATTR, None)
+  if bound is not None:
+    return bound[0].reshape(1, 1, 1, experts.num_experts).to(torch.float32)
+  pre_flattened_scale = getattr(experts, "per_expert_scale", None)
+  if pre_flattened_scale is not None:
+    return pre_flattened_scale
+  # The router still folds the scale into `top_k_weights`, so the custom op
+  # input must be a no-op to avoid applying the scale twice.
+  return torch.ones((1, 1, 1, experts.num_experts), dtype=torch.float32)
+
+
 def _restore_src_rank(src: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
   if src.dim() == 4:
     return output.reshape(src.shape)
@@ -452,11 +504,6 @@ def litert_moe_experts_forward(self, hidden_states, top_k_index, top_k_weights):
     gate_weight = self.flattened_gate_weight
     ff1_weight = self.flattened_ff1_weight
     linear_weight = self.flattened_linear_weight
-    per_expert_scale = getattr(self, "per_expert_scale", None)
-    if per_expert_scale is None:
-      per_expert_scale = torch.ones(
-          (1, 1, 1, self.num_experts), dtype=torch.float32
-      )
   else:
     if hasattr(self, "gate_up_proj"):
       gate_w, ff1_w = self.gate_up_proj.chunk(2, dim=1)
@@ -465,10 +512,7 @@ def litert_moe_experts_forward(self, hidden_states, top_k_index, top_k_weights):
     gate_weight = flatten_expert_weight(gate_w)
     ff1_weight = flatten_expert_weight(ff1_w)
     linear_weight = flatten_expert_weight(self.down_proj)
-    per_expert_scale = torch.ones(
-        (1, 1, 1, self.num_experts), dtype=torch.float32
-    )
-
+  per_expert_scale = _per_expert_scale_input(self)
   output = moe_experts(
       hidden_states.reshape(1, -1, self.hidden_dim),
       top_k_weights.reshape(1, -1, self.config.top_k_experts),

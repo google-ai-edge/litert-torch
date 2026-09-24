@@ -143,5 +143,55 @@ class MoeExpertsTest(googletest.TestCase):
     self.assertNotIn("odml.moe_experts", ir_text)
 
 
+class BindPerExpertScaleTest(googletest.TestCase):
+
+  class _Router(torch.nn.Module):
+
+    def __init__(self, num_experts):
+      super().__init__()
+      self.per_expert_scale = torch.nn.Parameter(
+          torch.arange(num_experts, dtype=torch.float32)
+      )
+      self.fold_per_expert_scale = True
+
+  class _Experts(torch.nn.Module):
+
+    def __init__(self, num_experts):
+      super().__init__()
+      self.num_experts = num_experts
+
+  def _build_block(self, num_experts):
+    block = torch.nn.Module()
+    block.router = self._Router(num_experts)
+    block.experts = self._Experts(num_experts)
+    return block
+
+  def test_unbound_experts_get_a_no_op_scale(self):
+    block = self._build_block(3)
+
+    self.assertTrue(
+        torch.equal(
+            moe._per_expert_scale_input(block.experts),  # pylint: disable=protected-access
+            torch.ones(1, 1, 1, 3),
+        )
+    )
+
+  def test_bind_per_expert_scale(self):
+    block = self._build_block(3)
+
+    moe.bind_per_expert_scale(block)
+
+    self.assertFalse(block.router.fold_per_expert_scale)
+    self.assertTrue(
+        torch.equal(
+            moe._per_expert_scale_input(block.experts),  # pylint: disable=protected-access
+            torch.arange(3, dtype=torch.float32).reshape(1, 1, 1, 3),
+        )
+    )
+    # The scale must not be re-registered on the experts module; that would
+    # duplicate it in the state dict and emit it twice at export time.
+    self.assertEmpty(dict(block.experts.named_parameters()))
+
+
 if __name__ == "__main__":
   googletest.main()
