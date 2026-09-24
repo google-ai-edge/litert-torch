@@ -30,6 +30,28 @@ GENERIC_DEFAULT_CONFIGS = {
                 '--qualcomm_log_level=off',
             ],
         },
+        'text_encoder': {
+            'compile': True,
+            'flags': [
+                '--qualcomm_optimization_level=O3',
+                '--qualcomm_log_level=off',
+            ],
+        },
+        'audio_encoder_hw': {
+            'compile': True,
+            'flags': [
+                '--qualcomm_optimization_level=O3',
+                '--qualcomm_log_level=off',
+            ],
+        },
+        'vision_encoder': {
+            'compile': False,
+            'flags': [
+                '--qualcomm_optimization_level=O3',
+                '--qualcomm_log_level=off',
+                '--qualcomm_htp_p_point=22',
+            ],
+        },
     },
     'mediatek': {
         'prefill_decode': {
@@ -39,6 +61,35 @@ GENERIC_DEFAULT_CONFIGS = {
                 '--mediatek_performance_mode_type=turbo_boost',
                 '--mediatek_enable_l1_cache_optimizations=true',
                 '--mediatek_optimization_hint=low_latency',
+            ],
+        },
+        'text_encoder': {
+            'compile': True,
+            'flags': [
+                '--mediatek_enable_gemma_compiler_optimizations=true',
+                '--mediatek_performance_mode_type=turbo_boost',
+                '--mediatek_enable_l1_cache_optimizations=true',
+                '--mediatek_optimization_hint=low_latency',
+                '--mediatek_option_bundle=gemma-decode',
+            ],
+        },
+        'audio_encoder_hw': {
+            'compile': False,
+            'flags': [
+                '--mediatek_enable_gemma_compiler_optimizations=true',
+                '--mediatek_performance_mode_type=turbo_boost',
+                '--mediatek_enable_l1_cache_optimizations=true',
+                '--mediatek_optimization_hint=low_latency',
+            ],
+        },
+        'vision_encoder': {
+            'compile': True,
+            'flags': [
+                '--mediatek_enable_gemma_compiler_optimizations=true',
+                '--mediatek_performance_mode_type=turbo_boost',
+                '--mediatek_enable_l1_cache_optimizations=true',
+                '--mediatek_optimization_hint=low_latency',
+                '--mediatek_option_bundle=gemma-decode',
             ],
         },
     },

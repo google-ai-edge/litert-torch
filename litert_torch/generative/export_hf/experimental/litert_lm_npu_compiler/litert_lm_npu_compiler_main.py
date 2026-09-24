@@ -18,9 +18,5 @@ from absl import app
 from litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler import litert_lm_npu_compiler
 
 
-def main(argv):
-  app.run(litert_lm_npu_compiler.main, argv=argv)
-
-
 if __name__ == '__main__':
-  app.run(main)
+  app.run(litert_lm_npu_compiler.main)
