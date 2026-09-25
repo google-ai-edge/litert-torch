@@ -305,6 +305,9 @@ def apply_qwen3_5_model_patches(
   gdn_mode = extra_kwargs.get(
       "gdn_mode", getattr(export_config, "gdn_mode", 0)
   )
+  gdn_use_fp32 = extra_kwargs.get(
+      "gdn_use_fp32", getattr(export_config, "gdn_use_fp32", True)
+  )
 
   replaced_modules: list[tuple[torch.nn.Module, str, torch.nn.Module]] = []
 
@@ -312,6 +315,8 @@ def apply_qwen3_5_model_patches(
     if hasattr(module, "use_fused_gdn") and hasattr(module, "gdn_mode"):
       module.use_fused_gdn = bool(use_fused_gdn)
       module.gdn_mode = int(gdn_mode)
+    if hasattr(module, "use_fp32"):
+      module.use_fp32 = bool(gdn_use_fp32)
     for child_name, child in module.named_children():
       if isinstance(
           child,
