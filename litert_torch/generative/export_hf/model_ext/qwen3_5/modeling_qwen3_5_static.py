@@ -124,13 +124,18 @@ def recurrent_gated_delta_rule(
     recurrent_state: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
   """Single-token recurrent gated delta rule standalone function."""
-  g_step = g_t[:, :, 0].exp().unsqueeze(-1).unsqueeze(-1)
-  beta_step = beta_t[:, :, 0].unsqueeze(-1)
-  new_recurrent_state = recurrent_state * g_step
-  kv_mem = (new_recurrent_state * k_t[:, :, 0].unsqueeze(-1)).sum(dim=-2)
-  delta = (v_t[:, :, 0] - kv_mem) * beta_step
-  new_recurrent_state = new_recurrent_state + k_t[:, :, 0].unsqueeze(-1) * delta.unsqueeze(-2)
-  core_attn_out = (new_recurrent_state * q_t[:, :, 0].unsqueeze(-1)).sum(dim=-2).unsqueeze(2)
+  g_step = g_t[:, :, 0].exp().unsqueeze(-1).unsqueeze(-1).to(torch.float32)
+  beta_step = beta_t[:, :, 0].unsqueeze(-1).to(torch.float32)
+  r_state = recurrent_state.to(torch.float32)
+  new_recurrent_state = r_state * g_step
+  k_step = k_t[:, :, 0].unsqueeze(-1).to(torch.float32)
+  q_step = q_t[:, :, 0].unsqueeze(-1).to(torch.float32)
+  kv_mem = (new_recurrent_state * k_step).sum(dim=-2)
+  delta = (v_t[:, :, 0].to(torch.float32) - kv_mem) * beta_step
+  new_recurrent_state = new_recurrent_state + k_step * delta.unsqueeze(-2)
+  core_attn_out = (
+      (new_recurrent_state * q_step).sum(dim=-2).unsqueeze(2).to(q_t.dtype)
+  )
   return core_attn_out, new_recurrent_state
 
 
@@ -233,7 +238,7 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
       layer_idx: int = 0,
       use_fused_gdn: bool = True,
       gdn_mode: int = 0,
-      use_fp32: bool = False,
+      use_fp32: bool = True,
   ):
     super().__init__()
     self.layer_idx = layer_idx
@@ -295,7 +300,7 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
       )
       recurrent_state = torch.zeros(
           batch_size, self.num_v_heads, self.head_k_dim, self.head_v_dim,
-          dtype=hidden_states.dtype, device=hidden_states.device
+          dtype=torch.float32, device=hidden_states.device
       )
     if getattr(self, "use_fused_gdn", True):
       mask_arg = (
@@ -584,6 +589,9 @@ class Qwen3_5StaticDecoderLayer(nn.Module):
           conv_kernel_size=config.linear_conv_kernel_dim,
           rms_norm_eps=config.rms_norm_eps,
           layer_idx=layer_idx,
+          use_fused_gdn=getattr(config, "use_fused_gdn", True),
+          gdn_mode=getattr(config, "gdn_mode", 0),
+          use_fp32=getattr(config, "gdn_use_fp32", True),
       )
     elif self.block_type == "full_attention":
       self.self_attn = Qwen3_5Attention(config, layer_idx)  # pyrefly: ignore[bad-argument-type]
