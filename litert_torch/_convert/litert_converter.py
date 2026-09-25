@@ -15,6 +15,7 @@
 """LiteRT converter integrations: MLIR to flatbuffer conversions."""
 
 import dataclasses
+from typing import Any
 
 from litert_torch import backend
 from litert_torch import model as model_lib
@@ -109,6 +110,7 @@ def exported_programs_to_flatbuffer(
     lightweight_conversion: bool = False,
     enable_x64: bool = True,
     runtime_constant_folding: bool | None = None,
+    _litert_converter_flags: dict[str, Any] | None = None,
 ) -> LazyModelExporter:
   """Convert ExportedPrograms to a LiteRT model."""
   if not exported_programs:
@@ -180,6 +182,13 @@ def exported_programs_to_flatbuffer(
   # litert-torch handles inf clamping before the MLIR conversion.
   config.canonicalizing_inf_as_min_max_float = False
   safe_set_config("enable_x64", enable_x64)
+
+  if _litert_converter_flags:
+    for k, v in _litert_converter_flags.items():
+      safe_set_config(k, v)
+
+  if getattr(config, "strict_qdq_mode", False):
+    config.qdq_conversion_mode = "STRICT"
 
   # Run LiteRT converter passes.
   with ir_context, progress.task("Run LiteRT Converter Passes"):
