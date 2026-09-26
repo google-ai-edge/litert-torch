@@ -135,6 +135,11 @@ class TestModelConversion(googletest.TestCase):
     pytorch_model = smollm.SmolLM2(config, self._kv_cache_max).eval()
     self._test_model(config, pytorch_model, "prefill", atol=1e-4, rtol=1e-5)
 
+  def test_smollm3(self):
+    config = smollm.get_fake_model_config_v3()
+    pytorch_model = smollm.SmolLM3(config, self._kv_cache_max).eval()
+    self._test_model(config, pytorch_model, "prefill", atol=1e-4, rtol=1e-5)
+
   def test_openelm(self):
     config = openelm.get_fake_model_config()
     pytorch_model = openelm.OpenELM(config, self._kv_cache_max).eval()
