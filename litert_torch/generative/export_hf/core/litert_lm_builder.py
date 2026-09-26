@@ -167,6 +167,48 @@ def _tokenizer_prepends_bos(tokenizer, chat_template=None) -> bool:
     return True
 
 
+def _template_formats_tool_declarations(tokenizer, chat_template) -> bool:
+  """Checks whether the chat template renders tool declarations by itself.
+
+  LiteRT-LM's FunctionGemma data processor formats tools in one of two
+  places. By default it renders every declaration in C++ and hands the
+  template the finished strings; with `use_template_for_fc_format` it hands
+  the template the tool dicts (tool calls and tool responses follow the same
+  switch). A template only works with the matching mode: the HF FunctionGemma
+  chat template reads `tool['function']['name']`, so given the pre-rendered
+  strings it fails to render any prompt that declares tools, while a
+  `{{ tool | trim }}` template needs those strings.
+
+  Args:
+    tokenizer: Tokenizer of the source model.
+    chat_template: The jinja chat template being bundled.
+
+  Returns:
+    True if the template renders an FC declaration from a tool dict; False if
+    it does not, or if the tokenizer cannot render the template with tools
+    (preserving the previous metadata).
+  """
+  tool = {
+      'type': 'function',
+      'function': {
+          'name': 'probe_tool',
+          'description': '',
+          'parameters': {'type': 'object', 'properties': {}},
+      },
+  }
+  try:
+    rendered = tokenizer.apply_chat_template(
+        [{'role': 'user', 'content': 'x'}],
+        tools=[tool],
+        chat_template=chat_template,
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+  except Exception:  # pylint: disable=broad-except
+    return False
+  return 'declaration:probe_tool' in rendered
+
+
 def build_llm_metadata(
     source_model_artifacts: export_lib.SourceModelArtifacts,
     export_config: exportable_module.ExportableModuleConfig,
@@ -356,10 +398,14 @@ def build_llm_metadata(
           llm_model_type_pb2.LlmModelType(gemma3=llm_model_type_pb2.Gemma3())
       )
     case 'function_gemma':
+      function_gemma = llm_model_type_pb2.FunctionGemma()
+      # Pair the bundled jinja template with the tool format it expects.
+      if isinstance(chat_templates, str):
+        function_gemma.use_template_for_fc_format = (
+            _template_formats_tool_declarations(tokenizer, chat_templates)
+        )
       llm_metadata.llm_model_type.CopyFrom(
-          llm_model_type_pb2.LlmModelType(
-              function_gemma=llm_model_type_pb2.FunctionGemma()
-          )
+          llm_model_type_pb2.LlmModelType(function_gemma=function_gemma)
       )
     case 'gemma3n':
       llm_metadata.llm_model_type.CopyFrom(
