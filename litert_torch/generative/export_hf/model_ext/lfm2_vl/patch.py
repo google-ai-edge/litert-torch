@@ -23,6 +23,9 @@ from transformers.models.lfm2 import modeling_lfm2
 from transformers.models.siglip2 import modeling_siglip2
 
 TARGET_PATCH_SIZE = (32, 32)
+# Buffer name of the precomputed positional-embedding table, see
+# `fold_positional_embeddings`.
+FOLDED_POSITIONAL_EMBEDDINGS_BUFFER = "litert_folded_positional_embeddings"
 
 
 class PatchedSiglip2VisionEmbeddings(modeling_siglip2.Siglip2VisionEmbeddings):
@@ -88,6 +91,67 @@ class PatchedSiglip2VisionEmbeddings(modeling_siglip2.Siglip2VisionEmbeddings):
       ]
 
     return resulted_positional_embeddings
+
+  def forward(
+      self, pixel_values: torch.FloatTensor, spatial_shapes: torch.LongTensor
+  ) -> torch.Tensor:
+    """Adds the folded positional embeddings when they were precomputed.
+
+    `fold_positional_embeddings` stores the resized table as a buffer after
+    the weights are loaded, so the exported graph carries a constant instead
+    of a RESIZE_BILINEAR whose only input is a constant. GPU delegates reject
+    that op (it expects one runtime input), which made the exported vision
+    encoder fail to compile on GPU backends. Without the buffer this falls
+    back to the original computation.
+    """
+    folded = getattr(self, FOLDED_POSITIONAL_EMBEDDINGS_BUFFER, None)
+    if folded is None or folded.shape[1] != pixel_values.shape[1]:
+      return super().forward(pixel_values, spatial_shapes)
+    target_dtype = self.patch_embedding.weight.dtype
+    patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))
+    return patch_embeds + folded.to(dtype=patch_embeds.dtype)
+
+
+def fold_positional_embeddings(
+    module: torch.nn.Module, max_length: int | None = None
+) -> int:
+  """Precomputes the resized positional embeddings of every SigLIP2 embedding.
+
+  The resize depends only on the loaded position embedding weight and the
+  fixed TARGET_PATCH_SIZE, so it is computed once here (same function, same
+  numerics) and registered as a non-persistent buffer that the patched
+  forward adds directly. Call it after the weights are loaded and before
+  export.
+
+  Args:
+    module: the model (or any parent module) holding the vision embeddings.
+    max_length: rows of the table (padding follows the original function);
+      defaults to TARGET_PATCH_SIZE height * width.
+
+  Returns:
+    The number of embedding modules folded.
+  """
+  height, width = TARGET_PATCH_SIZE
+  max_length = max_length or height * width
+  spatial_shapes = torch.tensor([[height, width]], dtype=torch.int64)
+  folded = 0
+  for child in module.modules():
+    if not isinstance(child, modeling_siglip2.Siglip2VisionEmbeddings):
+      continue
+    with torch.no_grad():
+      positional_embeddings = child.position_embedding.weight.reshape(
+          child.position_embedding_size, child.position_embedding_size, -1
+      )
+      table = PatchedSiglip2VisionEmbeddings.resize_positional_embeddings(
+          positional_embeddings, spatial_shapes, max_length=max_length
+      )
+    child.register_buffer(
+        FOLDED_POSITIONAL_EMBEDDINGS_BUFFER,
+        table.detach().clone(),
+        persistent=False,
+    )
+    folded += 1
+  return folded
 
 
 @patches_lib.register_patch(["lfm2_vl"])

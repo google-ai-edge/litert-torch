@@ -15,6 +15,7 @@
 """Exportable modules for LFM2 vision encoder and adapter."""
 
 from litert_torch.generative.export_hf.core import exportable_module as exportable_module_base
+from litert_torch.generative.export_hf.model_ext.lfm2_vl import patch as lfm2_vl_patch
 import torch
 
 
@@ -26,6 +27,9 @@ class LiteRTExportableModuleForLFM2VisionEncoder(
   def __init__(self, model: torch.nn.Module, export_config):
     super().__init__(export_config)
     self.model = model
+    # The weights are loaded by now: fold the positional-embedding resize
+    # into a constant so the exported encoder compiles on GPU backends.
+    lfm2_vl_patch.fold_positional_embeddings(model)
 
   def forward(
       self,
