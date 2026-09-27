@@ -140,6 +140,9 @@ class Converter:
       lightweight_conversion: bool = False,
       enable_x64: bool = True,
       runtime_constant_folding: bool | None = None,
+      experimental_skip_optimize_pass: bool = False,
+      experimental_optimize_disabled_patterns: list[str] | None = None,
+      experimental_optimize_enabled_patterns: list[str] | None = None,
   ) -> model.LiteRTModel | litert_types.CompilationResult:
     """Finalizes the conversion and produces an edge model.
 
@@ -179,6 +182,16 @@ class Converter:
         constants beyond what the standard converter can resolve. If None
         (default), this is enabled automatically when `lightweight_conversion`
         is True to maintain model quality.
+      experimental_skip_optimize_pass: (Experimental) If True, skip the TFL
+        `tfl-optimize` pass entirely during conversion. Selected optimizations
+        can be applied afterwards with
+        `litert_torch._convert.litert_converter.run_selective_tfl_optimize`.
+      experimental_optimize_disabled_patterns: (Experimental) Substring filters
+        over rewrite-pattern debug names inside `tfl-optimize`; matching
+        patterns are skipped.
+      experimental_optimize_enabled_patterns: (Experimental) If non-empty, only
+        rewrite patterns inside `tfl-optimize` whose debug name contains one of
+        these substrings are run (allowlist mode).
 
     Returns:
       The converted edge model. If compilation configs are provided, returns the
@@ -212,6 +225,13 @@ class Converter:
         lightweight_conversion=lightweight_conversion,
         enable_x64=enable_x64,
         runtime_constant_folding=runtime_constant_folding,
+        experimental_skip_optimize_pass=experimental_skip_optimize_pass,
+        experimental_optimize_disabled_patterns=(
+            experimental_optimize_disabled_patterns
+        ),
+        experimental_optimize_enabled_patterns=(
+            experimental_optimize_enabled_patterns
+        ),
     )
     if self._compilation_configs:
       return core.aot_compile(self._compilation_configs, converted_model)
@@ -282,6 +302,9 @@ def convert(
     lightweight_conversion: bool = False,
     enable_x64: bool = True,
     runtime_constant_folding: bool | None = None,
+    experimental_skip_optimize_pass: bool = False,
+    experimental_optimize_disabled_patterns: list[str] | None = None,
+    experimental_optimize_enabled_patterns: list[str] | None = None,
 ) -> model.LiteRTModel:
   """Converts a PyTorch model to an edge model with a default signature.
 
@@ -312,6 +335,17 @@ def convert(
       beyond what the standard converter can resolve. If None (default), this is
       enabled automatically when `lightweight_conversion` is True to maintain
       model quality.
+    experimental_skip_optimize_pass: (Experimental) If True, skip the TFL
+      `tfl-optimize` pass entirely during conversion. Selected optimizations
+      can be applied afterwards with
+      `litert_torch._convert.litert_converter.run_selective_tfl_optimize`.
+    experimental_optimize_disabled_patterns: (Experimental) Substring filters
+      over rewrite-pattern debug names inside `tfl-optimize`; matching patterns
+      are skipped. Discover pattern names via the pass's `list-patterns`
+      option or `run_selective_tfl_optimize(..., list_patterns=True)`.
+    experimental_optimize_enabled_patterns: (Experimental) If non-empty, only
+      rewrite patterns inside `tfl-optimize` whose debug name contains one of
+      these substrings are run (allowlist mode).
 
   Returns:
     The converted edge model.
@@ -330,4 +364,11 @@ def convert(
       lightweight_conversion=lightweight_conversion,
       enable_x64=enable_x64,
       runtime_constant_folding=runtime_constant_folding,
+      experimental_skip_optimize_pass=experimental_skip_optimize_pass,
+      experimental_optimize_disabled_patterns=(
+          experimental_optimize_disabled_patterns
+      ),
+      experimental_optimize_enabled_patterns=(
+          experimental_optimize_enabled_patterns
+      ),
   )
