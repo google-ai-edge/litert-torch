@@ -82,6 +82,32 @@ class Qwen3_5PatchTest(parameterized.TestCase):
     actual = fused_norm(x)
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
+  def test_qwen3_5_rms_norm_gated_equivalence(self):
+    torch.manual_seed(0)
+    orig_norm = modeling_qwen3_5.Qwen3_5RMSNormGated(64, eps=1e-6)
+    orig_norm.weight.data.uniform_(0.5, 1.5)
+
+    fused_norm = patch.Qwen3_5RMSNormGated(64, eps=1e-6)
+    fused_norm.weight = torch.nn.Parameter(orig_norm.weight.to(torch.float32))
+
+    self.assertIn("eps=1e-06", fused_norm.extra_repr())
+    x = torch.randn(2, 5, 4, 64)
+    gate = torch.randn(2, 5, 4, 64)
+    expected = orig_norm(x, gate)
+    actual = fused_norm(x, gate)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+  def test_l2norm_with_folded_scale_equivalence(self):
+    torch.manual_seed(0)
+    x = torch.randn(2, 5, 4, 128)
+    eps = 1e-6
+    scale = 1.0 / (128**0.5)
+    expected = (
+        x * torch.rsqrt((x * x).sum(dim=-1, keepdim=True) + eps)
+    ) * scale
+    actual = modeling_qwen3_5_static.l2norm(x, dim=-1, eps=eps, scale=scale)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
   @parameterized.named_parameters(
       dict(testcase_name="fused_gate_up_only", use_swiglu_composite=False),
       dict(testcase_name="swiglu_composite", use_swiglu_composite=True),
@@ -315,7 +341,6 @@ class Qwen3_5PatchTest(parameterized.TestCase):
         self.assertIsInstance(
             layer.self_attn, modeling_qwen3_5.Qwen3_5Attention
         )
-
 
 if __name__ == "__main__":
   absltest.main()
