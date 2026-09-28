@@ -58,6 +58,20 @@ def get_cache_fingerprint(*args: Any, **kwargs: Any) -> int:
     elif isinstance(item, dict):
       return tuple((k, _extract(item[k])) for k in sorted(item.keys()))
 
+    elif callable(item) and hasattr(item, "__code__"):
+      closure_vals = (
+          tuple(_extract(c.cell_contents) for c in item.__closure__)
+          if item.__closure__
+          else ()
+      )
+      return (
+          item.__code__,
+          closure_vals,
+          _extract(getattr(item, "__self__", None)),
+          _extract(getattr(item, "__defaults__", None)),
+          _extract(getattr(item, "__kwdefaults__", None)),
+      )
+
     return item
 
   fingerprint = (_extract(args), _extract(kwargs))
@@ -73,6 +87,7 @@ def get_cache_fingerprint(*args: Any, **kwargs: Any) -> int:
 @dataclasses.dataclass
 class JaxBridgeLoweringCache(lowerings_context.LoweringContextPlugin):
   cache: dict[Any, func.FuncOp] = dataclasses.field(default_factory=dict)
+  next_id: int = 0
 
   def get_func_op(self, identifier) -> func.FuncOp:
     fp = get_cache_fingerprint(identifier)
@@ -222,7 +237,10 @@ def wrap(jaxfn: Callable[Any, Any], ir_input_names: list[str] = None):
 
       with ir.InsertionPoint.at_block_begin(lctx.ir_module.body):
         cloned_func = cast(func.FuncOp, main_func.clone())
-        cloned_func_name = f"{jaxfn.__name__}_{uuid.uuid4().hex[:8]}"
+        cloned_func_name = (
+            f"{jaxfn.__name__}_{jlcache.next_id}_{uuid.uuid4().hex[:8]}"
+        )
+        jlcache.next_id += 1
         cloned_func.attributes["sym_name"] = ir.StringAttr.get(cloned_func_name)
         cloned_func.attributes["sym_visibility"] = ir.StringAttr.get("private")
 

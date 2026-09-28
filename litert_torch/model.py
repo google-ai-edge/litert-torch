@@ -25,6 +25,7 @@ import abc
 import dataclasses
 import os
 import re
+import shutil
 from typing import Callable
 
 import numpy as np
@@ -74,6 +75,27 @@ class BytesExporter(ModelExporter):
     return self.content
 
 
+@dataclasses.dataclass(frozen=True)
+class FileExporter(ModelExporter):
+  path: str
+
+  def __post_init__(self):
+    abs_path = os.path.abspath(self.path)
+    if not os.path.isfile(abs_path):
+      raise FileNotFoundError(f'Model file not found: {abs_path}')
+    object.__setattr__(self, 'path', abs_path)
+
+  def to_file(self, path: str):
+    if os.path.dirname(path):
+      os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.abspath(path) != self.path:
+      shutil.copyfile(self.path, path)
+
+  def to_bytes(self) -> bytes:
+    with open(self.path, 'rb') as f:
+      return f.read()
+
+
 class Model(abc.ABC):
   """A LiteRT model."""
 
@@ -109,10 +131,16 @@ class LiteRTModel(Model):
       exporter = BytesExporter(exporter)
 
     self._exporter = exporter
-    self._interpreter_builder = lambda: interpreter_lib.Interpreter(
-        model_content=exporter.to_bytes(),
-        experimental_default_delegate_latest_features=True,
-    )
+    if isinstance(exporter, FileExporter):
+      self._interpreter_builder = lambda: interpreter_lib.Interpreter(
+          model_path=exporter.path,
+          experimental_default_delegate_latest_features=True,
+      )
+    else:
+      self._interpreter_builder = lambda: interpreter_lib.Interpreter(
+          model_content=exporter.to_bytes(),
+          experimental_default_delegate_latest_features=True,
+      )
     # Cached tf.lite Interpreter, built on first use by `_get_interpreter`.
     self._interpreter = None
     # Selects the CompiledModel path over the Interpreter path in `__call__`.

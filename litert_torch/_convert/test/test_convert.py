@@ -18,9 +18,9 @@ import dataclasses
 from typing import Tuple
 
 import litert_torch
+from litert_torch import testing
 from litert_torch.backend.lowerings import _decomp_registry
 from litert_torch.quantize import pt2e_quantizer
-
 from litert_torch.testing import model_coverage
 import numpy as np
 import torch
@@ -48,7 +48,8 @@ torch.export.register_dataclass(
 )
 
 
-class TestConvert(googletest.TestCase):
+@testing.parameterized_class(testing.V1_V2_PARAMETERS)
+class TestConvert(testing.V1V2TestCase):
   """Tests conversion of various modules."""
 
   def setUp(self):
@@ -660,6 +661,8 @@ class TestConvert(googletest.TestCase):
 
   def test_runtime_folding_removes_constant_subgraph(self):
     """Runtime folding must replace input-independent ops with constants."""
+    if self.use_v2:
+      self.skipTest("runtime_constant_folding is not supported with use_v2.")
 
     def mask(n, value):
       # Built from constants only, the way Swin builds its attention mask.

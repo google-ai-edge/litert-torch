@@ -71,6 +71,18 @@ def annotate_force_decomp(decomp: Callable[..., Any]):
   return decomp
 
 
+def _erase_assert_tensor_metadata_nodes(exported_program):
+  """Removes aten._assert_tensor_metadata nodes, which are not convertible."""
+  if not hasattr(torch.ops.aten, "_assert_tensor_metadata"):
+    return
+  for node in list(exported_program.graph.nodes):
+    if (
+        node.target == torch.ops.aten._assert_tensor_metadata.default
+        and not node.users
+    ):
+      exported_program.graph.erase_node(node)
+
+
 @progress.task("ExportedProgram Run Decompositions")
 def safe_run_decompositions(exported_program, decomp_table=None, can_skip=True):
   """Wrapper for ExportedProgram.run_decompositions to handle unexpected export behavior."""
@@ -100,12 +112,14 @@ def safe_run_decompositions(exported_program, decomp_table=None, can_skip=True):
       if hasattr(decomp, _FORCE_DECOMP_ATTR):
         node.target = decomp
 
+  # Strip the asserts before retracing as well: run_decompositions can choke on
+  # them when the traced dtypes differ from the recorded metadata.
+  _erase_assert_tensor_metadata_nodes(exported_program)
+  exported_program.graph_module.recompile()
+
   exported_program = exported_program.run_decompositions(decomp_table)
 
-  if hasattr(torch.ops.aten, "_assert_tensor_metadata"):
-    for node in exported_program.graph.nodes:
-      if node.target == torch.ops.aten._assert_tensor_metadata.default:
-        exported_program.graph.erase_node(node)
+  _erase_assert_tensor_metadata_nodes(exported_program)
 
   exported_program.graph.eliminate_dead_code()
   exported_program.graph_module.recompile()
