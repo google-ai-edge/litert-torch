@@ -524,7 +524,9 @@ def scaled_dot_product_attention_transposed(
     bmm_fn = bmm_lib.bmm_4d
   else:
     assert k_ts_idx == 3, "k_ts_idx must be 2 or 3."
-    bmm_fn = lambda x, y: torch.einsum("abth,abhs->abts", x, y)
+    # The KV cache may be in a different dtype than activations (e.g. bf16
+    # weights); align to the query so einsum doesn't promote. No-op otherwise.
+    bmm_fn = lambda x, y: torch.einsum("abth,abhs->abts", x, y.to(x.dtype))
   logits = bmm_fn(query, key_for_bmm)
 
   if softcap is not None:
@@ -561,7 +563,7 @@ def scaled_dot_product_attention_transposed(
     bmm_fn = bmm_lib.bmm_4d
   else:
     assert v_ts_idx == 2, "v_ts_idx must be 2 or 3."
-    bmm_fn = lambda x, y: torch.einsum("abts,absh->abth", x, y)
+    bmm_fn = lambda x, y: torch.einsum("abts,absh->abth", x, y.to(x.dtype))
   encoded = bmm_fn(probs, value_for_bmm)
   if pack_inside_composite:
     # Undo the packing so the composite output keeps the [B, N, T, H] layout.

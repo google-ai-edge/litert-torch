@@ -54,10 +54,12 @@ class LiteRTExportableModuleForDecoderOnlyLMPrefillExternalEmbedder(
   def _get_input(
       self, batch_size, prefill_length, prefill_length_dim, model_config
   ):
+    device = self.device
     embeddings = {
         "embeddings": torch.ones(
             (batch_size, prefill_length, model_config.hidden_size),
             dtype=torch.float32,
+            device=device,
         )
     }
     embeddings_dynamic_shape = (
@@ -103,17 +105,19 @@ class LiteRTExportableModuleForDecoderOnlyLMGenerateExternalEmbedder(
       extra_outputs = {}
     return {
         "kv_cache": output.past_key_values,
-        "logits": output.logits,
+        "logits": output.logits.to(torch.float32),
         **extra_outputs,
     }
 
   def _get_input(
       self, batch_size, decode_length, decode_length_dim, model_config
   ):
+    device = self.device
     embeddings = {
         "embeddings": torch.ones(
             (batch_size, decode_length, model_config.hidden_size),
             dtype=torch.float32,
+            device=device,
         )
     }
     embeddings_dynamic_shape = {"embeddings": None} if decode_length_dim else {}
@@ -127,17 +131,23 @@ class LiteRTExportableModuleForEmbedder(torch.nn.Module):
     super().__init__()
     self.model = model
 
+  @property
+  def device(self) -> torch.device:
+    """Device of the wrapped embedding's parameters (`meta` for V2 export)."""
+    return next(self.model.parameters(), torch.empty(0)).device
+
   def forward(
       self,
       token_ids,
   ):
+    # Keep the zero as a 0-d CPU tensor: it becomes a lifted constant, and a
+    # constant created on `meta` (V2 export) has no recoverable value.
     token_ids = torch.maximum(token_ids, torch.tensor(0, dtype=torch.int32))
     output = self.model(token_ids)
-    return {"embeddings": output}
+    return {"embeddings": output.to(torch.float32)}
 
-  @classmethod
   def get_sample_inputs(
-      cls,
+      self,
       model_config,
       export_config: base_exportable_module.ExportableModuleConfig,
       **kwargs,
@@ -146,8 +156,13 @@ class LiteRTExportableModuleForEmbedder(torch.nn.Module):
     del kwargs  # Unused.
     batch_size = export_config.batch_size
     del model_config  # Unused.
+    device = self.device
     prefill_length_dim = export_config.prefill_length_dim
-    tokens = {"token_ids": torch.ones((batch_size, 1), dtype=torch.int32)}
+    tokens = {
+        "token_ids": torch.ones(
+            (batch_size, 1), dtype=torch.int32, device=device
+        )
+    }
     tokens_dynamic_shape = {"token_ids": {1: 1}} if prefill_length_dim else {}
     if export_config.single_token_embedder:
       return {"embedder": (tokens, tokens_dynamic_shape)}
@@ -158,7 +173,7 @@ class LiteRTExportableModuleForEmbedder(torch.nn.Module):
       for prefill_length in export_config.prefill_lengths:
         tokens = {
             "token_ids": torch.ones(
-                (batch_size, prefill_length), dtype=torch.int32
+                (batch_size, prefill_length), dtype=torch.int32, device=device
             )
         }
         tokens_dynamic_shape = (

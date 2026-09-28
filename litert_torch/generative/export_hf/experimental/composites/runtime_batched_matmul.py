@@ -40,7 +40,12 @@ def runtime_bmm(
   else:
     builder = None
 
-  out = torch.einsum("abcd,abed->abce", a, b) + (param_tensor.sum() * 0)
+  # With reduced-precision weights (e.g. bf16) the cache operand may differ in
+  # dtype from the activations; align to `a` so einsum doesn't promote.
+  if a.dtype != b.dtype:
+    b = b.to(a.dtype)
+  dummy = (param_tensor.sum() * 0).to(a.dtype)
+  out = torch.einsum("abcd,abed->abce", a, b) + dummy
   if builder is not None:
     out = builder.mark_outputs(out)
   return out

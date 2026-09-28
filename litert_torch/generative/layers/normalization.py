@@ -90,7 +90,7 @@ class RMSNorm(torch.nn.Module):
     final_scale = (
         self.scale + self.scale_shift
         if self.with_scale
-        else torch.ones((self.dim,), dtype=torch.float32)
+        else torch.ones((self.dim,), dtype=torch.float32, device=x.device)
     )
     if self.enable_hlfb:
       return rms_norm_with_hlfb(

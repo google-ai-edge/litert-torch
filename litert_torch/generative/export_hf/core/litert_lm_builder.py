@@ -494,7 +494,7 @@ def package_model(
     builder.add_hf_tokenizer(tokenizer_model_path)
   else:
     builder.add_sentencepiece_tokenizer(tokenizer_model_path)
-  if export_config.experimental_use_fp16:
+  if export_config.is_16bit:
     builder.add_tflite_model(
         exported_model_artifacts.prefill_decode_model_path,  # pyrefly: ignore[bad-argument-type]
         litertlm_builder.TfLiteModelType.PREFILL_DECODE,

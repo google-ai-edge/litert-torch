@@ -282,6 +282,12 @@ class CacheTest(googletest.TestCase):
         self.v_ts_idx = 2
         self.experimental_use_fp16 = False
 
+      def get_torch_dtype(self):
+        return torch.float32
+
+      def get_cache_dtype(self):
+        return torch.float32
+
     model_config = MockQwenConfig()
     export_config = MockExportConfig()
 

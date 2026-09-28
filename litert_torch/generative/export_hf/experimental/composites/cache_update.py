@@ -138,8 +138,8 @@ def cache_update(
   )
 
   if is_ring_buffer:
-    k_update = key_proj + dummy
-    v_update = value_proj.transpose(-2, -1) + dummy
+    k_update = key_proj + dummy.to(key_proj.dtype)
+    v_update = value_proj.transpose(-2, -1) + dummy.to(value_proj.dtype)
 
     t_k = k_update.size(k_ts_idx)
     offset = runtime_param_tensor.reshape(-1)[0]
@@ -169,12 +169,12 @@ def cache_update(
   else:
     out_k = tfl_dus.dynamic_update_slice(
         cache_k,
-        key_proj + dummy,
+        key_proj + dummy.to(key_proj.dtype),
         [x for x in indices_k],
     )
     out_v = tfl_dus.dynamic_update_slice(
         cache_v,
-        value_proj.transpose(-2, -1) + dummy,
+        value_proj.transpose(-2, -1) + dummy.to(value_proj.dtype),
         [x for x in indices_v],
     )
   return builder.mark_outputs(out_k, out_v)
