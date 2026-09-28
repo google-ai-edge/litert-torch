@@ -211,6 +211,8 @@ def ir_element_type_to_torch_dtype(ty):
     return torch.float64
   if isinstance(ty, ir.F16Type):
     return torch.half
+  if isinstance(ty, ir.BF16Type):
+    return torch.bfloat16
   if isinstance(ty, ir.IntegerType):
     if ty.is_signless:
       if ty.is_unsigned:

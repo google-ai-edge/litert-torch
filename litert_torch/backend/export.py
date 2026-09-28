@@ -328,6 +328,7 @@ def exported_program_to_mlir(
     _pre_lower_pass: (
         Callable[[torch.export.ExportedProgram], None] | None
     ) = None,
+    inline_constants: bool = True,
 ) -> MlirLowered:
   """Lower the exported program to MLIR.
 
@@ -338,6 +339,9 @@ def exported_program_to_mlir(
     lowering_context_plugins: A list of plugins to add to the lowering context.
     _pre_lower_pass: A function to run on exported program before lowering,
       after all run_decompositions calls.
+    inline_constants: Whether to inline constant inputs into MLIR attribute
+      constants. If False, parameters and constant inputs remain function
+      arguments in the lowered MLIR module.
 
   Returns:
     The lowered MLIR module, metadata, and weight tensors bundle from exported
@@ -384,7 +388,8 @@ def exported_program_to_mlir(
     _pre_lower_pass(exported_program)
 
   _convert_q_dq_per_channel_args_to_list(exported_program)
-  inline_consts_lib.inline_consts(exported_program)
+  if inline_constants:
+    inline_consts_lib.inline_consts(exported_program)
 
   # Begin of lowering.
   if not ir_context:
@@ -422,7 +427,15 @@ def exported_program_to_mlir(
     )
     with ir.InsertionPoint(temp_func.add_entry_block()):
       interpreter.run(*temp_func.arguments, enable_io_processing=False)
-      num_mutations = len(exported_program.graph_signature.buffers_to_mutate)
+      # Mutated buffers, parameters, and user inputs are all returned ahead of
+      # the user-visible outputs and must not become model outputs. Counting
+      # only buffer mutations leaks a mutated user input as the first result.
+      graph_signature = exported_program.graph_signature
+      num_mutations = (
+          len(graph_signature.buffers_to_mutate)
+          + len(graph_signature.parameters_to_mutate)
+          + len(graph_signature.user_inputs_to_mutate)
+      )
       outputs = interpreter.outputs[num_mutations:]
       func.ReturnOp(interpreter.outputs[num_mutations:])
 

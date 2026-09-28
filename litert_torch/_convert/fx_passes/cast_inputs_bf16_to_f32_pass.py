@@ -14,7 +14,6 @@
 # ==============================================================================
 """Pass to cast all inputs with torch.bfloat16 type to torch.float32."""
 
-
 from litert_torch import fx_infra
 import torch
 
@@ -27,11 +26,28 @@ class CastInputsBf16ToF32Pass(fx_infra.ExportedProgramPassBase):
   """This pass casts all inputs with torch.bfloat16 type to torch.float32."""
 
   def call(self, exported_program: torch.export.ExportedProgram):
+    # If the model holds bfloat16 weights, it is a bfloat16 model: casting the
+    # inputs to float32 would only create a dtype mismatch against those
+    # weights, so leave the graph alone. Intermediate activations are
+    # deliberately not inspected here - a bfloat16 input always produces
+    # bfloat16 intermediates, so checking them would make this pass a no-op for
+    # exactly the models it exists to handle.
+    for p in exported_program.parameters():
+      if getattr(p, "dtype", None) == torch.bfloat16:
+        return fx_infra.ExportedProgramPassResult(exported_program, False)
+    for b in exported_program.buffers():
+      if getattr(b, "dtype", None) == torch.bfloat16:
+        return fx_infra.ExportedProgramPassResult(exported_program, False)
+    for c in exported_program.constants.values():
+      if getattr(c, "dtype", None) == torch.bfloat16:
+        return fx_infra.ExportedProgramPassResult(exported_program, False)
+
     modified = False
     for node in exported_program.graph.nodes:
+      val = node.meta.get("val", None)
       if (
           node.op == "placeholder"
-          and node.meta.get("val").dtype == torch.bfloat16
+          and getattr(val, "dtype", None) == torch.bfloat16
       ):
         if not node.users:
           continue

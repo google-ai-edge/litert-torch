@@ -176,6 +176,7 @@ def upcast_to_same_type(*vals: ir.Value):
         ir.IntegerType.get_signless(16),
         ir.IntegerType.get_signless(32),
         ir.IntegerType.get_signless(64),
+        ir.BF16Type,
         ir.F16Type,
         ir.F32Type,
         ir.F64Type,
@@ -185,7 +186,12 @@ def upcast_to_same_type(*vals: ir.Value):
         return i
     raise ValueError("Unsupported type: %s" % str(ty))
 
-  cast_tycls = type(max([v.type.element_type for v in vals], key=get_priority))
+  elem_types = [v.type.element_type for v in vals]
+  cast_tycls = type(max(elem_types, key=get_priority))
+  if cast_tycls is ir.F16Type and any(
+      ir.BF16Type.isinstance(t) for t in elem_types
+  ):
+    cast_tycls = ir.F32Type
   new_vals = []
   for val in vals:
     if not cast_tycls.isinstance(val.type.element_type):
@@ -202,6 +208,8 @@ def minmax(ty: ir.Type) -> tuple[numbers.Number, numbers.Number]:
       return (0, 1 << ty.width)
     else:
       return (-(1 << (ty.width - 1)), (1 << (ty.width - 1)) - 1)
+  elif isinstance(ty, ir.BF16Type):
+    return (-3.3895313892515355e38, 3.3895313892515355e38)
   elif isinstance(ty, ir.F16Type):
     return (np.finfo(np.float16).min, np.finfo(np.float16).max)
   elif isinstance(ty, ir.F32Type):

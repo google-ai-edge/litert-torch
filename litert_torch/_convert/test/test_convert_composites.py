@@ -17,6 +17,7 @@
 from collections.abc import Callable
 
 import litert_torch
+from litert_torch import testing
 from litert_torch.testing import model_coverage
 import parameterized
 import torch
@@ -39,7 +40,8 @@ def _func_to_torch_module(func: Callable[..., torch.Tensor]):
   return TestModule(func).eval()
 
 
-class TestConvertComposites(googletest.TestCase):
+@testing.parameterized_class(testing.V1_V2_PARAMETERS)
+class TestConvertComposites(testing.V1V2TestCase):
   """Tests conversion modules that are meant to be wrapped as composites."""
 
   def test_convert_hardswish(self):

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Literal
 
 from litert_torch import model
@@ -140,6 +141,22 @@ class Converter:
       lightweight_conversion: bool = False,
       enable_x64: bool = True,
       runtime_constant_folding: bool | None = None,
+      use_v2: bool = False,
+      export_dir: str | None = None,
+      output_file_path: str | None = None,
+      delete_in_memory_params: bool = False,
+      fold_fp16_resource_casts: bool = True,
+      allow_reuse_intermediates: bool = False,
+      weights_loader: (
+          Callable[[str], torch.Tensor] | dict[str, torch.Tensor] | None
+      ) = None,
+      enable_debug: bool = False,
+      debug_dir: str | None = None,
+      enable_timing: bool = False,
+      print_ir_before: str | None = None,
+      print_ir_after: str | None = None,
+      elide_elementsattrs_if_larger: int | None = None,
+      _litert_converter_flags: dict[str, Any] | None = None,
   ) -> model.LiteRTModel | litert_types.CompilationResult:
     """Finalizes the conversion and produces an edge model.
 
@@ -179,6 +196,29 @@ class Converter:
         constants beyond what the standard converter can resolve. If None
         (default), this is enabled automatically when `lightweight_conversion`
         is True to maintain model quality.
+      use_v2: If True, uses the LiteRT Converter V2 export bridge and C++
+        pipeline. Experimental: V2 behavior and its related arguments are
+        subject to change without notice.
+      export_dir: Optional directory to persist intermediate MLIR bytecode and
+        weight files.
+      output_file_path: Optional destination path for the converted .tflite
+        model.
+      delete_in_memory_params: If True, deletes in-memory parameter tensors to
+        reduce RAM usage during conversion.
+      fold_fp16_resource_casts: If True, folds fp16 resource casts during V2
+        conversion.
+      allow_reuse_intermediates: If True, reuses existing intermediate artifacts
+        in export_dir without re-exporting from PyTorch.
+      weights_loader: Optional callback or dictionary mapping parameter names to
+        physical tensors to stream weights during V2 export without keeping them
+        in memory during tracing.
+      enable_debug: If True, enables C++ converter debug logging and artifacts.
+      debug_dir: Destination directory for debug logs, artifacts, and IR dumps.
+      enable_timing: If True, enables MLIR pass execution timing.
+      print_ir_before: Regex matching pass names to print IR before execution.
+      print_ir_after: Regex matching pass names to print IR after execution.
+      elide_elementsattrs_if_larger: Size threshold for eliding large elements.
+      _litert_converter_flags: Optional flags to configure the LiteRT converter.
 
     Returns:
       The converted edge model. If compilation configs are provided, returns the
@@ -212,6 +252,20 @@ class Converter:
         lightweight_conversion=lightweight_conversion,
         enable_x64=enable_x64,
         runtime_constant_folding=runtime_constant_folding,
+        use_v2=use_v2,
+        export_dir=export_dir,
+        output_file_path=output_file_path,
+        delete_in_memory_params=delete_in_memory_params,
+        fold_fp16_resource_casts=fold_fp16_resource_casts,
+        allow_reuse_intermediates=allow_reuse_intermediates,
+        weights_loader=weights_loader,
+        enable_debug=enable_debug,
+        debug_dir=debug_dir,
+        enable_timing=enable_timing,
+        print_ir_before=print_ir_before,
+        print_ir_after=print_ir_after,
+        elide_elementsattrs_if_larger=elide_elementsattrs_if_larger,
+        _litert_converter_flags=_litert_converter_flags,
     )
     if self._compilation_configs:
       return core.aot_compile(self._compilation_configs, converted_model)
@@ -282,6 +336,22 @@ def convert(
     lightweight_conversion: bool = False,
     enable_x64: bool = True,
     runtime_constant_folding: bool | None = None,
+    use_v2: bool = False,
+    export_dir: str | None = None,
+    output_file_path: str | None = None,
+    delete_in_memory_params: bool = False,
+    fold_fp16_resource_casts: bool = True,
+    allow_reuse_intermediates: bool = False,
+    weights_loader: (
+        Callable[[str], torch.Tensor] | dict[str, torch.Tensor] | None
+    ) = None,
+    enable_debug: bool = False,
+    debug_dir: str | None = None,
+    enable_timing: bool = False,
+    print_ir_before: str | None = None,
+    print_ir_after: str | None = None,
+    elide_elementsattrs_if_larger: int | None = None,
+    _litert_converter_flags: dict[str, Any] | None = None,
 ) -> model.LiteRTModel:
   """Converts a PyTorch model to an edge model with a default signature.
 
@@ -312,6 +382,27 @@ def convert(
       beyond what the standard converter can resolve. If None (default), this is
       enabled automatically when `lightweight_conversion` is True to maintain
       model quality.
+    use_v2: If True, uses the LiteRT Converter V2 export bridge and C++
+      pipeline.
+    export_dir: Optional directory to persist intermediate MLIR bytecode and
+      weight files.
+    output_file_path: Optional destination path for the converted .tflite model.
+    delete_in_memory_params: If True, deletes in-memory parameter tensors to
+      reduce RAM usage during conversion.
+    fold_fp16_resource_casts: If True, folds fp16 resource casts during V2
+      conversion.
+    allow_reuse_intermediates: If True, reuses existing intermediate artifacts
+      in export_dir without re-exporting from PyTorch.
+    weights_loader: Optional callback or dictionary mapping parameter names to
+      physical tensors to stream weights during V2 export without keeping them
+      in memory during tracing.
+    enable_debug: If True, enables C++ converter debug logging and artifacts.
+    debug_dir: Destination directory for debug logs, artifacts, and IR dumps.
+    enable_timing: If True, enables MLIR pass execution timing.
+    print_ir_before: Regex matching pass names to print IR before execution.
+    print_ir_after: Regex matching pass names to print IR after execution.
+    elide_elementsattrs_if_larger: Size threshold for eliding large elements.
+    _litert_converter_flags: Optional flags to configure the LiteRT converter.
 
   Returns:
     The converted edge model.
@@ -330,4 +421,18 @@ def convert(
       lightweight_conversion=lightweight_conversion,
       enable_x64=enable_x64,
       runtime_constant_folding=runtime_constant_folding,
+      use_v2=use_v2,
+      export_dir=export_dir,
+      output_file_path=output_file_path,
+      delete_in_memory_params=delete_in_memory_params,
+      fold_fp16_resource_casts=fold_fp16_resource_casts,
+      allow_reuse_intermediates=allow_reuse_intermediates,
+      weights_loader=weights_loader,
+      enable_debug=enable_debug,
+      debug_dir=debug_dir,
+      enable_timing=enable_timing,
+      print_ir_before=print_ir_before,
+      print_ir_after=print_ir_after,
+      elide_elementsattrs_if_larger=elide_elementsattrs_if_larger,
+      _litert_converter_flags=_litert_converter_flags,
   )
