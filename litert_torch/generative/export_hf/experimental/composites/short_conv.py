@@ -25,24 +25,35 @@ def apply_short_conv_step(
     conv_weight: torch.Tensor,
     conv_bias: Optional[torch.Tensor] = None,
     conv_L_cache: int = 3,
+    is_gated: bool = True,
+    use_silu: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
   """Computes a single decode step of 1D depthwise short convolution.
 
   Args:
-    in_proj_out: Fused input projection tensor [batch, 1, 3 * hidden_size].
+    in_proj_out: Input projection tensor [batch, 1, 3 * hidden_size] if
+      is_gated=True, or [batch, 1, hidden_size] if is_gated=False.
     conv_state: Convolution state tensor [batch, hidden_size, conv_L_cache - 1].
     conv_weight: Depthwise convolution weight [hidden_size, 1, conv_L_cache] or
       [hidden_size, conv_L_cache].
     conv_bias: Optional bias tensor [hidden_size].
     conv_L_cache: Kernel length / cache size (default 3).
+    is_gated: If True, splits in_proj_out into (b, c, x_proj) and computes
+      y = c * conv(b * x_proj). If False, applies depthwise conv directly to
+      in_proj_out.
+    use_silu: If True, applies SiLU activation to the convolution output.
 
   Returns:
     y: Output activation tensor [batch, 1, hidden_size] ready for out_proj.
     next_state: Updated state tensor [batch, hidden_size, conv_L_cache - 1].
   """
-  attrs = {
+  attrs: dict[str, int | bool] = {
       "conv_L_cache": int(conv_L_cache),
   }
+  if not is_gated:
+    attrs["is_gated"] = False
+  if use_silu:
+    attrs["use_silu"] = True
   builder = composite.StableHLOCompositeBuilder(
       name="odml.short_conv_step", attr=attrs
   )
@@ -56,20 +67,33 @@ def apply_short_conv_step(
     )
 
   # Fallback PyTorch execution during export tracing:
-  b, c, x_proj = in_proj_out.chunk(3, dim=-1)
-  conv_input = b * x_proj
-  conv_input_s = conv_input.squeeze(1).unsqueeze(-1)
-  padded_input = torch.cat([conv_state, conv_input_s], dim=-1)
-  next_state = padded_input[:, :, -(conv_L_cache - 1) :]
   w = (
       conv_weight.squeeze(1).unsqueeze(0)
       if conv_weight.dim() == 3
       else conv_weight.unsqueeze(0)
   )
-  conv_out = (padded_input * w).sum(dim=-1)
-  if conv_bias is not None:
-    conv_out = conv_out + conv_bias.unsqueeze(0)
-  y = c * conv_out.unsqueeze(1)
+  if is_gated:
+    b, c, x_proj = in_proj_out.chunk(3, dim=-1)
+    conv_input = b * x_proj
+    conv_input_s = conv_input.squeeze(1).unsqueeze(-1)
+    padded_input = torch.cat([conv_state, conv_input_s], dim=-1)
+    next_state = padded_input[:, :, -(conv_L_cache - 1) :]
+    conv_out = (padded_input * w).sum(dim=-1)
+    if conv_bias is not None:
+      conv_out = conv_out + conv_bias.unsqueeze(0)
+    if use_silu:
+      conv_out = torch.nn.functional.silu(conv_out)
+    y = c * conv_out.unsqueeze(1)
+  else:
+    conv_input_s = in_proj_out.transpose(1, 2)
+    padded_input = torch.cat([conv_state, conv_input_s], dim=-1)
+    next_state = padded_input[:, :, -(conv_L_cache - 1) :]
+    conv_out = (padded_input * w).sum(dim=-1)
+    if conv_bias is not None:
+      conv_out = conv_out + conv_bias.unsqueeze(0)
+    if use_silu:
+      conv_out = torch.nn.functional.silu(conv_out)
+    y = conv_out.unsqueeze(1)
 
   y, next_state = builder.mark_outputs(y, next_state)
   return y, next_state
