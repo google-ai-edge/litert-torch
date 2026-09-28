@@ -16,25 +16,21 @@
 
 from flatbuffers import flexbuffers
 from litert_torch.backend import lowerings
+from litert_torch.backend.experimental.torch_tfl import _ops as _
 from litert_torch.backend.lowerings import utils as lowering_utils
 from litert_converter.mlir import ir
 import torch
-import torch.nn.functional as F
-
-
-def l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
-  """Aligns with l2norm in FLA / Qwen3.5 linear attention."""
-  inv_norm = torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
-  return x * inv_norm
 
 
 def _gated_delta_update_custom_options(
     *,
     mode: int,
+    state_dtype: str = "float32",
 ) -> bytes:
   return bytes(
       flexbuffers.Dumps({
           "mode": int(mode),
+          "state_dtype": str(state_dtype),
       })
   )
 
@@ -91,7 +87,7 @@ def gated_delta_update(
 ) -> tuple[torch.Tensor, torch.Tensor]:
   """Reference PyTorch implementation of Gated Delta Update."""
   del mode
-  batch_size, num_v_heads, seq_len, _ = v_t.shape
+  _, num_v_heads, seq_len, _ = v_t.shape
   num_k_heads = q_t.shape[1]
   if num_v_heads != num_k_heads:
     g_ratio = num_v_heads // num_k_heads
@@ -134,7 +130,11 @@ def _gated_delta_update_fake(
       dtype=q_t.dtype,
       device=q_t.device,
   )
-  out2 = torch.empty_like(recurrent_state)
+  out2 = torch.empty(
+      recurrent_state.shape,
+      dtype=torch.float32,
+      device=recurrent_state.device,
+  )
   return out1, out2
 
 
@@ -163,121 +163,3 @@ def _gated_delta_update_lower(
   )
   return tuple(op.results)
 
-
-def gated_delta_net(
-    mixed_qkv: torch.Tensor,
-    z: torch.Tensor,
-    b: torch.Tensor,
-    a: torch.Tensor,
-    conv_state: torch.Tensor,
-    recurrent_state: torch.Tensor,
-    conv_weight: torch.Tensor,
-    a_log: torch.Tensor,
-    dt_bias: torch.Tensor,
-    norm_weight: torch.Tensor,
-    valid_mask: torch.Tensor,
-    head_k_dim: int = 128,
-    head_v_dim: int = 128,
-    num_k_heads: int = 16,
-    num_v_heads: int = 16,
-    rms_norm_eps: float = 1e-6,
-    mode: int = 0,
-    use_fp32: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-  """Helper function to apply Gated Delta Net with conv1d outside and custom gated_delta_update op."""
-  batch_size, seq_len, _ = mixed_qkv.shape
-  conv_dim = conv_weight.shape[0]
-  key_dim = head_k_dim * num_k_heads
-  value_dim = head_v_dim * num_v_heads
-  state_len = conv_state.shape[-1]
-
-  mixed_qkv_t = mixed_qkv.transpose(1, 2)
-  if valid_mask is not None and valid_mask.numel() > 0:
-    mixed_qkv_masked = mixed_qkv_t * valid_mask.view(batch_size, 1, seq_len).to(
-        mixed_qkv_t.dtype
-    )
-  else:
-    mixed_qkv_masked = mixed_qkv_t
-
-  full_qkv = torch.cat([conv_state, mixed_qkv_masked], dim=-1)
-  conv_out = F.conv1d(
-      full_qkv,
-      conv_weight,
-      None,
-      padding=0,
-      groups=conv_dim,
-  )
-  conv_out = F.silu(conv_out[:, :, -seq_len:]).transpose(1, 2)
-
-  if seq_len > 1 and valid_mask is not None and valid_mask.numel() > 0:
-    num_real = valid_mask[0].to(full_qkv.dtype).sum()
-    total_len = state_len + seq_len
-    row_idx = torch.arange(
-        total_len, device=full_qkv.device, dtype=full_qkv.dtype
-    ).unsqueeze(1)
-    col_target = num_real + torch.arange(
-        state_len, device=full_qkv.device, dtype=full_qkv.dtype
-    ).unsqueeze(0)
-    selector = (row_idx == col_target).to(full_qkv.dtype)
-    new_conv_state = full_qkv @ selector
-  else:
-    new_conv_state = full_qkv[:, :, -state_len:]
-
-  query, key, value = torch.split(
-      conv_out, [key_dim, key_dim, value_dim], dim=-1
-  )
-  query = query.reshape(batch_size, seq_len, -1, head_k_dim)
-  key = key.reshape(batch_size, seq_len, -1, head_k_dim)
-  value = value.reshape(batch_size, seq_len, -1, head_v_dim)
-
-  beta = b.sigmoid()
-  act_dtype = torch.float32 if use_fp32 else b.dtype
-  a_val = (a.to(act_dtype) + dt_bias.to(act_dtype)).clamp(max=50.0)
-  g = -a_log.to(act_dtype).exp() * torch.log1p(torch.exp(a_val))
-
-  if valid_mask is not None and valid_mask.numel() > 0:
-    vm_4d = valid_mask.view(batch_size, seq_len, 1, 1).to(query.dtype)
-    vm_3d = valid_mask.view(batch_size, seq_len, 1).to(query.dtype)
-    query = query * vm_4d
-    key = key * vm_4d
-    value = value * vm_4d
-    beta = beta * vm_3d
-    g = g * vm_3d
-
-  # Normalize query and key with l2norm and scale query
-  query = l2norm(query, dim=-1, eps=rms_norm_eps) * (1.0 / (head_k_dim**0.5))
-  key = l2norm(key, dim=-1, eps=rms_norm_eps)
-
-  initial_dtype = query.dtype
-  compute_dtype = torch.float32 if use_fp32 else initial_dtype
-
-  # Transpose and cast to compute_dtype for gated_delta_update
-  q_t, k_t, v_t, beta_t, g_t = [
-      x.transpose(1, 2).contiguous().to(compute_dtype)
-      for x in (query, key, value, beta, g)
-  ]
-  recurrent_state_in = recurrent_state.to(compute_dtype)
-
-  # Call custom op
-  core_out, new_recurrent_state = torch.ops.litert_torch.gated_delta_update(
-      q_t, k_t, v_t, beta_t, g_t, recurrent_state_in, mode=mode
-  )
-
-  # Transpose output back to [B, N, H, D_v] and cast back to original dtype
-  core_out = core_out.transpose(1, 2).contiguous().to(initial_dtype)
-  new_recurrent_state = new_recurrent_state.to(initial_dtype)
-
-  # Apply RMSNorm
-  variance = core_out.to(torch.float32).pow(2).mean(-1, keepdim=True)
-  core_out_norm = norm_weight * (
-      core_out * torch.rsqrt(variance + rms_norm_eps).to(initial_dtype)
-  )
-
-  # Gate with z (z is [B, N, H*D_v])
-  z_reshaped = z.reshape(batch_size, seq_len, num_v_heads, head_v_dim)
-  out = core_out_norm * F.silu(z_reshaped)
-
-  # Reshape to [B, N, H*D_v]
-  out = out.reshape(batch_size, seq_len, -1)
-
-  return out, new_conv_state, new_recurrent_state

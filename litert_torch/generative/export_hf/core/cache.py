@@ -450,9 +450,14 @@ class LiteRTLMCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
             model_config, layer_index, export_config
         )
     )
-    cache_dtype = (
-        torch.float16 if export_config.experimental_use_fp16 else torch.float32
-    )
+    if hasattr(export_config, "get_torch_dtype"):
+      cache_dtype = export_config.get_torch_dtype()
+    else:
+      cache_dtype = (
+          torch.float16
+          if getattr(export_config, "experimental_use_fp16", False)
+          else torch.float32
+      )
     keys = torch.zeros(k_cache_shape, dtype=cache_dtype)
     values = torch.zeros(v_cache_shape, dtype=cache_dtype)
     return cls(
@@ -598,13 +603,21 @@ class LiteRTLMConvCacheLayer(
         "linear_attention",
     ), f"Unsupported layer type: {layer_type}"
     batch_size = kwargs.pop("batch_size", export_config.batch_size)
+    if hasattr(export_config, "get_torch_dtype"):
+      cache_dtype = export_config.get_torch_dtype()
+    else:
+      cache_dtype = (
+          torch.float16
+          if getattr(export_config, "experimental_use_fp16", False)
+          else torch.float32
+      )
     if layer_type == "conv":
       c_state_shape = (
           batch_size,
           model_config.hidden_size,
           model_config.conv_L_cache - 1,
       )
-      c_state = torch.zeros(c_state_shape, dtype=torch.float32)
+      c_state = torch.zeros(c_state_shape, dtype=cache_dtype)
       return cls(
           c_state,
           batch_size=batch_size,
@@ -628,7 +641,7 @@ class LiteRTLMConvCacheLayer(
           model_config.linear_key_head_dim,
           model_config.linear_value_head_dim,
       )
-      c_state = torch.zeros(c_state_shape, dtype=torch.float32)
+      c_state = torch.zeros(c_state_shape, dtype=cache_dtype)
       r_state = torch.zeros(r_state_shape, dtype=torch.float32)
       return cls(
           conv_states=c_state,
@@ -638,6 +651,26 @@ class LiteRTLMConvCacheLayer(
           **kwargs,
       )
 
+  def to(self, *args, **kwargs) -> "LiteRTLMConvCacheLayer":
+    if hasattr(self, "c_state") and isinstance(self.c_state, torch.Tensor):
+      self.c_state = self.c_state.to(*args, **kwargs)
+    if hasattr(self, "conv_states") and isinstance(
+        self.conv_states, torch.Tensor
+    ):
+      self.conv_states = self.conv_states.to(*args, **kwargs)
+    if hasattr(self, "recurrent_states") and isinstance(
+        self.recurrent_states, torch.Tensor
+    ):
+      device = kwargs.get("device", None)
+      if not device and args and isinstance(args[0], (torch.device, str)):
+        device = args[0]
+      if device is not None:
+        self.recurrent_states = self.recurrent_states.to(
+            device=device, dtype=torch.float32
+        )
+      else:
+        self.recurrent_states = self.recurrent_states.to(dtype=torch.float32)
+    return self
 
 LAYER_TYPE_TO_CLASS = {
     "full_attention": LiteRTLMCacheLayer,
