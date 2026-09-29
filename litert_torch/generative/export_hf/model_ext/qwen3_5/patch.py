@@ -298,10 +298,20 @@ def apply_qwen3_5_model_patches(
   fuse_qkv = getattr(export_config, "fuse_qkv", False)
   use_rope = getattr(export_config, "use_rope_composite", False)
   use_swiglu = getattr(export_config, "use_swiglu_composite", False)
+  extra_kwargs = getattr(export_config, "extra_kwargs", None) or {}
+  use_fused_gdn = extra_kwargs.get(
+      "use_fused_gdn", getattr(export_config, "use_fused_gdn", True)
+  )
+  gdn_mode = extra_kwargs.get(
+      "gdn_mode", getattr(export_config, "gdn_mode", 0)
+  )
 
   replaced_modules: list[tuple[torch.nn.Module, str, torch.nn.Module]] = []
 
   def replace_modules(module: torch.nn.Module) -> None:
+    if hasattr(module, "use_fused_gdn") and hasattr(module, "gdn_mode"):
+      module.use_fused_gdn = bool(use_fused_gdn)
+      module.gdn_mode = int(gdn_mode)
     for child_name, child in module.named_children():
       if isinstance(
           child,

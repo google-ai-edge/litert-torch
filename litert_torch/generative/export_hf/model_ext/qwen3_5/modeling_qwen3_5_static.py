@@ -584,6 +584,8 @@ class Qwen3_5StaticDecoderLayer(nn.Module):
           conv_kernel_size=config.linear_conv_kernel_dim,
           rms_norm_eps=config.rms_norm_eps,
           layer_idx=layer_idx,
+          use_fused_gdn=getattr(config, "use_fused_gdn", True),
+          gdn_mode=getattr(config, "gdn_mode", 0),
       )
     elif self.block_type == "full_attention":
       self.self_attn = Qwen3_5Attention(config, layer_idx)  # pyrefly: ignore[bad-argument-type]
