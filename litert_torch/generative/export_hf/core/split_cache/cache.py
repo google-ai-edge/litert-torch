@@ -158,9 +158,9 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
     seq_len = key_states.shape[2]
     self.cumulative_length += seq_len
 
-    key_states = key_states.to(self.keys[0].dtype)  # pyrefly: ignore[unsupported-operation]
-
-    value_states = value_states.to(self.values[0].dtype)  # pyrefly: ignore[unsupported-operation]
+    # The slices are kept in the compute dtype so that attention can consume
+    # them directly. They are cast to the cache dtype when they are emitted as
+    # model outputs (see post_process_kv_cache in exportable_module.py).
 
     if self.k_ts_idx == 2:
       key_states = key_states.reshape(
@@ -318,8 +318,13 @@ class LiteRTLMSplitCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
     k_cache_shape, v_cache_shape = cls._infer_cache_shape_from_config(
         model_config, layer_index, export_config, **kwargs
     )
-    keys = torch.zeros(k_cache_shape, dtype=torch.float32)
-    values = torch.zeros(v_cache_shape, dtype=torch.float32)
+    # Keep in sync with cache_lib.LiteRTLMCacheLayer, which is used by the
+    # auxiliary CacheUpdate model; both must agree on the KV cache dtype.
+    cache_dtype = (
+        torch.float16 if export_config.experimental_use_fp16 else torch.float32
+    )
+    keys = torch.zeros(k_cache_shape, dtype=cache_dtype)
+    values = torch.zeros(v_cache_shape, dtype=cache_dtype)
     init_kwargs = dict(kwargs)
     init_kwargs.setdefault("batch_size", export_config.batch_size)
     init_kwargs.setdefault("k_ts_idx", export_config.k_ts_idx)

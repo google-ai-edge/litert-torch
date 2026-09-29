@@ -160,11 +160,26 @@ def _update_kv_sliding_impl(
     **unused_kwargs,
 ):
   """Updates the cache buffer using tfl.dynamic_update_slice."""
+  # Optional dtype for the routing computation (one-hot + matmul). Set by the
+  # split cache CacheUpdate module so that fp16 caches do not need fp16
+  # BATCH_MATMUL, which is not supported by all backends (e.g. TFLite CPU).
+  # Defaults to the cache dtype.
+  compute_dtype = unused_kwargs.get("sliding_update_compute_dtype", None)
   new_k = update_kv_cache_with_sliding(
-      key_state, k_slice, cache_position, valid_mask, k_ts_idx
+      key_state,
+      k_slice,
+      cache_position,
+      valid_mask,
+      k_ts_idx,
+      compute_dtype=compute_dtype,
   )
   new_v = update_kv_cache_with_sliding(
-      value_state, v_slice, cache_position, valid_mask, v_ts_idx
+      value_state,
+      v_slice,
+      cache_position,
+      valid_mask,
+      v_ts_idx,
+      compute_dtype=compute_dtype,
   )
   # (Updated cache, (cache_past, cache_slice))
   # Former stores in the cache layer (to be gathered after transformer stack),

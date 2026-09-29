@@ -110,8 +110,10 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
     k_slices = []
     v_slices = []
     for layer in output_cache.layers:
-      k_slices.append(layer.keys[1])  # pyrefly: ignore[missing-attribute]
-      v_slices.append(layer.values[1])  # pyrefly: ignore[missing-attribute]
+      # Slices are emitted in the cache dtype (e.g. fp16) so that they can be
+      # written into the cache buffers without conversion.
+      k_slices.append(layer.keys[1].to(layer.keys[0].dtype))  # pyrefly: ignore[missing-attribute]
+      v_slices.append(layer.values[1].to(layer.values[0].dtype))  # pyrefly: ignore[missing-attribute]
     assert all(x is not None for x in k_slices)
     assert all(x is not None for x in v_slices)
     return {'kv_slice_k': k_slices, 'kv_slice_v': v_slices}
@@ -393,7 +395,13 @@ class CacheUpdate(torch.nn.Module):
     assert len(kv_slice.layers) == len(kv_cache.layers)
     num_layers = len(kv_slice.layers)
 
-    cache_kwargs = {'cache_position': input_pos, 'kv_slice_preprocessed': True}
+    cache_kwargs = {
+        'cache_position': input_pos,
+        'kv_slice_preprocessed': True,
+        # Run the ring buffer routing (one-hot + matmul) in fp32 even when the
+        # cache is fp16; the result is cast back to the cache dtype.
+        'sliding_update_compute_dtype': torch.float32,
+    }
     if valid_mask is not None:
       cache_kwargs['valid_mask'] = valid_mask
     kv_cache.set_cache_runtime_args(cache_kwargs)
