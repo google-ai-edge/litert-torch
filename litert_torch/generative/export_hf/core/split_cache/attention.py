@@ -51,11 +51,13 @@ def _scaled_dot_product_attention(
   Returns:
     The output tensor of scaled_dot_product_attention_transposed.
   """
-  key_past = key_cache[0]
-  key = key_cache[1]
+  # The KV cache may be stored in a lower precision (e.g. fp16). Attention is
+  # computed in the query dtype. These casts are no-ops if dtypes match.
+  key_past = key_cache[0].to(query.dtype)
+  key = key_cache[1].to(query.dtype)  # pyrefly: ignore[missing-attribute]
 
-  value_past = value_cache[0]
-  value = value_cache[1]
+  value_past = value_cache[0].to(query.dtype)
+  value = value_cache[1].to(query.dtype)  # pyrefly: ignore[missing-attribute]
 
   if scale is None:
     scale = 1.0 / math.sqrt(head_size)

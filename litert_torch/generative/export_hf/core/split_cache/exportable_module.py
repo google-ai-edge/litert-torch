@@ -110,8 +110,10 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
     k_slices = []
     v_slices = []
     for layer in output_cache.layers:
-      k_slices.append(layer.keys[1])  # pyrefly: ignore[missing-attribute]
-      v_slices.append(layer.values[1])  # pyrefly: ignore[missing-attribute]
+      # Slices are emitted in the cache dtype (e.g. fp16) so that they can be
+      # written into the cache buffers without conversion.
+      k_slices.append(layer.keys[1].to(layer.keys[0].dtype))  # pyrefly: ignore[missing-attribute]
+      v_slices.append(layer.values[1].to(layer.values[0].dtype))  # pyrefly: ignore[missing-attribute]
     assert all(x is not None for x in k_slices)
     assert all(x is not None for x in v_slices)
     return {'kv_slice_k': k_slices, 'kv_slice_v': v_slices}
