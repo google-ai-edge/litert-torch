@@ -396,6 +396,69 @@ def build_llm_metadata(
   return llm_metadata
 
 
+_IMAGE_GEN_TFLITE_MODEL_TYPES = {
+    'text_encoder': 'tf_lite_text_encoder',
+    'dit': 'tf_lite_image_denoiser',
+    'vae_decoder': 'tf_lite_image_decoder',
+    'vae_encoder': 'tf_lite_image_encoder',
+}
+
+
+def package_image_gen_model(
+    source_model_artifacts: export_lib.SourceModelArtifacts,
+    export_config: exportable_module.ExportableModuleConfig,
+    exported_model_artifacts: export_lib.ExportedModelArtifacts,
+) -> export_lib.ExportedModelArtifacts:
+  """Packs exported ImageGen submodels and metadata into a .litertlm file."""
+  work_dir = export_config.work_dir
+  output_dir = export_config.output_dir
+  tokenizer_model_path = (
+      export_config.tokenizer_path_override
+      or exported_model_artifacts.tokenizer_model_path
+  )
+
+  image_gen_model = source_model_artifacts.model
+  image_gen_metadata = image_gen_model.get_image_gen_metadata(export_config)
+  image_gen_metadata_path = os.path.join(work_dir, 'image_gen_metadata.pb')  # pyrefly: ignore[no-matching-overload]
+  with open(image_gen_metadata_path, 'wb') as f:
+    f.write(image_gen_metadata.SerializeToString())
+
+  builder = litertlm_builder.LitertLmFileBuilder()
+  builder.add_system_metadata(
+      litertlm_builder.Metadata(
+          key='Authors',
+          value='ODML',
+          dtype=litertlm_builder.DType.STRING,
+      )
+  )
+  builder.add_image_gen_metadata(image_gen_metadata_path)
+  if tokenizer_model_path:
+    if tokenizer_model_path.endswith('.json'):
+      builder.add_hf_tokenizer(tokenizer_model_path)
+    else:
+      builder.add_sentencepiece_tokenizer(tokenizer_model_path)
+
+  if exported_model_artifacts.additional_model_paths:
+    for (
+        name,
+        submodel_path,
+    ) in exported_model_artifacts.additional_model_paths.items():
+      if name not in _IMAGE_GEN_TFLITE_MODEL_TYPES:
+        raise ValueError(f'Unsupported ImageGen model component: {name}')
+      builder.add_tflite_model(
+          submodel_path,
+          _IMAGE_GEN_TFLITE_MODEL_TYPES[name],
+      )
+
+  model_path = os.path.join(output_dir, 'model.litertlm')  # pyrefly: ignore[no-matching-overload]
+  with open(model_path, 'wb') as f:
+    builder.build(f)
+  return dataclasses.replace(
+      exported_model_artifacts,
+      litert_lm_model_path=model_path,
+  )
+
+
 @progress.task('Package model')
 def package_model(
     source_model_artifacts: export_lib.SourceModelArtifacts,
@@ -403,6 +466,12 @@ def package_model(
     exported_model_artifacts: export_lib.ExportedModelArtifacts,
 ):
   """Packs models to LiteRT LM."""
+  if export_config.task == export_lib.ExportTask.TEXT_TO_IMAGE:
+    return package_image_gen_model(
+        source_model_artifacts,
+        export_config,
+        exported_model_artifacts,
+    )
   work_dir = export_config.work_dir
   output_dir = export_config.output_dir
   use_jinja_template = export_config.use_jinja_template

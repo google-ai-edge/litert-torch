@@ -96,6 +96,18 @@ class ExtraKwargsValidationTest(parameterized.TestCase):
     self.assertTrue(config.extra_kwargs["use_bool_mask"])
     self.assertTrue(config.extra_kwargs["apply_gpu_composites"])
 
+  def test_text_to_image_config_defaults_and_max_seq_len(self):
+    config = _config(
+        task="text_to_image",
+        t2i_output_image_size=256,
+        extra_kwargs={"max_seq_len": 128},
+    )
+    self.assertEqual(
+        config.task, exportable_module_config.ExportTask.TEXT_TO_IMAGE
+    )
+    self.assertEqual(config.t2i_output_image_size, 256)
+    self.assertEqual(config.extra_kwargs["max_seq_len"], 128)
+
 
 if __name__ == "__main__":
   googletest.main()

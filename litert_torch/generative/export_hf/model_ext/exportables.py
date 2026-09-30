@@ -16,6 +16,7 @@
 
 from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.core.speech import exportables as speech_exportables
+from litert_torch.generative.export_hf.model_ext.bonsai_flux2 import bonsai_flux2 as bonsai_flux2_lib
 from litert_torch.generative.export_hf.model_ext.gemma3 import vision_exportable as gemma3_vision_exportable
 from litert_torch.generative.export_hf.model_ext.gemma3n import exportable_module as gemma3n_exportable
 from litert_torch.generative.export_hf.model_ext.gemma3n import vision_exportable as gemma3n_vision_exportable
@@ -210,3 +211,14 @@ def get_tts_model_cls(model_type: str):
     return qwen3_tts_lib.Qwen3Tts
   else:
     raise ValueError(f'Unsupported TTS model type: {model_type}')
+
+
+def get_image_gen_model_cls(model_type: str):
+  """Gets ImageGen model class by model type or pipeline class name."""
+  # prism-ml/Bonsai-FLUX.2-klein-4B uses "_class_name": "Flux2KleinPipeline" in
+  # its Diffusers model_index.json. BonsaiFlux2 always exports 3 monolithic
+  # TFLite files (text_encoder, dit, vae_decoder).
+  if model_type in ('bonsai_flux2', 'Flux2KleinPipeline'):
+    return bonsai_flux2_lib.BonsaiFlux2
+  else:
+    raise ValueError(f'Unsupported ImageGen model type: {model_type}')
