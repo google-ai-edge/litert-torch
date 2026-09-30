@@ -19,6 +19,9 @@ through the `model_ext` registry) can quantize their own artifacts without an
 import cycle.
 """
 
+import gc
+import inspect
+
 from litert_torch import progress
 
 from litert_quantizer import quantizer as quantizer_lib
@@ -150,5 +153,14 @@ def quantize_model(
         f'Invalid quantization recipe: {quantization_recipe}. Please check'
         ' the recipe name.'
     ) from e
-  qt.quantize().export_model(quantized_model_path, overwrite=True)
+  quantize_kwargs = {}
+  if 'serialize_to_path' in inspect.signature(qt.quantize).parameters:
+    quantize_kwargs['serialize_to_path'] = quantized_model_path
+  if 'stream_weights' in inspect.signature(qt.quantize).parameters:
+    quantize_kwargs['stream_weights'] = True
+  qt.quantize(**quantize_kwargs).export_model(
+      quantized_model_path, overwrite=True
+  )
+  del qt
+  gc.collect()
   return quantized_model_path
