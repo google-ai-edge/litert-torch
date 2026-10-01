@@ -92,6 +92,10 @@ def bind_per_expert_scale(model: torch.nn.Module) -> torch.nn.Module:
       continue
     setattr(experts, _PER_EXPERT_SCALE_ATTR, [per_expert_scale])
     router.fold_per_expert_scale = False
+    # The `moe` custom op consumes int32 indices; ask the router to produce
+    # them directly so no int64 tensors are emitted into the graph.
+    if hasattr(router, "use_int32_indices"):
+      router.use_int32_indices = True
   return model
 
 
@@ -520,7 +524,7 @@ def litert_moe_experts_forward(self, hidden_states, top_k_index, top_k_weights):
   output = moe_experts(
       hidden_states.reshape(1, -1, self.hidden_dim),
       top_k_weights.reshape(1, -1, self.config.top_k_experts),
-      top_k_index.reshape(1, -1, self.config.top_k_experts).to(torch.int32),
+      top_k_index.to(torch.int32).reshape(1, -1, self.config.top_k_experts),
       gate_weight,
       ff1_weight,
       linear_weight,

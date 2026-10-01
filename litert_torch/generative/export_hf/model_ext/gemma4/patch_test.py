@@ -256,6 +256,41 @@ class PatchTest(parameterized.TestCase):
         "Router top-k weights mismatch.",
     )
 
+  def test_gemma4_router_int32_indices(self):
+    config = _get_dummy_gemma4_text_config()
+    config.num_experts = 128
+    config.top_k_experts = 8
+    config.hidden_size = 2816
+    config.rms_norm_eps = 1e-6
+
+    torch.manual_seed(42)
+    router = patch.LiteRTGemma4TextRouter(config)
+    self.assertFalse(router.use_int32_indices)
+    hidden_states = torch.randn(8, config.hidden_size)
+
+    with torch.no_grad():
+      ref_probs, ref_weights, ref_index = router(hidden_states)
+      router.use_int32_indices = True
+      probs, weights, index = router(hidden_states)
+
+    self.assertEqual(ref_index.dtype, torch.int64)
+    self.assertEqual(index.dtype, torch.int32)
+    self.assertTrue(torch.equal(ref_index, index.long()))
+    self.assertTrue(torch.allclose(ref_probs, probs))
+    self.assertTrue(torch.allclose(ref_weights, weights))
+
+    # The exported graph must route through `tfl.topk_v2` (int32 indices)
+    # instead of `aten.topk`, which the converter lowers to `tfl.topk_v2`
+    # followed by an int64 CAST.
+    exported = torch.export.export(router, (hidden_states,))
+    targets = [
+        str(node.target)
+        for node in exported.graph.nodes
+        if node.op == "call_function"
+    ]
+    self.assertTrue(any("tfl.topk_v2" in t for t in targets), targets)
+    self.assertFalse(any("aten.topk" in t for t in targets), targets)
+
   def test_gemma4_26b_experts_litert_moe_equivalence(self):
     config = _get_dummy_gemma4_text_config()
     config.num_experts = 128
@@ -500,8 +535,10 @@ class PatchTest(parameterized.TestCase):
 
       moe.bind_per_expert_scale(block)
       self.assertFalse(block.router.fold_per_expert_scale)
+      self.assertTrue(block.router.use_int32_indices)
 
       _, unfolded_weights, top_k_index = block.router(hidden_states)
+      self.assertEqual(top_k_index.dtype, torch.int32)
       actual_output = moe.litert_moe_experts_forward(
           block.experts, hidden_states, top_k_index, unfolded_weights
       )
