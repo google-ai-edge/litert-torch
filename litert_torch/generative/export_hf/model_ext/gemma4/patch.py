@@ -16,6 +16,7 @@
 
 import contextlib
 from litert_torch.backend import optimization_barrier as optimization_barrier_lib
+from litert_torch.backend.experimental.torch_tfl import _ops as _  # Registers torch.ops.tfl.*
 from litert_torch.generative.export_hf.experimental.composites import rope as rope_composite
 from litert_torch.generative.export_hf.model_ext import patches as patches_lib
 from litert_torch.generative.layers import normalization
@@ -345,6 +346,13 @@ try:
       # Cleared by `moe.bind_per_expert_scale` when the experts are lowered to
       # the `moe` custom op, which applies `per_expert_scale` in the delegate.
       self.fold_per_expert_scale = True
+      # Set by `moe.bind_per_expert_scale` when the experts are lowered to the
+      # `moe` custom op, which consumes int32 indices. `torch.topk` returns
+      # int64 indices, which the converter lowers to `tfl.topk_v2` (int32)
+      # followed by a CAST to int64, leaving int64 tensors in the graph that
+      # GPU delegates cannot represent. Emitting `tfl.topk_v2` directly keeps
+      # the routing indices in int32 end to end.
+      self.use_int32_indices = False
 
     def forward(
         self, hidden_states: torch.Tensor
@@ -356,11 +364,16 @@ try:
       router_probabilities = torch.nn.functional.softmax(expert_scores, dim=-1)
 
       # topk returns both values (probabilities) and indices directly
-      top_k_weights, top_k_index = torch.topk(
-          router_probabilities,
-          k=self.config.top_k_experts,
-          dim=-1,
-      )  # both [B*S, K]
+      if self.use_int32_indices:
+        top_k_weights, top_k_index = torch.ops.tfl.topk_v2(
+            router_probabilities, self.config.top_k_experts
+        )  # both [B*S, K], indices in int32
+      else:
+        top_k_weights, top_k_index = torch.topk(
+            router_probabilities,
+            k=self.config.top_k_experts,
+            dim=-1,
+        )  # both [B*S, K]
 
       # Normalize the top-k weights so they sum to 1 per token
       top_k_weights /= top_k_weights.sum(dim=-1, keepdim=True)
