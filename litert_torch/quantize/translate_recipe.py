@@ -107,7 +107,7 @@ def _set_quant_config(
 ):
   rm.add_quantization_config(
       regex=regex,
-      operation_name=operation_name,
+      operation_names=[operation_name],
       op_config=_OpQuantConfig(
           weight_tensor_config=_TensorQuantConfig(
               num_bits=_get_nbits_from_dtype(layer_recipe.weight_dtype),
