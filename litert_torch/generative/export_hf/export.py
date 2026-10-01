@@ -127,6 +127,10 @@ def export(
     experimental_lightweight_conversion: bool = False,
     experimental_transpile_chat_template_for_minijinja: bool = False,
     sliding_window_ring_buffer_size: int | None = None,
+    enable_neon_for_npu_greedy_sampling: bool | None = None,
+    use_hw_masking_for_npu: bool | None = None,
+    use_hw_cache_update_for_npu: bool | None = None,
+    use_hw_ple_for_npu: bool | None = None,
     use_litert_lm_compiler: bool = False,
     compile_configs: str | None = None,
     calibration_dataset_dir: str | None = None,
@@ -211,6 +215,12 @@ def export(
       which might speed up large model conversion, but might not work for all
       models.
     sliding_window_ring_buffer_size: The size of the sliding window ring buffer.
+    enable_neon_for_npu_greedy_sampling: Whether to use NEON optimizations for
+      greedy sampling on NPU.
+    use_hw_masking_for_npu: Whether to use manual mask update logic on NPU.
+    use_hw_cache_update_for_npu: Whether to use manual KV-cache update logic on
+      NPU.
+    use_hw_ple_for_npu: Whether to use manual per-layer embedding lookup on NPU.
     sampler_top_p: The top_p sampling parameter.
     sampler_temperature: The temperature sampling parameter.
     sampler_top_k: The top_k sampling parameter.
