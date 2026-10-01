@@ -89,7 +89,11 @@ class _FakeModel:
   generation_config = None
 
 
-def _build_llm_metadata(tokenizer, chat_templates=_EMPTY_CHAT_TEMPLATES):
+def _build_llm_metadata(
+    tokenizer,
+    chat_templates=_EMPTY_CHAT_TEMPLATES,
+    litert_lm_model_type_override="generic",
+):
   return litert_lm_builder.build_llm_metadata(
       source_model_artifacts=export_lib.SourceModelArtifacts(
           model=_FakeModel(),
@@ -102,8 +106,55 @@ def _build_llm_metadata(tokenizer, chat_templates=_EMPTY_CHAT_TEMPLATES):
       ),
       chat_templates=chat_templates,
       exported_model_artifacts=export_lib.ExportedModelArtifacts(),
-      litert_lm_model_type_override="generic",
+      litert_lm_model_type_override=litert_lm_model_type_override,
   )
+
+
+# The two shapes of FunctionGemma chat template. The HF one formats each tool
+# declaration itself from the tool dict; LiteRT-LM's
+# `google-function-gemma.jinja` prints declarations the runtime already
+# rendered.
+_DICT_TOOLS_TEMPLATE = "declaration:{{ tool['function']['name'] }}"
+_STRING_TOOLS_TEMPLATE = "{{ tool | trim }}"
+
+
+class _FakeFunctionGemmaTokenizer:
+  """FunctionGemma tokenizer stub; renders the template shape it is given."""
+
+  bos_token = None
+  eos_token = "<end_of_turn>"
+
+  def __init__(self, chat_template):
+    self.chat_template = chat_template
+
+  def apply_chat_template(
+      self,
+      messages,
+      tools=None,
+      chat_template=None,
+      tokenize=False,
+      add_generation_prompt=False,
+  ):
+    del tokenize, add_generation_prompt
+    template = (
+        chat_template if chat_template is not None else self.chat_template
+    )
+    rendered = ""
+    for tool in tools or []:
+      if template == _DICT_TOOLS_TEMPLATE:
+        declaration = f"declaration:{tool['function']['name']}{{}}"
+      else:
+        declaration = str(tool).strip()
+      rendered += (
+          f"<start_function_declaration>{declaration}"
+          "<end_function_declaration>"
+      )
+    for message in messages:
+      rendered += (
+          f"<start_of_turn>{message['role']}\n{message['content']}"
+          "<end_of_turn>\n"
+      )
+    return rendered
 
 
 class TokenizerPrependsBosTest(parameterized.TestCase):
@@ -194,6 +245,66 @@ class TokenizerPrependsBosTest(parameterized.TestCase):
             _UnprobeableTokenizer(bos_token="<s>")
         )
     )
+
+
+class BuildLlmMetadataFunctionGemmaTest(parameterized.TestCase):
+
+  def _function_gemma(self, tokenizer, chat_templates):
+    llm_metadata = _build_llm_metadata(
+        tokenizer,
+        chat_templates=chat_templates,
+        litert_lm_model_type_override="function_gemma",
+    )
+    self.assertTrue(llm_metadata.llm_model_type.HasField("function_gemma"))
+    return llm_metadata.llm_model_type.function_gemma
+
+  def test_template_formats_fc_when_it_renders_declarations(self):
+    # The runtime formats tool declarations in C++ by default and hands the
+    # template strings. A bundled template that reads the tool dict (the HF
+    # FunctionGemma template) then fails to render any prompt with tools, so
+    # it must be paired with use_template_for_fc_format.
+    tokenizer = _FakeFunctionGemmaTokenizer(_DICT_TOOLS_TEMPLATE)
+    function_gemma = self._function_gemma(tokenizer, _DICT_TOOLS_TEMPLATE)
+    self.assertTrue(function_gemma.use_template_for_fc_format)
+
+  def test_runtime_formats_fc_when_template_prints_tools(self):
+    # `{{ tool | trim }}` templates need the declarations the runtime
+    # rendered; the probe tool's name shows up in the output either way.
+    tokenizer = _FakeFunctionGemmaTokenizer(_STRING_TOOLS_TEMPLATE)
+    function_gemma = self._function_gemma(tokenizer, _STRING_TOOLS_TEMPLATE)
+    self.assertFalse(function_gemma.use_template_for_fc_format)
+
+  @parameterized.named_parameters(
+      ("dict_tools_override", _STRING_TOOLS_TEMPLATE, _DICT_TOOLS_TEMPLATE),
+      ("string_tools_override", _DICT_TOOLS_TEMPLATE, _STRING_TOOLS_TEMPLATE),
+  )
+  def test_fc_format_follows_the_bundled_jinja_template(
+      self, tokenizer_template, bundled_template
+  ):
+    # jinja_chat_template_override case: the bundled template is not the
+    # tokenizer's own, and the bundled one is what the runtime renders.
+    tokenizer = _FakeFunctionGemmaTokenizer(tokenizer_template)
+    function_gemma = self._function_gemma(tokenizer, bundled_template)
+    self.assertEqual(
+        function_gemma.use_template_for_fc_format,
+        bundled_template == _DICT_TOOLS_TEMPLATE,
+    )
+
+  def test_runtime_formats_fc_without_a_jinja_template(self):
+    # prompt_templates (prefix/suffix) path: the runtime falls back to its
+    # own template, which expects pre-rendered declarations.
+    tokenizer = _FakeFunctionGemmaTokenizer(_DICT_TOOLS_TEMPLATE)
+    function_gemma = self._function_gemma(tokenizer, _EMPTY_CHAT_TEMPLATES)
+    self.assertFalse(function_gemma.use_template_for_fc_format)
+
+  def test_runtime_formats_fc_when_template_cannot_render_tools(self):
+    # _FakeTokenizer.apply_chat_template takes no `tools`; a tokenizer that
+    # cannot be probed keeps the previous metadata.
+    tokenizer = _FakeTokenizer(
+        bos_token=None, bos_token_id=None, prepends_bos=False
+    )
+    function_gemma = self._function_gemma(tokenizer, "<|user|>{{ content }}")
+    self.assertFalse(function_gemma.use_template_for_fc_format)
 
 
 class BuildLlmMetadataStartTokenTest(parameterized.TestCase):
