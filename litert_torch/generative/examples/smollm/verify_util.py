@@ -27,6 +27,7 @@ import transformers
 _BUILDER = {
     "v1": smollm.build_model,
     "v2": smollm.build_model_v2,
+    "v3": smollm.build_model_v3,
 }
 
 DEFAULT_PROMPTS = ["What is the meaning of life?"]

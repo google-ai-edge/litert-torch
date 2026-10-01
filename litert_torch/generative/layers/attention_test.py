@@ -15,6 +15,7 @@
 
 from litert_torch.generative.layers import attention
 from litert_torch.generative.layers import model_config as cfg
+from litert_torch.generative.layers import rotary_position_embedding
 import torch
 
 from absl.testing import absltest as googletest
@@ -78,6 +79,42 @@ class AttentionTest(parameterized.TestCase):
     attn_mask = torch.ones((1, 1, 10, 10), dtype=torch.float32)
     out = self_atten(x, rope=None, mask=attn_mask)
     self.assertEqual(out.shape, expected_shape)
+
+  def test_causal_self_attention_nope(self):
+    torch.manual_seed(0)
+    attn_config = cfg.AttentionConfig(
+        num_heads=4,
+        head_dim=8,
+        num_query_groups=4,
+        rotary_base=10000,
+        rotary_percentage=1.0,
+    )
+    self_atten = attention.CausalSelfAttention(
+        dim=attn_config.num_heads * attn_config.head_dim,
+        config=attn_config,
+        enable_hlfb=False,
+    )
+    seq_len = 4
+    x = torch.randn(1, seq_len, attn_config.num_heads * attn_config.head_dim)
+    input_pos = torch.arange(seq_len)
+    n_elem = int(attn_config.rotary_percentage * attn_config.head_dim)
+    rope = rotary_position_embedding.build_rope(
+        input_pos, n_elem, attn_config.rotary_base
+    )
+    mask = torch.zeros(1, 1, seq_len, seq_len)
+
+    # Reference: no RoPE supplied at all.
+    baseline = self_atten(x, rope=None, mask=mask, input_pos=input_pos)
+
+    # enable_rope=False (NoPE) must be identical to supplying no RoPE.
+    attn_config.enable_rope = False
+    nope_out = self_atten(x, rope=rope, mask=mask, input_pos=input_pos)
+    torch.testing.assert_close(nope_out, baseline)
+
+    # Sanity check: with RoPE enabled the output must differ.
+    attn_config.enable_rope = True
+    rope_out = self_atten(x, rope=rope, mask=mask, input_pos=input_pos)
+    self.assertFalse(torch.allclose(rope_out, baseline))
 
   def test_cross_attention(self):
     norm_config = cfg.NormalizationConfig(
