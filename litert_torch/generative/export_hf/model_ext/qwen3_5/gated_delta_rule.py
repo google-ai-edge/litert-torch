@@ -32,10 +32,12 @@ def l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
 def _gated_delta_update_custom_options(
     *,
     mode: int,
+    state_dtype: str = "float32",
 ) -> bytes:
   return bytes(
       flexbuffers.Dumps({
           "mode": int(mode),
+          "state_dtype": str(state_dtype),
       })
   )
 
@@ -92,7 +94,7 @@ def gated_delta_update(
 ) -> tuple[torch.Tensor, torch.Tensor]:
   """Reference PyTorch implementation of Gated Delta Update."""
   del mode
-  batch_size, num_v_heads, seq_len, _ = v_t.shape
+  _, num_v_heads, seq_len, _ = v_t.shape
   num_k_heads = q_t.shape[1]
   if num_v_heads != num_k_heads:
     g_ratio = num_v_heads // num_k_heads
@@ -135,7 +137,11 @@ def _gated_delta_update_fake(
       dtype=q_t.dtype,
       device=q_t.device,
   )
-  out2 = torch.empty_like(recurrent_state)
+  out2 = torch.empty(
+      recurrent_state.shape,
+      dtype=torch.float32,
+      device=recurrent_state.device,
+  )
   return out1, out2
 
 
@@ -183,7 +189,7 @@ def gated_delta_net(
     num_v_heads: int = 16,
     rms_norm_eps: float = 1e-6,
     mode: int = 0,
-    use_fp32: bool = False,
+    use_fp32: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
   """Helper function to apply Gated Delta Net with conv1d outside and custom gated_delta_update op."""
   batch_size, seq_len, _ = mixed_qkv.shape
@@ -252,7 +258,7 @@ def gated_delta_net(
       x.transpose(1, 2).contiguous().to(compute_dtype)
       for x in (query, key, value, beta, g)
   ]
-  recurrent_state_in = recurrent_state.to(compute_dtype)
+  recurrent_state_in = recurrent_state.to(torch.float32)
 
   # Call custom op
   core_out, new_recurrent_state = torch.ops.litert_torch.gated_delta_update(
@@ -261,7 +267,7 @@ def gated_delta_net(
 
   # Transpose output back to [B, N, H, D_v] and cast back to original dtype
   core_out = core_out.transpose(1, 2).contiguous().to(initial_dtype)
-  new_recurrent_state = new_recurrent_state.to(initial_dtype)
+  new_recurrent_state = new_recurrent_state.to(torch.float32)
 
   # Apply RMSNorm
   variance = core_out.to(torch.float32).pow(2).mean(-1, keepdim=True)
