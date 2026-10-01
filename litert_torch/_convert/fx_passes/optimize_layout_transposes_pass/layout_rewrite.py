@@ -451,9 +451,29 @@ def _aten_index(node):
   node.target = index_nhwc
 
 
+# The tfl.mirror_pad composites for the NHWC pad rewrites are built here rather
+# than in BuildAtenCompositePass. CanonicalizePass runs between the two passes
+# and re-traces the graph, which inlines these Python-function targets into
+# aten.pad; a composite builder keyed on the function object therefore never
+# matches, and the pad falls through to its gather-based decomposition. The
+# mark_tensor calls emitted by StableHLOCompositeBuilder survive the re-trace.
+
+
 def reflection_pad2d_nhwc(x, padding):
-  padding = [0, 0] + padding
-  return torch.nn.functional.pad(x, padding, mode="reflect")
+  left, right, top, bottom = padding
+  builder = StableHLOCompositeBuilder(
+      name="tfl.mirror_pad",
+      attr={
+          "mode": "REFLECT",
+          "paddings": [left, right, top, bottom],
+          "is_nchw_op": False,
+      },
+  )
+  x = builder.mark_inputs(x)
+  output = torch.nn.functional.pad(
+      x, [0, 0, left, right, top, bottom], mode="reflect"
+  )
+  return builder.mark_outputs(output)
 
 
 @rewriters.register(aten.reflection_pad2d.default)
@@ -462,8 +482,26 @@ def _aten_reflection_pad2d(node):
 
 
 def replication_pad2d_nhwc(x, padding):
-  padding = [0, 0] + padding
-  return torch.nn.functional.pad(x, padding, mode="replicate")
+  left, right, top, bottom = padding
+  nhwc_padding = [0, 0, left, right, top, bottom]
+
+  # PyTorch's replicate padding repeats the boundary element, whereas TFLite's
+  # MirrorPad(mode="SYMMETRIC") mirrors inward. They are only mathematically
+  # equivalent for padding <= 1 (where both repeat the edge element once).
+  if not all(p <= 1 for p in padding):
+    return torch.nn.functional.pad(x, nhwc_padding, mode="replicate")
+
+  builder = StableHLOCompositeBuilder(
+      name="tfl.mirror_pad",
+      attr={
+          "mode": "SYMMETRIC",
+          "paddings": [left, right, top, bottom],
+          "is_nchw_op": False,
+      },
+  )
+  x = builder.mark_inputs(x)
+  output = torch.nn.functional.pad(x, nhwc_padding, mode="replicate")
+  return builder.mark_outputs(output)
 
 
 @rewriters.register(aten.replication_pad2d.default)
