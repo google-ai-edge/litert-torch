@@ -25,13 +25,14 @@ from litert_torch.generative.export_hf.experimental.npu_export.configs import ve
 
 gfile = None
 
-# Qualcomm HTP: an int16 ADD that reads a CONCATENATION output larger than
-# 1 MiB pairs its rows with the wrong operand rows (litert-torch#1184). The
-# prefill graph's attention-mask ADD reads exactly such a tensor - the mask
-# tiled over the query heads that share one KV head, 2 B x
+# Qualcomm HTP: when the prefill attention mask, concatenated along the row
+# axis, is larger than 1 MiB, the int16 ADD that reads it pairs its rows with
+# the wrong operand rows (litert-torch#1184). The mask is tiled over the query
+# heads that share one KV head, 2 B x
 # (num_attention_heads / num_key_value_heads) x prefill x
-# (cache_length + prefill). Above the limit prefill is no longer causal and a
-# prompt longer than one prefill chunk loses its content (LiteRT-LM#3508).
+# (cache_length + prefill); with one query head per KV head the exporter builds
+# no concat. Above the limit prefill is no longer causal and a prompt longer
+# than one prefill chunk loses its content (LiteRT-LM#3508).
 _HTP_MASK_ADD_LIMIT_BYTES = 1 << 20
 
 
@@ -263,6 +264,9 @@ def warn_if_prefill_mask_exceeds_htp_limit(cfg: NpuPipelineConfig) -> None:
   if got is None:
     return
   q_heads_per_kv, nbytes = got
+  # with one query head per KV head the exporter builds no mask concat
+  if q_heads_per_kv == 1:
+    return
   if nbytes <= _HTP_MASK_ADD_LIMIT_BYTES:
     return
   prefill = int(max(cfg.prefill_lengths))
