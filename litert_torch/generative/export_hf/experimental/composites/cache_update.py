@@ -33,6 +33,7 @@ def update_kv_cache_with_sliding(
     positions: torch.Tensor,
     valid_mask: torch.Tensor,
     ts_idx: int = 2,
+    compute_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
   """Updates the ring buffer KV cache.
 
@@ -42,21 +43,27 @@ def update_kv_cache_with_sliding(
       positions: [T] - Global token positions
       valid_mask: [T] - 1 for valid tokens, 0 for padding
       ts_idx: 2 or 3, indicating the time sequence dimension
+      compute_dtype: Optional dtype for the routing computation (one-hot and
+        matmul). Defaults to the cache dtype. The result is cast back to the
+        cache dtype before blending.
 
   Returns:
       Updated cache tensor.
   """
   cache_size = cache.size(ts_idx)
   seq_len = positions.size(0)
+  if compute_dtype is None:
+    compute_dtype = cache.dtype
+  update = update.to(compute_dtype)
 
   # 1. Calculate modulo indices
   indices = positions % cache_size
 
   # 2. One-Hot routing matrix: [T, S]
-  one_hot = int32_one_hot(indices, num_classes=cache_size, dtype=cache.dtype)
+  one_hot = int32_one_hot(indices, num_classes=cache_size, dtype=compute_dtype)
 
   # 3. Apply the valid_mask (Zero out padding rows)
-  valid_mask_float = valid_mask.to(cache.dtype).unsqueeze(1)
+  valid_mask_float = valid_mask.to(compute_dtype).unsqueeze(1)
   one_hot = one_hot * valid_mask_float
 
   # 4. Project and Route based on the sequence dimension
@@ -82,6 +89,7 @@ def update_kv_cache_with_sliding(
     raise ValueError("ts_idx must be 2 or 3")
 
   # 5. BLEND: Combine projected updates with the old cache
+  update_expanded = update_expanded.to(cache.dtype)
   updated_cache = torch.where(update_mask, update_expanded, cache)
 
   return updated_cache

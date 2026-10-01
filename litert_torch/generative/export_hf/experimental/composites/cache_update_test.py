@@ -51,6 +51,50 @@ class CacheUpdateTest(parameterized.TestCase):
     self.assertTrue((new_v[:, :, :, 0] == 1).all())
     self.assertTrue((new_v[:, :, :, 1:6] == 0).all())
 
+  @parameterized.parameters(2, 3)
+  def test_update_kv_cache_with_sliding_fp16_cache_fp32_compute(self, ts_idx):
+    s, t, d = 8, 3, 16
+    shape_cache = (1, 2, s, d) if ts_idx == 2 else (1, 2, d, s)
+    shape_update = (1, 2, t, d) if ts_idx == 2 else (1, 2, d, t)
+    cache = torch.zeros(shape_cache, dtype=torch.float16)
+    update = torch.full(shape_update, 1.5, dtype=torch.float16)
+    positions = torch.tensor([6, 7, 8], dtype=torch.int32)
+    valid_mask = torch.tensor([True, True, False], dtype=torch.bool)
+
+    new_cache = cache_update.update_kv_cache_with_sliding(
+        cache,
+        update,
+        positions,
+        valid_mask,
+        ts_idx=ts_idx,
+        compute_dtype=torch.float32,
+    )
+    self.assertEqual(new_cache.dtype, torch.float16)
+    self.assertEqual(new_cache.shape, shape_cache)
+    new_cache = new_cache if ts_idx == 2 else new_cache.transpose(2, 3)
+    self.assertTrue((new_cache[:, :, 6:8, :] == 1.5).all())
+    # Slot 0 (position 8) is masked out by valid_mask.
+    self.assertTrue((new_cache[:, :, 0:6, :] == 0).all())
+
+    class UpdateModule(torch.nn.Module):
+
+      def forward(self, c, u, p, m):
+        return cache_update.update_kv_cache_with_sliding(
+            c, u, p, m, ts_idx=ts_idx, compute_dtype=torch.float32
+        )
+
+    exported = torch.export.export(
+        UpdateModule(), (cache, update, positions, valid_mask)
+    )
+    matmul_dtypes = [
+        node.meta["val"].dtype
+        for node in exported.graph.nodes
+        if node.op == "call_function"
+        and ("matmul" in str(node.target) or "mm" in str(node.target))
+    ]
+    self.assertNotEmpty(matmul_dtypes)
+    self.assertTrue(all(dt == torch.float32 for dt in matmul_dtypes))
+
   def test_cache_update_composite_with_ring_buffer(self):
     cache_k = torch.zeros((1, 2, 8, 16), dtype=torch.float32)
     cache_v = torch.zeros((1, 2, 16, 8), dtype=torch.float32)
