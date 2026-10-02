@@ -115,6 +115,7 @@ def export(
     export_audio_encoder: bool | None = None,
     audio_encoder_quantization_recipe: str | None = None,
     input_sec: float | None = None,
+    t2i_output_image_size: int | None = None,
     stateful_after: int | None = None,
     litert_lm_model_type_override: str | None = None,
     litert_lm_llm_metadata_override: str | None = None,
@@ -150,7 +151,7 @@ def export(
     output_dir: The directory to export the model to.
     task: The task to export the model for. Use 'text_generation' for text only
       LLMs, 'image_text_to_text' for Vision LLMs, 'automatic_speech_recognition'
-      for ASR, and 'text_to_speech' for TTS.
+      for ASR, 'text_to_speech' for TTS, and 'text_to_image' for ImageGen.
     keep_temporary_files: Whether to keep the temporary files.
     trust_remote_code: Whether to trust remote code.
     prefill_lengths: The lengths of the prefill input, separated by comma. If
@@ -161,8 +162,8 @@ def export(
     cache_length: The length of the cache.
     cache_lengths: The lengths of the cache, separated by comma. If multiple
       cache_lengths and multiple prefill_lengths are provided, the export
-      processes the outer product of prefill_lengths and cache_lengths,
-      creating prefill/decode signatures for each combination (e.g.,
+      processes the outer product of prefill_lengths and cache_lengths, creating
+      prefill/decode signatures for each combination (e.g.,
       `prefill_{prefill_length}_cache_{cache_length}`).
     quantization_recipe: The quantization recipes to use, separated by comma.
     enable_dynamic_shape: Whether to enable dynamic shape.
@@ -172,8 +173,8 @@ def export(
       numbers) for cache length.
     use_rope_composite: Whether to enable the RoPE composite.
     use_qkv_norm_rope_composite: Whether to enable the QKV norm rope composite.
-    use_sdpa_composite: Whether to enable the fused transposed SDPA composite
-      in both prefill and decode signatures.
+    use_sdpa_composite: Whether to enable the fused transposed SDPA composite in
+      both prefill and decode signatures.
     apply_gpu_composites: Master switch for GPU composite emission. Implied by
       use_sdpa_composite.
     use_bool_mask: Whether to use a boolean attention mask instead of
@@ -199,6 +200,7 @@ def export(
       vision encoder.
     export_audio_encoder: Whether to export the audio encoder.
     input_sec: Input audio length in seconds.
+    t2i_output_image_size: Output image height/width for text_to_image task.
     stateful_after: If >= 0, the model runs in stateful mode after this many
       tokens.
     litert_lm_model_type_override: Overriding the LiteRT LM model type.
@@ -313,6 +315,11 @@ def export(
     if export_config.aot_backend is not None:
       export_tasks.append(export_lib.aot_compile_model)
       legacy_compile_triggered = True
+  elif task == ExportTask.TEXT_TO_IMAGE:
+    export_tasks.append(export_lib.export_image_gen_models)
+    export_tasks.append(export_lib.export_tokenizer)
+    if export_config.bundle_litert_lm:
+      export_tasks.append(litert_lm_builder.package_model)
   else:
     export_tasks.append(export_lib.export_text_prefill_decode_model)
     if (

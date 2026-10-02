@@ -265,6 +265,43 @@ def load_model(
     task: ExportTask | str = ExportTask.TEXT_GENERATION,
 ) -> SourceModelArtifacts:
   """Loads model from checkpoint."""
+  # Handle TEXT_TO_IMAGE before transformers.AutoConfig.from_pretrained()
+  # because Diffusers multi-component pipeline directories (e.g. FLUX.2) use a
+  # top-level model_index.json with component subdirectories rather than a
+  # single root-level transformers config.json.
+  if task == ExportTask.TEXT_TO_IMAGE:
+    local_model_dir = (
+        model_path
+        if os.path.exists(model_path)
+        else huggingface_hub.snapshot_download(model_path)
+    )
+    model_type = export_config.litert_lm_model_type_override
+    if not model_type:
+      model_index_path = os.path.join(local_model_dir, 'model_index.json')
+      config_path = os.path.join(local_model_dir, 'config.json')
+      if os.path.exists(model_index_path):
+        with open(model_index_path, 'r') as f:
+          model_type = json.load(f).get('_class_name', 'bonsai_flux2')
+      elif os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+          model_type = json.load(f).get('model_type', 'bonsai_flux2')
+      else:
+        model_type = 'bonsai_flux2'
+    model_cls = model_ext_exportables.get_image_gen_model_cls(model_type)
+    model = model_cls(local_model_dir, export_config=export_config)
+    tok_dir = os.path.join(model.model_dir, 'tokenizer')
+    if not os.path.exists(tok_dir):
+      tok_dir = model.model_dir
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        tok_dir, trust_remote_code=trust_remote_code
+    )
+    config = transformers.PretrainedConfig.from_dict({'model_type': model_type})
+    return SourceModelArtifacts(
+        model=model,
+        model_config=config,
+        text_model_config=config,
+        tokenizer=tokenizer,  # pyrefly: ignore[bad-argument-type]
+    )
 
   try:
     config = transformers.AutoConfig.from_pretrained(
@@ -1059,6 +1096,21 @@ def export_tts_models(
   """Exports TTS models."""
   tts_model = source_model_artifacts.model
   artifacts = tts_model.export(export_config)
+  return dataclasses.replace(
+      exported_model_artifacts,
+      additional_model_paths=artifacts,
+  )
+
+
+@progress.task('Export ImageGen models')
+def export_image_gen_models(
+    source_model_artifacts: SourceModelArtifacts,
+    export_config: exportable_module.ExportableModuleConfig,
+    exported_model_artifacts: ExportedModelArtifacts,
+):
+  """Exports ImageGen models."""
+  image_gen_model = source_model_artifacts.model
+  artifacts = image_gen_model.export(export_config)
   return dataclasses.replace(
       exported_model_artifacts,
       additional_model_paths=artifacts,

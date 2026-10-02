@@ -14,6 +14,7 @@
 # ==============================================================================
 """Tests for litert_lm_builder."""
 
+import os
 import types
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -21,6 +22,8 @@ from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.core import litert_lm_builder
 import litert_lm_builder as litertlm_builder
+from litert_lm_builder.runtime.proto import image_gen_metadata_pb2
+from litert_lm_builder.runtime.proto import image_gen_model_type_pb2
 
 _EMPTY_CHAT_TEMPLATES = ((None, None), (None, None), (None, None))
 
@@ -307,6 +310,65 @@ class BuildLlmMetadataStartTokenTest(parameterized.TestCase):
         source_artifacts, export_config, "", exported_artifacts
     )
     self.assertTrue(metadata.llm_model_type.HasField("gemma3"))
+
+  def test_package_image_gen_model_bonsai_flux2(self):
+    temp_dir = self.create_tempdir().full_path
+    text_enc_path = os.path.join(temp_dir, "text_encoder.tflite")
+    dit_path = os.path.join(temp_dir, "dit.tflite")
+    vae_path = os.path.join(temp_dir, "vae_decoder.tflite")
+    tok_path = os.path.join(temp_dir, "tokenizer.json")
+    for p, content in [
+        (text_enc_path, b"TFL3_TEXT_ENC"),
+        (dit_path, b"TFL3_DIT"),
+        (vae_path, b"TFL3_VAE"),
+        (tok_path, b'{"version": "1.0"}'),
+    ]:
+      with open(p, "wb") as f:
+        f.write(content)
+
+    class _FakeImageGenModel:
+
+      def get_image_gen_metadata(self, export_config):
+        return image_gen_metadata_pb2.ImageGenMetadata(
+            image_gen_model_type=image_gen_model_type_pb2.ImageGenModelType(
+                bonsai_flux2=image_gen_model_type_pb2.BonsaiFlux2(
+                    flux2_params=image_gen_model_type_pb2.Flux2Params(
+                        seq_len=256,
+                        img_size=export_config.t2i_output_image_size,
+                        packed_ch=128,
+                        prompt_dim=7680,
+                        default_steps=4,
+                    ),
+                )
+            )
+        )
+
+    source_artifacts = export_lib.SourceModelArtifacts(
+        model=_FakeImageGenModel(),  # pyrefly: ignore[bad-argument-type]
+        model_config=None,
+        text_model_config=None,
+        tokenizer=None,
+    )
+    export_config = exportable_module.ExportableModuleConfig(
+        model="bonsai-flux2",
+        output_dir=temp_dir,
+        work_dir=temp_dir,
+        task=export_lib.exportable_module_config.ExportTask.TEXT_TO_IMAGE,
+        t2i_output_image_size=256,
+    )
+    exported_artifacts = export_lib.ExportedModelArtifacts(
+        additional_model_paths={
+            "text_encoder": text_enc_path,
+            "dit": dit_path,
+            "vae_decoder": vae_path,
+        },
+        tokenizer_model_path=tok_path,
+    )
+    result = litert_lm_builder.package_model(
+        source_artifacts, export_config, exported_artifacts
+    )
+    self.assertIsNotNone(result.litert_lm_model_path)
+    self.assertTrue(os.path.exists(result.litert_lm_model_path))
 
 
 if __name__ == "__main__":

@@ -148,6 +148,35 @@ class ExportNpuCompilationPipelineTest(absltest.TestCase):
         overwrite=True,
     )
 
+  @mock.patch("litert_torch.generative.export_hf.export.run_export_tasks")
+  def test_text_to_image_export_orchestration(self, mock_run_export):
+    mock_run_export.return_value = mock.MagicMock(
+        litert_lm_model_path="/tmp/fake_image_gen.litertlm"
+    )
+    export.export(
+        model="/tmp/fake_bonsai_flux2",
+        output_dir="/tmp/fake_output",
+        task="text_to_image",
+        t2i_output_image_size=256,
+        bundle_litert_lm=True,
+    )
+    mock_run_export.assert_called_once()
+    passed_tasks = mock_run_export.call_args[0][0]
+    passed_config = mock_run_export.call_args[0][1]
+    self.assertEqual(
+        passed_config.task,
+        export.ExportTask.TEXT_TO_IMAGE,
+    )
+    self.assertEqual(passed_config.t2i_output_image_size, 256)
+    self.assertEqual(
+        passed_tasks,
+        [
+            export_lib.export_image_gen_models,
+            export_lib.export_tokenizer,
+            litert_lm_builder.package_model,
+        ],
+    )
+
 
 if __name__ == "__main__":
   absltest.main()
