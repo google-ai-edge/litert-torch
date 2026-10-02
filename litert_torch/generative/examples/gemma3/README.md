@@ -57,8 +57,8 @@ config = bundler.BundleConfig(
     start_token=START_TOKEN,
     stop_tokens=STOP_TOKENS,
     output_filename="/tmp/gemma3.task",
-    prompt_prefix="<start_of_turn>user\n",
-    prompt_suffix="<end_of_turn>\n<start_of_turn>model\n",
+    prompt_prefix_user="<start_of_turn>user\n",
+    prompt_suffix_user="<end_of_turn>\n<start_of_turn>model\n",
 )
 bundler.create_bundle(config)
 ```
