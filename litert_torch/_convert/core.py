@@ -157,7 +157,7 @@ def convert_signatures(
     strict_export: Literal["auto"] | bool = False,
     quant_config: qcfg.QuantConfig | None = None,
     lightweight_conversion: bool = False,
-    enable_x64: bool = True,
+    enable_x64: bool = False,
     runtime_constant_folding: bool | None = None,
     use_v2: bool = False,
     export_dir: str | None = None,
@@ -193,7 +193,9 @@ def convert_signatures(
         for large models that might otherwise hit memory limits. Note that
         enabling this mode may bypass certain graph optimizations, such as
         constant folding, in the resulting model.
-      enable_x64: If False, downcast x64 tensors and inputs to x32.
+      enable_x64: If False (default), downcast int64/float64 tensors, including
+        model inputs and outputs, to int32/float32. Pass True to keep 64-bit
+        types; most on-device runtimes and accelerators do not support them.
       runtime_constant_folding: If True, uses the LiteRT runtime to fold
         constants beyond what the standard converter can resolve. If None
         (default), this is enabled automatically when `lightweight_conversion`
@@ -237,10 +239,6 @@ def convert_signatures(
       logging.warning("lightweight_conversion is ignored when use_v2=True.")
     if runtime_constant_folding:
       logging.warning("runtime_constant_folding is ignored when use_v2=True.")
-    if not enable_x64:
-      logging.warning(
-          "enable_x64=False is not currently handled in use_v2 mode."
-      )
 
     from litert_torch._convert import converter_v2  # pylint: disable=g-import-not-at-top
 
@@ -250,6 +248,7 @@ def convert_signatures(
         export_dir=export_dir,
         output_file_path=output_file_path,
         delete_in_memory_params=delete_in_memory_params,
+        enable_x64=enable_x64,
         fold_fp16_resource_casts=fold_fp16_resource_casts,
         allow_reuse_intermediates=allow_reuse_intermediates,
         weights_loader=weights_loader,
