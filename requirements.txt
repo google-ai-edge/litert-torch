@@ -19,5 +19,5 @@ jaxtyping
 fire
 rich
 sentencepiece
-litert-lm
-litert-lm-builder
+litert-lm-nightly
+litert-lm-builder-nightly

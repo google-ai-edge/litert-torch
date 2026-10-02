@@ -105,6 +105,37 @@ _define_flag(
     False,
     'Disable compiling aux model.',
 )
+_define_flag(
+    flags.DEFINE_bool,
+    'disable_text_encoder_compilation',
+    False,
+    'Disable compiling text encoder model.',
+)
+_define_flag(
+    flags.DEFINE_bool,
+    'disable_audio_encoder_compilation',
+    False,
+    'Disable compiling audio encoder model.',
+)
+_define_flag(
+    flags.DEFINE_bool,
+    'enable_audio_encoder_compilation',
+    False,
+    'Enable compiling audio encoder model.',
+)
+_define_flag(
+    flags.DEFINE_bool,
+    'enable_vision_encoder_compilation',
+    False,
+    'Enable compiling vision encoder model.',
+)
+
+_WEIGHT_SHARING_MODEL_TYPES = (
+    'prefill_decode',
+    'text_encoder',
+    'audio_encoder_hw',
+    'vision_encoder',
+)
 
 
 def _get_soc_manufacturer(backend: str) -> str:
@@ -114,6 +145,13 @@ def _get_soc_manufacturer(backend: str) -> str:
     return 'MediaTek'
   else:
     raise ValueError(f'Unsupported backend: {backend}')
+
+
+def _get_mediatek_sdk_version(soc_model: str) -> tuple[str, str]:
+  """Returns (sdk_version_type, np_version_str) for the given MediaTek SoC."""
+  if soc_model.upper() == 'MT6993':
+    return ('version9', 'v9')
+  return ('version8', 'v8')
 
 
 def _resolve_subgraphs_to_compile(
@@ -162,6 +200,10 @@ def compile_litertlm(
     model_name: str | None = None,
     disable_weight_sharing: bool = False,
     disable_aux_compilation: bool = False,
+    disable_text_encoder_compilation: bool = False,
+    disable_audio_encoder_compilation: bool = False,
+    enable_audio_encoder_compilation: bool = False,
+    enable_vision_encoder_compilation: bool = False,
     intermediate_dir: str | pathlib.Path | None = None,
     keep_temporary_files: bool = False,
     overwrite: bool = True,
@@ -178,6 +220,10 @@ def compile_litertlm(
     model_name: Optional model name to resolve model-specific default configs.
     disable_weight_sharing: If True, disables weight sharing for Qualcomm.
     disable_aux_compilation: If True, disables compiling auxiliary model.
+    disable_text_encoder_compilation: If True, disables compiling text encoder.
+    enable_audio_encoder_compilation: If True, enables compiling audio encoder.
+    enable_vision_encoder_compilation: If True, enables compiling vision
+      encoder.
     intermediate_dir: If set, intermediate artifacts will be stored here. If not
       set and keep_temporary_files is True, intermediate artifacts will be
       stored in a temporary directory.
@@ -264,6 +310,8 @@ def compile_litertlm(
     with _open(toml_path, 'r') as f:
       toml_data = tomllib.loads(f.read())
 
+    sections_to_clear_constraint: list[str] = []
+
     if 'section' in toml_data:
       for section in toml_data['section']:
         if section.get('section_type') == 'TFLiteModel':
@@ -284,10 +332,35 @@ def compile_litertlm(
               if isinstance(flags_val, list):
                 extra_flags = list(flags_val)
 
+          if model_type == 'aux' and disable_aux_compilation:
+            should_compile = False
+          if model_type == 'text_encoder' and disable_text_encoder_compilation:
+            should_compile = False
+          if (
+              model_type == 'audio_encoder_hw'
+              and disable_audio_encoder_compilation
+          ):
+            should_compile = False
+          if (
+              model_type == 'audio_encoder_hw'
+              and enable_audio_encoder_compilation
+          ):
+            should_compile = True
+          if (
+              model_type == 'vision_encoder'
+              and enable_vision_encoder_compilation
+          ):
+            should_compile = True
+
+          if should_compile and model_type == 'aux' and backend != 'qualcomm':
+            raise ValueError(
+                'Compiling aux model is only supported for Qualcomm backend.'
+            )
+
           if (
               should_compile
               and backend == 'qualcomm'
-              and model_type == 'prefill_decode'
+              and model_type in _WEIGHT_SHARING_MODEL_TYPES
           ):
             if not disable_weight_sharing:
               if not any(
@@ -304,15 +377,21 @@ def compile_litertlm(
               extra_flags = list(extra_flags)
               extra_flags.append('--qualcomm_enable_weight_sharing=false')
 
-          if model_type == 'aux' and disable_aux_compilation:
-            should_compile = False
-
-          if should_compile and model_type == 'aux' and backend != 'qualcomm':
-            raise ValueError(
-                'Compiling aux model is only supported for Qualcomm backend.'
-            )
+          if should_compile and backend == 'mediatek':
+            sdk_version_type, _ = _get_mediatek_sdk_version(soc_model)
+            if not any('mediatek_sdk_version_type' in f for f in extra_flags):
+              extra_flags = list(extra_flags)
+              extra_flags.append(
+                  f'--mediatek_sdk_version_type={sdk_version_type}'
+              )
+            if model_type in ('text_encoder', 'vision_encoder'):
+              if not any('mediatek_option_bundle' in f for f in extra_flags):
+                extra_flags = list(extra_flags)
+                extra_flags.append('--mediatek_option_bundle=gemma-decode')
 
           if should_compile:
+            if section.get('backend_constraint') == 'cpu':
+              sections_to_clear_constraint.append(model_type)
             logging.info('Compiling model %s (%s)', model_type, model_path)
 
             subgraphs = _resolve_subgraphs_to_compile(model_path, model_type)
@@ -384,9 +463,15 @@ def compile_litertlm(
               elif backend == 'mediatek':
                 import ai_edge_litert_sdk_mediatek  # pylint: disable=g-import-not-at-top  # pytype: disable=import-error
 
-                sdk_libs_path = str(
-                    ai_edge_litert_sdk_mediatek.path_to_sdk_libs()
-                )
+                _, np_version = _get_mediatek_sdk_version(soc_model)
+                try:
+                  sdk_libs_path = str(
+                      ai_edge_litert_sdk_mediatek.path_to_sdk_libs(np_version)
+                  )
+                except TypeError:
+                  sdk_libs_path = str(
+                      ai_edge_litert_sdk_mediatek.path_to_sdk_libs()
+                  )
 
               if sdk_libs_path:
                 logging.info('Found vendor SDK library path: %s', sdk_libs_path)
@@ -403,11 +488,14 @@ def compile_litertlm(
               )
 
             try:
+              target_soc = (
+                  soc_model.lower() if backend == 'mediatek' else soc_model
+              )
               compiler(
                   input_model=input_model,
                   output_model=output_model,
                   soc_manufacturer=soc_manufacturer,
-                  soc_model=soc_model,
+                  soc_model=target_soc,
                   **kwargs,
               )
               os.replace(compiled_model_path, model_path)
@@ -431,6 +519,8 @@ def compile_litertlm(
     builder = litertlm_builder.LitertLmFileBuilder.from_toml_file(
         str(toml_path)
     )
+    for model_type in sections_to_clear_constraint:
+      builder.remove_backend_constraint(model_type)
     with _open(output_litertlm, 'wb') as f:
       builder.build(f)
     logging.info('Done')
@@ -461,6 +551,10 @@ def main(argv: Sequence[str]) -> None:
         model_name=FLAGS.model_name,
         disable_weight_sharing=FLAGS.disable_weight_sharing,
         disable_aux_compilation=FLAGS.disable_aux_compilation,
+        disable_text_encoder_compilation=FLAGS.disable_text_encoder_compilation,
+        disable_audio_encoder_compilation=FLAGS.disable_audio_encoder_compilation,
+        enable_audio_encoder_compilation=FLAGS.enable_audio_encoder_compilation,
+        enable_vision_encoder_compilation=FLAGS.enable_vision_encoder_compilation,
     )
   except ValueError as e:
     raise app.UsageError(str(e)) from e
