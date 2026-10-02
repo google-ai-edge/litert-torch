@@ -23,6 +23,7 @@ import parameterized
 import torch
 
 from absl.testing import absltest as googletest
+from ai_edge_litert import interpreter as tfl_interpreter  # pylint: disable=g-direct-tensorflow-import
 
 
 def _func_to_torch_module(func: Callable[..., torch.Tensor]):
@@ -38,6 +39,14 @@ def _func_to_torch_module(func: Callable[..., torch.Tensor]):
       return self._func(*args, **kwargs)
 
   return TestModule(func).eval()
+
+
+def _op_names(edge_model) -> list[str]:
+  """Returns the builtin op names of the converted model, in graph order."""
+  interpreter = tfl_interpreter.Interpreter(
+      model_content=edge_model.model_content()
+  )
+  return [op['op_name'] for op in interpreter._get_ops_details()]  # pylint: disable=protected-access
 
 
 @testing.parameterized_class(testing.V1_V2_PARAMETERS)
@@ -231,6 +240,17 @@ class TestConvertComposites(testing.V1V2TestCase):
         model_coverage.compare_tflite_torch(edge_model, torch_module, args)
     )
 
+  def _assert_single_mirror_pad(self, edge_model):
+    if self.use_v2:
+      # The V2 path skips the pre-convert decompositions
+      # (`export_torch_signature(..., run_decompositions=False)`), so
+      # `aten.pad` never becomes `aten.reflection_pad2d` there and the
+      # mirror_pad composite is not built. Numerics are still checked above.
+      return
+    op_names = _op_names(edge_model)
+    self.assertEqual(op_names.count('MIRROR_PAD'), 1, op_names)
+    self.assertNotIn('GATHER_ND', op_names)
+
   def test_convert_pad_reflect(self):
     """Tests conversion of reflection pad2d."""
     torch_module = _func_to_torch_module(
@@ -244,6 +264,23 @@ class TestConvertComposites(testing.V1V2TestCase):
             edge_model, torch_module, tracing_args
         )
     )
+    self._assert_single_mirror_pad(edge_model)
+
+  def test_convert_reflection_pad2d_module(self):
+    """Tests nn.ReflectionPad2d feeding a conv, as in AOT-GAN's stem."""
+    torch_module = torch.nn.Sequential(
+        torch.nn.ReflectionPad2d(3),
+        torch.nn.Conv2d(3, 8, kernel_size=7),
+    ).eval()
+    tracing_args = (torch.randn(1, 3, 16, 16),)
+    edge_model = litert_torch.convert(torch_module, tracing_args)
+
+    self.assertTrue(
+        model_coverage.compare_tflite_torch(
+            edge_model, torch_module, tracing_args
+        )
+    )
+    self._assert_single_mirror_pad(edge_model)
 
   def test_convert_pad_replicate(self):
     """Tests conversion of replication pad2d."""
@@ -258,6 +295,23 @@ class TestConvertComposites(testing.V1V2TestCase):
             edge_model, torch_module, tracing_args
         )
     )
+    # Replicate padding > 1 is not a MIRROR_PAD; it stays decomposed.
+    self.assertNotIn('MIRROR_PAD', _op_names(edge_model))
+
+  def test_convert_pad_replicate_one(self):
+    """Tests replication pad2d by 1, which maps to MIRROR_PAD SYMMETRIC."""
+    torch_module = _func_to_torch_module(
+        lambda x: torch.nn.functional.pad(x, [1, 1, 1, 1], mode='replicate')
+    )
+    tracing_args = (torch.randn(1, 3, 10, 10),)
+    edge_model = litert_torch.convert(torch_module, tracing_args)
+
+    self.assertTrue(
+        model_coverage.compare_tflite_torch(
+            edge_model, torch_module, tracing_args
+        )
+    )
+    self._assert_single_mirror_pad(edge_model)
 
   def test_convert_conv2d_reflect_padding(self):
     """Tests conversion of Conv2d with reflect padding_mode."""
@@ -277,6 +331,7 @@ class TestConvertComposites(testing.V1V2TestCase):
             edge_model, torch_module, tracing_args
         )
     )
+    self._assert_single_mirror_pad(edge_model)
 
   def test_convert_conv2d_replicate_padding(self):
     """Tests conversion of Conv2d with replicate padding_mode."""
@@ -296,6 +351,7 @@ class TestConvertComposites(testing.V1V2TestCase):
             edge_model, torch_module, tracing_args
         )
     )
+    self._assert_single_mirror_pad(edge_model)
 
 
 if __name__ == '__main__':
