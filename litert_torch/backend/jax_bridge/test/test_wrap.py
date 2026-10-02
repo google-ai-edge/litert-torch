@@ -19,6 +19,7 @@ from litert_torch import backend
 from litert_torch.backend import jax_bridge
 from litert_converter.mlir import ir
 from litert_converter.mlir.dialects import func
+import torch
 
 from absl.testing import absltest as googletest
 
@@ -79,6 +80,33 @@ class TestWrap(googletest.TestCase):
     ir_text = str(module)
     self.assertIn("%0 = call @retb_", ir_text)
     self.assertIn("return %arg0 : tensor<10x10xf32>", ir_text)
+
+  def test_wrap_preserves_single_element_list_output(self):
+    with (
+        backend.export_utils.create_ir_context() as context,
+        ir.Location.unknown(),
+    ):
+      module = ir.Module.create()
+      lctx = backend.export.LoweringContext(context, module)
+      graph = torch.fx.Graph()
+      lctx.node = graph.placeholder("output")
+      lctx.node.meta["val"] = [torch.empty((10, 10))]
+
+      @jax_bridge.wrap
+      def wrapped_list(a: jax.Array):
+        return [a]
+
+      with ir.InsertionPoint(module.body):
+
+        @func.FuncOp.from_py_func(
+            ir.RankedTensorType.get((10, 10), ir.F32Type.get()),
+            name="main",
+        )
+        def _main(a):
+          result = wrapped_list(lctx, a)
+          self.assertIsInstance(result, list)
+          self.assertLen(result, 1)
+          return result[0]
 
 
 if __name__ == "__main__":
