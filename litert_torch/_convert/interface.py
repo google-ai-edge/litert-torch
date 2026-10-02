@@ -139,7 +139,7 @@ class Converter:
       quant_config: qcfg.QuantConfig | None = None,
       dynamic_shapes: dict[str, Any] | tuple[Any, ...] | None = None,
       lightweight_conversion: bool = False,
-      enable_x64: bool = True,
+      enable_x64: bool = False,
       runtime_constant_folding: bool | None = None,
       use_v2: bool = False,
       export_dir: str | None = None,
@@ -191,7 +191,9 @@ class Converter:
         for large models that might otherwise hit memory limits. Note that
         enabling this mode may bypass certain graph optimizations, such as
         constant folding, in the resulting model.
-      enable_x64: If False, downcast x64 tensors and inputs to x32.
+      enable_x64: If False (default), downcast int64/float64 tensors, including
+        model inputs and outputs, to int32/float32. Pass True to keep 64-bit
+        types; most on-device runtimes and accelerators do not support them.
       runtime_constant_folding: If True, uses the LiteRT runtime to fold
         constants beyond what the standard converter can resolve. If None
         (default), this is enabled automatically when `lightweight_conversion`
@@ -334,7 +336,7 @@ def convert(
     quant_config: qcfg.QuantConfig | None = None,
     dynamic_shapes: dict[str, Any] | tuple[Any, ...] | None = None,
     lightweight_conversion: bool = False,
-    enable_x64: bool = True,
+    enable_x64: bool = False,
     runtime_constant_folding: bool | None = None,
     use_v2: bool = False,
     export_dir: str | None = None,
@@ -377,7 +379,9 @@ def convert(
       large models that might otherwise hit memory limits. Note that enabling
       this mode may bypass certain graph optimizations, such as constant
       folding, in the resulting model.
-    enable_x64: If False, downcast x64 tensors and inputs to x32.
+    enable_x64: If False (default), downcast int64/float64 tensors, including
+      model inputs and outputs, to int32/float32. Pass True to keep 64-bit
+      types; most on-device runtimes and accelerators do not support them.
     runtime_constant_folding: If True, uses the LiteRT runtime to fold constants
       beyond what the standard converter can resolve. If None (default), this is
       enabled automatically when `lightweight_conversion` is True to maintain
