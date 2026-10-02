@@ -15,6 +15,7 @@
 """LiteRT converter integrations: MLIR to flatbuffer conversions."""
 
 import dataclasses
+import logging
 
 from litert_torch import backend
 from litert_torch import model as model_lib
@@ -46,6 +47,41 @@ def _get_output_names(
 
   children = backend.export_utils.get_children(spec)
   return backend.export_utils.flat_dict_names(children, spec.context)
+
+
+_X64_DTYPES = (torch.int64, torch.float64)
+
+
+def _warn_downcast_io(
+    sig_name: str,
+    input_names: list[str],
+    output_names: list[str],
+    lowered: backend.export.MlirLowered,
+) -> None:
+  """Warns when enable_x64=False will change a signature's I/O dtypes.
+
+  The DowncastX64Pass rewrites every int64/float64 tensor to int32/float32,
+  including model inputs and outputs. Callers that feed int64 buffers will then
+  fail (or, with raw buffers, silently misread), so name the tensors up front.
+  """
+  user_inputs = [s for s in lowered.input_signature if s.input_spec.is_user_input]
+  changed = [
+      f"input {name!r} ({sig.dtype})"
+      for name, sig in zip(input_names, user_inputs)
+      if sig.dtype in _X64_DTYPES
+  ] + [
+      f"output {name!r} ({sig.dtype})"
+      for name, sig in zip(output_names, lowered.output_signature)
+      if sig.dtype in _X64_DTYPES
+  ]
+  if changed:
+    logging.warning(
+        "Signature %r: enable_x64=False downcasts 64-bit model I/O to 32-bit:"
+        " %s. Feed/read these as int32/float32, or pass enable_x64=True to"
+        " keep 64-bit types.",
+        sig_name,
+        ", ".join(changed),
+    )
 
 
 @dataclasses.dataclass
@@ -107,7 +143,7 @@ def exported_programs_to_flatbuffer(
     *,
     quant_config: qcfg.QuantConfig | None = None,
     lightweight_conversion: bool = False,
-    enable_x64: bool = True,
+    enable_x64: bool = False,
     runtime_constant_folding: bool | None = None,
 ) -> LazyModelExporter:
   """Convert ExportedPrograms to a LiteRT model."""
@@ -137,6 +173,8 @@ def exported_programs_to_flatbuffer(
     sig_name = sig.name
     input_names = sig.flat_arg_names
     output_names = _get_output_names(exported_program, lowered)
+    if not enable_x64:
+      _warn_downcast_io(sig_name, input_names, output_names, lowered)
     converter_api_ext.set_signature(
         lowered.module.operation,
         signature_name=sig_name,
