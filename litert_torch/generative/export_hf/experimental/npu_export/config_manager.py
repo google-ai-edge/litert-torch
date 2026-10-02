@@ -20,9 +20,20 @@ import json
 import os
 from typing import Any
 
+from absl import logging
 from litert_torch.generative.export_hf.experimental.npu_export.configs import vendor_configs
 
 gfile = None
+
+# Qualcomm HTP: when the prefill attention mask, concatenated along the row
+# axis, is larger than 1 MiB, the int16 ADD that reads it pairs its rows with
+# the wrong operand rows (litert-torch#1184). The mask is tiled over the query
+# heads that share one KV head, 2 B x
+# (num_attention_heads / num_key_value_heads) x prefill x
+# (cache_length + prefill); with one query head per KV head the exporter builds
+# no concat. Above the limit prefill is no longer causal and a prompt longer
+# than one prefill chunk loses its content (LiteRT-LM#3508).
+_HTP_MASK_ADD_LIMIT_BYTES = 1 << 20
 
 
 def _open(path: str, mode: str = "r"):
@@ -157,7 +168,10 @@ def build_pipeline_config(
     target_vendor: Key in VENDOR_CONFIGS (e.g. 'qualcomm').
     target_soc: Target SoC ID (e.g. 'sm8850'). Validated against supported SoCs.
     prefill_lengths: User-specified prefill sequence buckets.
-    cache_length: User-specified KV cache capacity.
+    cache_length: User-specified KV cache capacity. On Qualcomm targets keep
+      2 B x (num_attention_heads / num_key_value_heads) x prefill x
+      (cache_length + prefill) at or under 1 MiB - see
+      warn_if_prefill_mask_exceeds_htp_limit.
     max_calibration_decode_steps: User-specified calibration decode sample
       steps.
     **user_overrides: Additional ad-hoc property overrides for
@@ -215,4 +229,68 @@ def build_pipeline_config(
   for k, v in merged.items():
     if k not in valid_fields and v is not None and k != "a16w8":
       setattr(cfg, k, v)
+  warn_if_prefill_mask_exceeds_htp_limit(cfg)
   return cfg
+
+
+def _prefill_mask_add_bytes(cfg: NpuPipelineConfig) -> tuple[int, int] | None:
+  """Returns (query heads per KV head, prefill mask ADD operand bytes)."""
+  if not cfg.prefill_lengths:
+    return None
+  try:
+    import transformers  # pylint: disable=g-import-not-at-top
+
+    hf_cfg = transformers.AutoConfig.from_pretrained(cfg.model_id)
+    # multimodal configs (gemma-3-4b and up) keep the text fields one level down
+    hf_cfg = getattr(hf_cfg, "text_config", hf_cfg)
+    num_heads = int(hf_cfg.num_attention_heads)
+    # no num_key_value_heads: multi-head attention, one query head per KV head
+    num_kv_heads = getattr(hf_cfg, "num_key_value_heads", None) or num_heads
+    # the exporter tiles the mask once per query head that shares a KV head
+    # and broadcasts it over the KV heads (export_hf/core/attention.py)
+    q_heads_per_kv = num_heads // int(num_kv_heads)
+    prefill = int(max(cfg.prefill_lengths))
+  except Exception:  # pylint: disable=broad-except
+    return None  # best effort: the export itself loads the config again
+  nbytes = 2 * q_heads_per_kv * prefill * (cfg.cache_length + prefill)
+  return q_heads_per_kv, nbytes
+
+
+def warn_if_prefill_mask_exceeds_htp_limit(cfg: NpuPipelineConfig) -> None:
+  """Warns when the prefill attention-mask ADD crosses the HTP 1 MiB line."""
+  if cfg.backend != "qualcomm":
+    return
+  got = _prefill_mask_add_bytes(cfg)
+  if got is None:
+    return
+  q_heads_per_kv, nbytes = got
+  # with one query head per KV head the exporter builds no mask concat
+  if q_heads_per_kv == 1:
+    return
+  if nbytes <= _HTP_MASK_ADD_LIMIT_BYTES:
+    return
+  prefill = int(max(cfg.prefill_lengths))
+  # the cache must hold more than one prefill bucket (cache_length == prefill
+  # does not build), so the hint needs safe > prefill
+  safe = _HTP_MASK_ADD_LIMIT_BYTES // (2 * q_heads_per_kv * prefill) - prefill
+  hint = (
+      f"largest cache_length under the limit at prefill {prefill}: {safe}"
+      if safe > prefill
+      else (
+          f"no cache_length fits at prefill {prefill} with {q_heads_per_kv}"
+          " query heads per KV head"
+      )
+  )
+  logging.warning(
+      "cache_length=%d at prefill %d puts the prefill attention-mask ADD at"
+      " %.3f MiB on Qualcomm HTP (2 B x %d query heads per KV head x %d x %d)."
+      " Above 1 MiB the compiled ADD is not causal (litert-torch#1184): prompts"
+      " longer than one prefill chunk lose their content (LiteRT-LM#3508); %s.",
+      cfg.cache_length,
+      prefill,
+      nbytes / 2**20,
+      q_heads_per_kv,
+      prefill,
+      cfg.cache_length + prefill,
+      hint,
+  )
