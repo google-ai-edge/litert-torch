@@ -244,18 +244,18 @@ def _prefill_mask_add_bytes(cfg: NpuPipelineConfig) -> tuple[int, int] | None:
     hf_cfg = transformers.AutoConfig.from_pretrained(
         cfg.model_id, trust_remote_code=False
     )
-    # multimodal configs (gemma-3-4b and up) keep the text fields one level down
+    # Multimodal configs (gemma-3-4b and up) nest the text fields.
     hf_cfg = getattr(hf_cfg, "text_config", hf_cfg)
     num_heads = int(hf_cfg.num_attention_heads)
-    # no num_key_value_heads: multi-head attention, one query head per KV head
+    # No num_key_value_heads: multi-head attention, one query head per KV head.
     num_kv_heads = getattr(hf_cfg, "num_key_value_heads", None) or num_heads
-    # the exporter tiles the mask once per query head that shares a KV head
-    # and broadcasts it over the KV heads (export_hf/core/attention.py)
+    # The exporter tiles the mask once per query head that shares a KV head
+    # and broadcasts it over the KV heads (export_hf/core/attention.py).
     q_heads_per_kv = num_heads // int(num_kv_heads)
     prefill = int(max(cfg.prefill_lengths))
     nbytes = 2 * q_heads_per_kv * prefill * (cfg.cache_length + prefill)
   except Exception:  # pylint: disable=broad-except
-    return None  # best effort: the export itself loads the config again
+    return None  # Best effort: the export itself loads the config again.
   return q_heads_per_kv, nbytes
 
 
@@ -267,14 +267,14 @@ def warn_if_prefill_mask_exceeds_htp_limit(cfg: NpuPipelineConfig) -> None:
   if got is None:
     return
   q_heads_per_kv, nbytes = got
-  # with one query head per KV head the exporter builds no mask concat
+  # With one query head per KV head the exporter builds no mask concat.
   if q_heads_per_kv == 1:
     return
   if nbytes <= _HTP_MASK_ADD_LIMIT_BYTES:
     return
   prefill = int(max(cfg.prefill_lengths))
-  # the cache must hold more than one prefill bucket (cache_length == prefill
-  # does not build), so the hint needs safe > prefill
+  # The cache must hold more than one prefill bucket (cache_length == prefill
+  # does not build), so the hint needs safe > prefill.
   safe = _HTP_MASK_ADD_LIMIT_BYTES // (2 * q_heads_per_kv * prefill) - prefill
   hint = (
       f"largest cache_length under the limit at prefill {prefill}: {safe}"
