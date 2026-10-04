@@ -240,7 +240,10 @@ def _prefill_mask_add_bytes(cfg: NpuPipelineConfig) -> tuple[int, int] | None:
   try:
     import transformers  # pylint: disable=g-import-not-at-top
 
-    hf_cfg = transformers.AutoConfig.from_pretrained(cfg.model_id)
+    # This check must not prompt for, or run, code from the model repo.
+    hf_cfg = transformers.AutoConfig.from_pretrained(
+        cfg.model_id, trust_remote_code=False
+    )
     # multimodal configs (gemma-3-4b and up) keep the text fields one level down
     hf_cfg = getattr(hf_cfg, "text_config", hf_cfg)
     num_heads = int(hf_cfg.num_attention_heads)
@@ -250,9 +253,9 @@ def _prefill_mask_add_bytes(cfg: NpuPipelineConfig) -> tuple[int, int] | None:
     # and broadcasts it over the KV heads (export_hf/core/attention.py)
     q_heads_per_kv = num_heads // int(num_kv_heads)
     prefill = int(max(cfg.prefill_lengths))
+    nbytes = 2 * q_heads_per_kv * prefill * (cfg.cache_length + prefill)
   except Exception:  # pylint: disable=broad-except
     return None  # best effort: the export itself loads the config again
-  nbytes = 2 * q_heads_per_kv * prefill * (cfg.cache_length + prefill)
   return q_heads_per_kv, nbytes
 
 
