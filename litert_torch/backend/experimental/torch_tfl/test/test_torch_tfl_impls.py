@@ -105,8 +105,14 @@ class TestTorchTFLImpls(parameterized.TestCase):
 
         with self.subTest("convert_eval"):
           args, kwargs = exported_program.example_inputs
+          # These are op-fidelity tests against torch semantics, which include
+          # int64 inputs and outputs; keep 64-bit types rather than relying on
+          # the converter's downcast default.
           edge_model = litert_torch.convert(
-              exported_program.module(), args, dynamic_shapes=dynamic_shapes
+              exported_program.module(),
+              args,
+              dynamic_shapes=dynamic_shapes,
+              enable_x64=True,
           )
           actual = edge_model(*args, **kwargs)
 

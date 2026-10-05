@@ -658,7 +658,12 @@ class TestCoreAtenOps(parameterized.TestCase):
       ep, new_args, new_kwargs = export_without_scalar_inputs(
           func, args, kwargs
       )
-      edge_model = litert_torch.convert(ep.module(), new_args, new_kwargs)
+      # These are op-fidelity tests against torch semantics, which include
+      # int64 inputs and outputs; keep 64-bit types rather than relying on the
+      # converter's downcast default.
+      edge_model = litert_torch.convert(
+          ep.module(), new_args, new_kwargs, enable_x64=True
+      )
 
       np_args, np_kwargs = pytree.tree_map_only(
           torch.is_tensor, lambda x: x.detach().numpy(), [new_args, new_kwargs]
