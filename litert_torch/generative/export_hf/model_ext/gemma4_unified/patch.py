@@ -43,9 +43,17 @@ class Gemma4UnifiedRMSNorm(torch.nn.Module):
         hidden_states,
         self.weight
         if self.with_scale
-        else torch.ones((self.hidden_size,), dtype=torch.float32),
+        else torch.ones(
+            (self.hidden_size,),
+            dtype=torch.float32,
+            device=hidden_states.device,
+        ),
         self.variance_epsilon,
-        torch.ones((self.hidden_size,), dtype=torch.float32),
+        torch.ones(
+            (self.hidden_size,),
+            dtype=torch.float32,
+            device=hidden_states.device,
+        ),
     )
     return ret.to(x_dtype)
 

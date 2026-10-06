@@ -40,7 +40,11 @@ class Lfm2RMSNorm(torch.nn.Module):
         hidden_states,
         self.weight,
         self.variance_epsilon,
-        torch.ones((self.hidden_size,), dtype=torch.float32),
+        torch.ones(
+            (self.hidden_size,),
+            dtype=torch.float32,
+            device=hidden_states.device,
+        ),
     )
 
   def extra_repr(self):
