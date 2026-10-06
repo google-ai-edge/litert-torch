@@ -39,7 +39,11 @@ class Gemma3RMSNorm(torch.nn.Module):
         hidden_states,
         self.weight + 1.0,
         self.variance_epsilon,
-        torch.ones((self.hidden_size,), dtype=torch.float32),
+        torch.ones(
+            (self.hidden_size,),
+            dtype=torch.float32,
+            device=hidden_states.device,
+        ),
     ).to(dtype)
 
   def extra_repr(self):

@@ -53,6 +53,15 @@ def _get_dummy_position_embeddings(batch_size, seq_len, head_dim):
 
 class PatchTest(parameterized.TestCase):
 
+  def test_rms_norm_on_meta_device(self):
+    norm = patch.Qwen3RMSNorm(hidden_size=64).to("meta")
+    x = torch.empty(1, 4, 64, device="meta")
+
+    out = norm(x)
+
+    self.assertEqual(out.device, torch.device("meta"))
+    self.assertEqual(out.shape, x.shape)
+
   def test_fused_qwen3_attention_qkv(self):
     config = _get_dummy_qwen3_config()
     original_attn = modeling_qwen3.Qwen3Attention(config, layer_idx=0)

@@ -47,9 +47,17 @@ class Gemma4RMSNorm(torch.nn.Module):
         hidden_states,
         self.weight
         if self.with_scale
-        else torch.ones((self.hidden_size,), dtype=torch.float32),
+        else torch.ones(
+            (self.hidden_size,),
+            dtype=torch.float32,
+            device=hidden_states.device,
+        ),
         self.variance_epsilon,
-        torch.ones((self.hidden_size,), dtype=torch.float32),
+        torch.ones(
+            (self.hidden_size,),
+            dtype=torch.float32,
+            device=hidden_states.device,
+        ),
     )
 
   def extra_repr(self):
@@ -735,7 +743,11 @@ class LiteRTGemma4VisionEncoder(Gemma4VisionEncoder):
       **kwargs,
   ) -> transformers.modeling_outputs.BaseModelOutputWithPast:
     num_seq = attention_mask.shape[1]
-    attention_mask = torch.zeros((1, 1, num_seq, num_seq), dtype=torch.float32)
+    attention_mask = torch.zeros(
+        (1, 1, num_seq, num_seq),
+        dtype=torch.float32,
+        device=inputs_embeds.device,
+    )
 
     # embed positions
     hidden_states = inputs_embeds
