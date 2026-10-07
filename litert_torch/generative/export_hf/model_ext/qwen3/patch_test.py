@@ -18,6 +18,7 @@ import litert_torch.generative.export_hf  # pylint: disable=unused-import
 from absl.testing import parameterized
 import litert_torch
 from litert_torch.generative.export_hf.core import exportable_module_config
+from litert_torch.generative.export_hf.model_ext import extension
 from litert_torch.generative.export_hf.model_ext.qwen3 import patch
 from litert_torch.generative.layers import rotary_position_embedding as rotary_pos_emb
 import torch
@@ -164,6 +165,36 @@ class PatchTest(parameterized.TestCase):
       pos = torch.arange(4, dtype=torch.int32).unsqueeze(0)
       edge_attn = litert_torch.convert(attn_wrap, (x, pos))
       self.assertIsNotNone(edge_attn)
+
+  def test_patch_qwen3_model_with_single_gpu_composites_flag(self):
+    torch.manual_seed(0)
+    config = _get_dummy_qwen3_config()
+    config.vocab_size = 256
+    model = modeling_qwen3.Qwen3ForCausalLM(config).eval()
+
+    input_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+    with torch.no_grad():
+      expected_logits = model(input_ids=input_ids).logits
+
+    export_config = exportable_module_config.ExportableModuleConfig(
+        model="dummy",
+        apply_gpu_composites=True,
+    )
+    export_config = extension.update_export_config(export_config, config)
+
+    with patch.patch_qwen3_model(model, export_config):
+      for layer in model.model.layers:
+        self.assertIsInstance(layer.mlp, patch.FusedQwen3MLP)
+        self.assertTrue(layer.mlp.use_swiglu_composite)
+        self.assertIsInstance(layer.self_attn, patch.FusedQwen3Attention)
+        self.assertTrue(layer.self_attn.fuse_qkv)
+        self.assertTrue(layer.self_attn.use_qkv_norm_rope_composite)
+
+      with torch.no_grad():
+        actual_logits = model(input_ids=input_ids).logits
+      torch.testing.assert_close(
+          actual_logits, expected_logits, rtol=1e-4, atol=1e-4
+      )
 
 
 if __name__ == "__main__":

@@ -256,6 +256,35 @@ class PatchTest(parameterized.TestCase):
         model.model.layers[0].self_attn, modeling_gemma4.Gemma4TextAttention
     )
 
+  def test_patch_gemma4_model_with_single_gpu_composites_flag(self):
+    torch.manual_seed(0)
+    config = _get_dummy_gemma4_text_config()
+    config.vocab_size = 256
+    model = modeling_gemma4.Gemma4ForCausalLM(config).eval()
+
+    input_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+    with torch.no_grad():
+      expected_logits = model(input_ids=input_ids).logits
+
+    export_config = exportable_module_config.ExportableModuleConfig(
+        model="dummy",
+        apply_gpu_composites=True,
+    )
+    export_config = _.extension.update_export_config(export_config, config)
+
+    with patch.patch_gemma4_model(model, export_config):
+      for layer in model.model.layers:
+        self.assertIsInstance(layer.mlp, patch.FusedGemma4TextMLP)
+        self.assertIsInstance(layer.self_attn, patch.FusedGemma4TextAttention)
+        self.assertTrue(layer.self_attn.fuse_qkv)
+        self.assertTrue(layer.self_attn.use_qkv_norm_rope_composite)
+
+      with torch.no_grad():
+        actual_logits = model(input_ids=input_ids).logits
+      torch.testing.assert_close(
+          actual_logits, expected_logits, rtol=1e-4, atol=1e-4
+      )
+
   def test_gemma4_router_equivalence(self):
     config = _get_dummy_gemma4_text_config()
     config.num_experts = 128

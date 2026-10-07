@@ -16,6 +16,7 @@
 
 import dataclasses
 import os
+import re
 
 from litert_torch import progress
 from litert_torch.generative.export_hf.core import export_lib
@@ -315,6 +316,12 @@ def build_llm_metadata(
     if isinstance(chat_templates, str):
       if export_config.experimental_transpile_chat_template_for_minijinja:
         chat_templates = transpile_lib.transpile_jinja2(chat_templates)
+      chat_templates = re.sub(
+          r'\{%-?\s*(?:end)?generation\s*-?%\}', '', chat_templates
+      )
+      chat_templates = re.sub(
+          r'\.get\(\s*([\'\"][^\'\"]+[\'\"])\s*\)', r'[\1]', chat_templates
+      )
       llm_metadata.jinja_prompt_template = chat_templates
     else:
       sys_prompt_parts, user_prompt_parts, model_prompt_parts = chat_templates
@@ -343,13 +350,17 @@ def build_llm_metadata(
   )
 
   match (model_type):
-    case 'qwen3' | 'qwen3_asr':
+    case 'qwen3' | 'qwen3_text' | 'qwen3_asr' | 'qwen3_5' | 'qwen3_5_text':
       llm_metadata.llm_model_type.CopyFrom(
           llm_model_type_pb2.LlmModelType(qwen3=llm_model_type_pb2.Qwen3())
       )
     case 'qwen2' | 'qwen2p5':
       llm_metadata.llm_model_type.CopyFrom(
           llm_model_type_pb2.LlmModelType(qwen2p5=llm_model_type_pb2.Qwen2p5())
+      )
+    case 'lfm2' | 'lfm2_vl':
+      llm_metadata.llm_model_type.CopyFrom(
+          llm_model_type_pb2.LlmModelType(lfm2=llm_model_type_pb2.Lfm2())
       )
     case 'gemma3' | 'gemma3_text':
       llm_metadata.llm_model_type.CopyFrom(
@@ -365,7 +376,7 @@ def build_llm_metadata(
       llm_metadata.llm_model_type.CopyFrom(
           llm_model_type_pb2.LlmModelType(gemma3n=llm_model_type_pb2.Gemma3N())
       )
-    case 'gemma4':
+    case 'gemma4' | 'gemma4_text':
       llm_metadata.llm_model_type.CopyFrom(
           llm_model_type_pb2.LlmModelType(gemma4=llm_model_type_pb2.Gemma4())
       )
