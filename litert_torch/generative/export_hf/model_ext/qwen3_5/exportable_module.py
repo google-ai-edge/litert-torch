@@ -117,16 +117,16 @@ class Qwen3_5StaticModelHFWrapper(nn.Module):
     if tokens.dtype in (torch.int64, torch.int32):
       tokens = tokens.to(torch.int32)
 
-    positions = cache_position if cache_position is not None else position_ids
+    positions = position_ids if position_ids is not None else cache_position
     if positions is None:
       positions = torch.arange(
           tokens.shape[1], device=tokens.device, dtype=torch.int32
-      )
+      ).unsqueeze(0)
     positions = positions.to(torch.int32)
     if positions.ndim == 3:
       positions = positions[0]
-    if positions.ndim == 2 and positions.shape[0] == 1:
-      positions = positions.squeeze(0)
+    if positions.ndim == 1:
+      positions = positions.unsqueeze(0)
 
     if valid_mask is None and tokens.shape[1] > 1 and input_ids is not None:
       pad_token_id = getattr(self.config, "pad_token_id", None)

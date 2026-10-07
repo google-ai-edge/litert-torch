@@ -223,14 +223,14 @@ class FusedQwen3_5Attention(torch.nn.Module):
     value_states = v_raw.view(hidden_shape).transpose(1, 2)
 
     if getattr(self, "use_rope_composite", False):
-      position_ids = kwargs.get(
-          "position_ids", kwargs.get("cache_position", None)
-      )
+      position_ids = kwargs.get("position_ids", None)
       if position_ids is None:
         seq_len = hidden_states.shape[1]
         position_ids = torch.arange(
             seq_len, device=hidden_states.device
         ).unsqueeze(0)
+      elif position_ids.ndim == 1:
+        position_ids = position_ids.unsqueeze(0)
       rope_base, partial_factor = self._get_rope_params()
       rotary_dim = int(self.head_dim * partial_factor)
       if rotary_dim == self.head_dim:

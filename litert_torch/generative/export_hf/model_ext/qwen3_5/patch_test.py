@@ -188,6 +188,12 @@ class Qwen3_5PatchTest(parameterized.TestCase):
         torch.testing.assert_close(
             actual_default_pos, expected, rtol=1e-5, atol=1e-5
         )
+        actual_1d_pos, _ = fused_attn(
+            x, pos_emb, attention_mask=None, position_ids=pos_ids.squeeze(0)
+        )
+        torch.testing.assert_close(
+            actual_1d_pos, expected, rtol=1e-5, atol=1e-5
+        )
 
   @parameterized.named_parameters(
       dict(
