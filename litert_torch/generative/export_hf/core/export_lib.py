@@ -511,6 +511,11 @@ def _v2_convert_kwargs(
       'weights_loader': weights_loader,
       'export_dir': os.path.splitext(output_path)[0] + '_intermediates',
       'output_file_path': output_path,
+      # Equivalent of `mu_pass_lib`'s `fuse_fp32cast_fc_fp16cast`, which the
+      # legacy path applies after conversion.
+      '_litert_converter_flags': {
+          'fold_fp16_casts_into_fully_connected': True,
+      },
   }
 
 
@@ -672,9 +677,15 @@ def export_text_prefill_decode_model(
         )
 
   if export_config.use_v2:
-    # Converter V2 writes `model_path` directly. The mu optimization pass needs
-    # an in-memory LiteRTModel and is not applied.
-    print('Converter V2: skipping mu_pass_lib.update_model.')
+    # Converter V2 writes `model_path` directly. The equivalents of
+    # `mu_pass_lib.update_model` run inside the converter: sum->mean fusion is
+    # part of the default pipeline and the fp16 cast fold around fully
+    # connected ops is enabled via `_v2_convert_kwargs`.
+    if export_config.experimental_use_mixed_precision:
+      print(
+          'WARNING: experimental_use_mixed_precision is not supported with'
+          ' Converter V2 and is ignored.'
+      )
   else:
     lrt_model = mu_pass_lib.update_model(lrt_model)  # pyrefly: ignore[bad-argument-type]
     if export_config.experimental_use_mixed_precision:
