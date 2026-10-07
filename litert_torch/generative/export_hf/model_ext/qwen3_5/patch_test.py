@@ -31,6 +31,7 @@ importlib.metadata.version = patched_version
 from absl.testing import absltest
 from absl.testing import parameterized
 from litert_torch.generative.export_hf.core import exportable_module_config
+from litert_torch.generative.export_hf.model_ext import extension
 from litert_torch.generative.export_hf.model_ext import patches as patches_lib
 from litert_torch.generative.export_hf.model_ext.qwen3_5 import modeling_qwen3_5_static
 from litert_torch.generative.export_hf.model_ext.qwen3_5 import patch
@@ -315,6 +316,44 @@ class Qwen3_5PatchTest(parameterized.TestCase):
         self.assertIsInstance(
             layer.self_attn, modeling_qwen3_5.Qwen3_5Attention
         )
+
+  def test_patch_qwen3_5_model_with_single_gpu_composites_flag(self):
+    torch.manual_seed(0)
+    cfg = self._make_config()
+    model = modeling_qwen3_5_static.Qwen3_5StaticForCausalLM(cfg).eval()
+    for module in model.modules():
+      if isinstance(
+          module,
+          (modeling_qwen3_5.Qwen3_5RMSNorm, modular_qwen3_5.Qwen3_5RMSNorm),
+      ):
+        module.weight.data.uniform_(-0.1, 0.1)
+
+    input_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+    positions = torch.arange(4, dtype=torch.int32).unsqueeze(0)
+
+    with torch.no_grad():
+      expected_logits, _ = model(input_ids=input_ids, positions=positions)
+
+    export_config = exportable_module_config.ExportableModuleConfig(
+        model="dummy",
+        apply_gpu_composites=True,
+    )
+    export_config = extension.update_export_config(export_config, cfg)
+
+    with patches_lib.patch_model(model, "qwen3_5", export_config):
+      for layer in model.model.layers:
+        self.assertIsInstance(layer.mlp, patch.FusedQwen3_5MLP)
+        self.assertTrue(layer.mlp.use_swiglu_composite)
+        if hasattr(layer, "self_attn"):
+          self.assertIsInstance(layer.self_attn, patch.FusedQwen3_5Attention)
+          self.assertTrue(layer.self_attn.fuse_qkv)
+          self.assertTrue(layer.self_attn.use_rope_composite)
+
+      with torch.no_grad():
+        actual_logits, _ = model(input_ids=input_ids, positions=positions)
+      torch.testing.assert_close(
+          actual_logits, expected_logits, rtol=1e-4, atol=1e-4
+      )
 
 
 if __name__ == "__main__":

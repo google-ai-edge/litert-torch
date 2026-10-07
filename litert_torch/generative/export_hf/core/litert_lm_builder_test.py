@@ -283,9 +283,20 @@ class BuildLlmMetadataStartTokenTest(parameterized.TestCase):
     )
     self.assertTrue(metadata.llm_model_type.HasField("qwen3"))
 
-  def test_build_llm_metadata_gemma3_text_model_type(self):
+  @parameterized.named_parameters(
+      ("gemma3_text", "gemma3_text", "gemma3"),
+      ("gemma4_text", "gemma4_text", "gemma4"),
+      ("qwen3_text", "qwen3_text", "qwen3"),
+      ("qwen3_5", "qwen3_5", "qwen3"),
+      ("qwen3_5_text", "qwen3_5_text", "qwen3"),
+      ("lfm2", "lfm2", "lfm2"),
+      ("lfm2_vl", "lfm2_vl", "lfm2"),
+  )
+  def test_build_llm_metadata_model_types(self, model_type, expected_field):
     class _FakeConfig:
-      model_type = "gemma3_text"
+      pass
+
+    _FakeConfig.model_type = model_type
 
     class _FakeModelWithConfig:
       config = _FakeConfig()
@@ -307,7 +318,21 @@ class BuildLlmMetadataStartTokenTest(parameterized.TestCase):
     metadata = litert_lm_builder.build_llm_metadata(
         source_artifacts, export_config, "", exported_artifacts
     )
-    self.assertTrue(metadata.llm_model_type.HasField("gemma3"))
+    self.assertTrue(metadata.llm_model_type.HasField(expected_field))
+
+  def test_build_llm_metadata_sanitizes_jinja_generation_and_dict_get(self):
+    tokenizer = _FakeTokenizer(
+        bos_token=None, bos_token_id=None, prepends_bos=False
+    )
+    raw_template = (
+        "{%- generation -%}{%- if message.get('content') -%}"
+        '{{- message.get("content") -}}{%- endif -%}{%- endgeneration -%}'
+    )
+    metadata = _build_llm_metadata(tokenizer, chat_templates=raw_template)
+    self.assertNotIn("generation", metadata.jinja_prompt_template)
+    self.assertNotIn(".get(", metadata.jinja_prompt_template)
+    self.assertIn("message['content']", metadata.jinja_prompt_template)
+    self.assertIn('message["content"]', metadata.jinja_prompt_template)
 
 
 if __name__ == "__main__":

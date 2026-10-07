@@ -52,6 +52,23 @@ _DEPRECATED_EXTRA_KWARGS = frozenset({
 })
 
 
+# GPU composite and fusion flags that default to `False` unless explicitly set,
+# implied by a dependent composite flag, or populated by `update_export_config`
+# when `apply_gpu_composites=True`.
+_GPU_OPTIMIZATION_FLAGS = (
+    "fuse_gate_up",
+    "fuse_qkv",
+    "use_rope_composite",
+    "use_swiglu_composite",
+    "use_qkv_norm_rope_composite",
+    "use_short_conv_composite",
+    "use_sdpa_composite",
+    "apply_gpu_composites",
+    "use_bool_mask",
+    "enable_gpu_dynamic_cache",
+)
+
+
 _DTYPE_ALIASES: dict[str, torch.dtype] = {
     "float32": torch.float32,
     "fp32": torch.float32,
@@ -90,7 +107,7 @@ class ExportableModuleConfig:
   # If True, prefill lengths are adjusted to magic numbers for GPU execution.
   enable_gpu_dynamic_prefill: bool = False
   # If True, cache length is adjusted to a magic number for GPU execution.
-  enable_gpu_dynamic_cache: bool = False
+  enable_gpu_dynamic_cache: bool | None = None
   # Export configs
   externalize_embedder: bool = False
   single_token_embedder: bool = False
@@ -111,19 +128,19 @@ class ExportableModuleConfig:
   experimental_use_fp16: bool = False
   export_vision_encoder: bool = True
   export_audio_encoder: bool = True
-  fuse_gate_up: bool = False
-  fuse_qkv: bool = False
-  use_rope_composite: bool = False
-  use_swiglu_composite: bool = False
-  use_qkv_norm_rope_composite: bool = False
-  use_short_conv_composite: bool = False
+  fuse_gate_up: bool | None = None
+  fuse_qkv: bool | None = None
+  use_rope_composite: bool | None = None
+  use_swiglu_composite: bool | None = None
+  use_qkv_norm_rope_composite: bool | None = None
+  use_short_conv_composite: bool | None = None
   # Whether to emit the fused `odml.sdpa_transposed` composite in both prefill
   # and decode signatures.
-  use_sdpa_composite: bool = False
+  use_sdpa_composite: bool | None = None
   # Master switch for GPU composite emission. Implied by use_sdpa_composite.
-  apply_gpu_composites: bool = False
+  apply_gpu_composites: bool | None = None
   # Use a boolean attention mask instead of materializing fp32 mask constants.
-  use_bool_mask: bool = False
+  use_bool_mask: bool | None = None
   # Whether the prefill signature returns logits for the final position.
   # The LiteRT-LM runtime samples from the decode signature and never reads
   # the prefill logits, so emitting them adds a vocabulary-sized `lm_head`
@@ -211,14 +228,18 @@ class ExportableModuleConfig:
     prefill and decode; the legacy prefill flag is accepted with a
     `DeprecationWarning`.
     """
+    explicit_fields = getattr(self, "_explicit_fields", set())
     legacy_prefill = self.extra_kwargs.pop(
         "use_sdpa_composite_for_prefill", None
     )
     legacy_decode = self.extra_kwargs.pop("use_sdpa_composite", None)
-    if legacy_decode is not None and not self.use_sdpa_composite:
-      self.use_sdpa_composite = legacy_decode
+    if legacy_decode is not None:
+      explicit_fields.add("use_sdpa_composite")
+      if not self.use_sdpa_composite:
+        self.use_sdpa_composite = legacy_decode
 
     if legacy_prefill is not None:
+      explicit_fields.add("use_sdpa_composite")
       warnings.warn(
           "use_sdpa_composite_for_prefill is deprecated; use"
           " use_sdpa_composite=True.",
@@ -228,17 +249,52 @@ class ExportableModuleConfig:
       if legacy_prefill:
         self.use_sdpa_composite = True
 
+    if self.use_sdpa_composite is None:
+      self.use_sdpa_composite = False
+
     if not isinstance(self.use_sdpa_composite, bool):
       raise TypeError(
           "use_sdpa_composite must be bool, got"
           f" {type(self.use_sdpa_composite).__name__}."
       )
 
+    self.resolve_gpu_composite_dependencies()
+
+  def resolve_gpu_composite_dependencies(self):
+    """Resolves prerequisite and derived flags for GPU composites."""
+    explicit_fields = getattr(self, "_explicit_fields", set())
+    if self.use_qkv_norm_rope_composite and "fuse_qkv" not in explicit_fields:
+      self.fuse_qkv = True
+    if self.use_swiglu_composite and "fuse_gate_up" not in explicit_fields:
+      self.fuse_gate_up = True
+
     # The fused SDPA kernels are only reachable on the GPU composite path, so
-    # enabling them implies the master switch. Centralizing the implication here
-    # keeps the prefill/decode traces and their sample inputs consistent.
+    # enabling them implies the master switch and boolean attention mask.
+    # Centralizing the implication here keeps the prefill/decode traces and
+    # their sample inputs consistent.
     if self.use_sdpa_composite:
       self.apply_gpu_composites = True
+      if "use_bool_mask" not in explicit_fields:
+        self.use_bool_mask = True
+
+    for name in _GPU_OPTIMIZATION_FLAGS:
+      if getattr(self, name) is None:
+        setattr(self, name, False)
+
+    if "prefill_logits" not in explicit_fields:
+      self.prefill_logits = bool(
+          self.use_qkv_norm_rope_composite or self.use_short_conv_composite
+      )
+
+    if self.cache_lengths is not None:
+      if self.enable_gpu_dynamic_prefill or self.enable_gpu_dynamic_cache:
+        if self.enable_dynamic_shape:
+          raise ValueError(
+              "enable_dynamic_shape and enable_gpu_dynamic_prefill/cache"
+              " cannot be both True."
+          )
+      if self.enable_gpu_dynamic_cache:
+        self.cache_length = utils.get_magic_number_for(self.cache_length)
 
     # Transitional: several call sites still read these through `extra_kwargs`.
     # Mirror the typed fields so they observe the resolved values.
@@ -274,12 +330,14 @@ class ExportableModuleConfig:
 
   def __post_init__(self):
     """Refines configuration based on task-specific rules."""
+    explicit_fields = {
+        name
+        for name in (*_GPU_OPTIMIZATION_FLAGS, "prefill_logits")
+        if getattr(self, name) is not None
+    }
+    object.__setattr__(self, "_explicit_fields", explicit_fields)
     self._validate_extra_kwargs()
     self._normalize_sdpa_composite()
-    if self.prefill_logits is None:
-      self.prefill_logits = bool(
-          self.use_qkv_norm_rope_composite or self.use_short_conv_composite
-      )
     if self.aot_backend:
       backend_clean = self.aot_backend.lower()
       if backend_clean in vendor_configs.VENDOR_CONFIGS:

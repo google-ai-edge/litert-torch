@@ -106,6 +106,7 @@ class FusedGemma3Attention(torch.nn.Module):
 
     self.config = original_attn.config
     self.layer_idx = original_attn.layer_idx
+    self.layer_type = getattr(original_attn, "layer_type", None)
     self.head_dim = original_attn.head_dim
     self.num_key_value_groups = original_attn.num_key_value_groups
     self.scaling = original_attn.scaling
@@ -186,11 +187,24 @@ class FusedGemma3Attention(torch.nn.Module):
         ).unsqueeze(0)
 
       rope_base = 500000.0
+      has_nested_layer_rope = False
       if hasattr(self.config, "rope_parameters") and self.config.rope_parameters:
         if isinstance(self.config.rope_parameters, dict):
-          rope_base = float(
-              self.config.rope_parameters.get("rope_theta", rope_base)
-          )
+          if (
+              hasattr(self, "layer_type")
+              and self.layer_type in self.config.rope_parameters
+              and isinstance(self.config.rope_parameters[self.layer_type], dict)
+          ):
+            rope_base = float(
+                self.config.rope_parameters[self.layer_type].get(
+                    "rope_theta", rope_base
+                )
+            )
+            has_nested_layer_rope = True
+          else:
+            rope_base = float(
+                self.config.rope_parameters.get("rope_theta", rope_base)
+            )
         elif hasattr(self.config.rope_parameters, "rope_theta"):
           rope_base = float(
               getattr(self.config.rope_parameters, "rope_theta", rope_base)
@@ -209,7 +223,7 @@ class FusedGemma3Attention(torch.nn.Module):
         ):
           is_local = True
 
-      if is_local:
+      if is_local and not has_nested_layer_rope:
         rope_base = float(
             getattr(
                 self.config,

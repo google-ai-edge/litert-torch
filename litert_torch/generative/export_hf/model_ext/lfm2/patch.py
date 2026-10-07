@@ -364,7 +364,7 @@ def lfm2_litert_patch():
     modeling_lfm2.Lfm2RMSNorm = original_norm
 
 
-@patches_lib.register_model_patch(["lfm2"])
+@patches_lib.register_model_patch(["lfm2", "lfm2_vl"])
 @contextlib.contextmanager
 def patch_lfm2_model(model, export_config):
   """Dynamic model patch for LFM2 export."""
