@@ -634,8 +634,10 @@ class Qwen3_5StaticDecoderLayer(nn.Module):
       attn_mask = attn_kwargs.pop("attention_mask", None)
       if valid_mask is not None and "valid_mask" not in attn_kwargs:
         attn_kwargs["valid_mask"] = valid_mask
-      if positions is not None and "cache_position" not in attn_kwargs:
-        attn_kwargs["cache_position"] = positions
+      if positions is not None and "position_ids" not in attn_kwargs:
+        attn_kwargs["position_ids"] = (
+            positions.unsqueeze(0) if positions.ndim == 1 else positions
+        )
 
       hidden_states, _ = self.self_attn(
           hidden_states,
