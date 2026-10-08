@@ -142,6 +142,24 @@ class ModelDtypeTest(parameterized.TestCase):
       _config(model_dtype="bfloat16", experimental_use_fp16=True)
 
 
+class PrefillLogitsTest(parameterized.TestCase):
+
+  def test_defaults_to_false(self):
+    self.assertFalse(_config().prefill_logits)
+    self.assertFalse(_config(use_sdpa_composite=True).prefill_logits)
+
+  @parameterized.parameters(
+      "use_qkv_norm_rope_composite",
+      "use_short_conv_composite",
+  )
+  def test_multi_output_composite_enables_prefill_logits(self, flag):
+    self.assertTrue(_config(**{flag: True}).prefill_logits)
+
+  def test_explicit_value_is_respected(self):
+    config = _config(use_short_conv_composite=True, prefill_logits=False)
+    self.assertFalse(config.prefill_logits)
+
+
 class ConverterV2OptionsTest(parameterized.TestCase):
 
   @parameterized.parameters(

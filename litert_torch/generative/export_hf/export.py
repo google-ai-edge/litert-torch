@@ -177,6 +177,8 @@ def export(
       numbers) for cache length.
     use_rope_composite: Whether to enable the RoPE composite.
     use_qkv_norm_rope_composite: Whether to enable the QKV norm rope composite.
+    use_short_conv_composite: Whether to emit the fused LFM2 short convolution
+      composite (`odml.short_conv_step`) in both prefill and decode signatures.
     use_sdpa_composite: Whether to enable the fused transposed SDPA composite in
       both prefill and decode signatures.
     apply_gpu_composites: Master switch for GPU composite emission. Implied by
@@ -184,8 +186,8 @@ def export(
     use_bool_mask: Whether to use a boolean attention mask instead of
       materializing fp32 mask constants.
     use_fused_sdpa_cache_update: Whether sliding-window layers emit the
-      `odml.fused_sdpa_cache_update` composite (attention plus ring buffer
-      write in one op). Requires `apply_gpu_composites` and
+      `odml.fused_sdpa_cache_update` composite (attention plus ring buffer write
+      in one op). Requires `apply_gpu_composites` and
       `sliding_window_ring_buffer_size`.
     prefill_logits: Whether the prefill signature returns logits for the final
       position. Defaults to on only when multi-output composites

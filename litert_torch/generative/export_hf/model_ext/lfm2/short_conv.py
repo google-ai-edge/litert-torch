@@ -74,7 +74,22 @@ class Lfm2ShortConv(modeling_lfm2.Lfm2ShortConv):
 
     state = past_key_values.layers[self.layer_idx].conv_states  # pyrefly: ignore[missing-attribute]
 
-    if seq_len > 1:  # Prefill
+    if self.use_short_conv_composite:
+      in_proj_out = self.in_proj(hidden_states)
+      num_valid_tokens = None
+      if seq_len > 1 and valid_mask is not None:
+        num_valid_tokens = (
+            valid_mask.to(torch.float32).sum().to(torch.int32).reshape(1)
+        )
+      y, next_state = short_conv_composite.apply_short_conv_step(
+          in_proj_out=in_proj_out,
+          conv_state=state,
+          conv_weight=self.conv.weight,
+          conv_bias=self.conv.bias,
+          num_valid_tokens=num_valid_tokens,
+          conv_L_cache=self.conv_L_cache_size,
+      )
+    elif seq_len > 1:  # Prefill
       b, c, x_proj = self.in_proj(hidden_states).chunk(3, dim=-1)
       conv_input = b * x_proj
       conv_input_t = conv_input.transpose(1, 2)
@@ -103,15 +118,6 @@ class Lfm2ShortConv(modeling_lfm2.Lfm2ShortConv):
       conv_out = self.conv(padded_input)
       conv_out = conv_out.transpose(1, 2)
       y = c * conv_out
-    elif self.use_short_conv_composite:  # Fused decode step composite
-      in_proj_out = self.in_proj(hidden_states)
-      y, next_state = short_conv_composite.apply_short_conv_step(
-          in_proj_out=in_proj_out,
-          conv_state=state,
-          conv_weight=self.conv.weight,
-          conv_bias=self.conv.bias,
-          conv_L_cache=self.conv_L_cache_size,
-      )
     else:  # Decode unfused fallback
       b, c, x_proj = self.in_proj(hidden_states).chunk(3, dim=-1)
       conv_input = b * x_proj
