@@ -53,6 +53,35 @@ class Qwen3_5RMSNorm(torch.nn.Module):
     return f"{tuple(self.weight.shape)}, eps={self.eps}"
 
 
+class Qwen3_5RMSNormGated(torch.nn.Module):  # pylint: disable=invalid-name
+  """Fused gated RMSNorm Layer for Qwen3.5 GatedDeltaNet."""
+
+  def __init__(self, hidden_size: int, eps: float = 1e-6):
+    super().__init__()
+    self.weight = torch.nn.Parameter(torch.ones(hidden_size))
+    self.variance_epsilon = eps
+    self.hidden_size = hidden_size
+
+  def forward(
+      self, hidden_states: torch.Tensor, gate: torch.Tensor
+  ) -> torch.Tensor:
+    dtype = hidden_states.dtype
+    normed = normalization.rms_norm_with_hlfb(
+        hidden_states.to(torch.float32),
+        self.weight.to(torch.float32),
+        self.variance_epsilon,
+        torch.ones(
+            (self.hidden_size,),
+            dtype=torch.float32,
+            device=hidden_states.device,
+        ),
+    ).to(dtype)
+    return normed * torch.nn.functional.silu(gate.to(torch.float32)).to(dtype)
+
+  def extra_repr(self) -> str:
+    return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+
+
 class FusedQwen3_5MLP(torch.nn.Module):
   """Fused Gate-Up MLP Layer for Qwen3.5 model."""
 
@@ -329,6 +358,15 @@ def apply_qwen3_5_model_patches(
               child.weight.to(torch.float32) + 1.0
           )
         setattr(module, child_name, fused_norm)
+        replaced_modules.append((module, child_name, child))
+      elif isinstance(child, modeling_qwen3_5.Qwen3_5RMSNormGated):
+        dim = child.weight.shape[0]
+        fused_gated_norm = Qwen3_5RMSNormGated(dim, eps=child.variance_epsilon)
+        with torch.no_grad():
+          fused_gated_norm.weight = torch.nn.Parameter(
+              child.weight.to(torch.float32)
+          )
+        setattr(module, child_name, fused_gated_norm)
         replaced_modules.append((module, child_name, child))
       elif (fuse_gate_up or use_swiglu) and isinstance(
           child, (modeling_qwen3_5.Qwen3_5MLP, modular_qwen3_5.Qwen3_5MLP)
