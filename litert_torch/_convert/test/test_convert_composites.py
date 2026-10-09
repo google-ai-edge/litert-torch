@@ -234,7 +234,8 @@ class TestConvertComposites(testing.V1V2TestCase):
 
     args = (torch.full((1, 10), 0, dtype=torch.long),)
     torch_module = torch.nn.Embedding(10, 10)
-    edge_model = litert_torch.convert(torch_module, args)
+    # The comparison feeds the int64 ids straight to the TFLite model.
+    edge_model = litert_torch.convert(torch_module, args, enable_x64=True)
 
     self.assertTrue(
         model_coverage.compare_tflite_torch(edge_model, torch_module, args)
