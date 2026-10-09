@@ -181,6 +181,12 @@ class ExportableModuleConfig:
   use_litert_lm_compiler: bool = False
   compile_configs: str | None = None
 
+  # NPU Executor configs
+  enable_neon_for_npu_greedy_sampling: bool | None = None
+  use_hw_masking_for_npu: bool | None = None
+  use_hw_cache_update_for_npu: bool | None = None
+  use_hw_ple_for_npu: bool | None = None
+
   # Calibration & Static Quantization settings
   calibration_dataset_dir: str | None = None
   calibration_dataset_format: str = "jsonl"
