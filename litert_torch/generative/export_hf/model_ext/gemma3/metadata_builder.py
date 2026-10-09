@@ -28,9 +28,13 @@ def build_llm_metadata(
     llm_metadata: llm_metadata_pb2.LlmMetadata,
 ) -> llm_metadata_pb2.LlmMetadata:
   """Builds LLM metadata."""
-  if export_config.task != 'image_text_to_text':
-    return llm_metadata
-  if not export_config.export_vision_encoder:
+  llm_metadata.llm_model_type.CopyFrom(
+      llm_model_type_pb2.LlmModelType(gemma3=llm_model_type_pb2.Gemma3())
+  )
+  if (
+      export_config.task != 'image_text_to_text'
+      or not export_config.export_vision_encoder
+  ):
     return llm_metadata
   tokenizer = source_model_artifacts.tokenizer
   image_processor = source_model_artifacts.image_processor
@@ -40,17 +44,14 @@ def build_llm_metadata(
     token_map = tokenizer.special_tokens_map
     boi_token = token_map.get('boi_token', '')
     eoi_token = token_map.get('eoi_token', '')
-    llm_metadata.llm_model_type.CopyFrom(
-        llm_model_type_pb2.LlmModelType(gemma3n=llm_model_type_pb2.Gemma3N())
-    )
-    llm_metadata.llm_model_type.gemma3n.start_of_image_token.token_str = (
+    llm_metadata.llm_model_type.gemma3.start_of_image_token.token_str = (
         boi_token  # pyrefly: ignore[bad-assignment]
     )
-    llm_metadata.llm_model_type.gemma3n.end_of_image_token.token_str = eoi_token  # pyrefly: ignore[bad-assignment]
-    llm_metadata.llm_model_type.gemma3n.image_tensor_height = (
+    llm_metadata.llm_model_type.gemma3.end_of_image_token.token_str = eoi_token  # pyrefly: ignore[bad-assignment]
+    llm_metadata.llm_model_type.gemma3.image_tensor_height = (
         image_processor.size['height']  # pyrefly: ignore[missing-attribute]
     )
-    llm_metadata.llm_model_type.gemma3n.image_tensor_width = (
+    llm_metadata.llm_model_type.gemma3.image_tensor_width = (
         image_processor.size['width']  # pyrefly: ignore[missing-attribute]
     )
   return llm_metadata
