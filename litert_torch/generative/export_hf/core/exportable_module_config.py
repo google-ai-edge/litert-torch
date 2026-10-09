@@ -116,6 +116,8 @@ class ExportableModuleConfig:
   use_rope_composite: bool = False
   use_swiglu_composite: bool = False
   use_qkv_norm_rope_composite: bool = False
+  # Whether to emit the fused LFM2 short convolution composite
+  # (`odml.short_conv_step`) in both prefill and decode.
   use_short_conv_composite: bool = False
   # Whether to emit the fused `odml.sdpa_transposed` composite in both prefill
   # and decode signatures.

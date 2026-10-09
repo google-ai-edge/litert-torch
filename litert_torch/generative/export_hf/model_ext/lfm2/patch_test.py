@@ -242,8 +242,6 @@ class PatchTest(parameterized.TestCase):
     self.assertEqual(out_decode.shape, (1, 1, config.hidden_size))
     self.assertEqual(cache.layers[0].conv_states.shape, expected_shape)
 
-
-
   def test_short_conv_decode_composite(self):
     config = _get_dummy_lfm2_config()
     conv_standard = patch.short_conv_lib.Lfm2ShortConv(
@@ -289,6 +287,143 @@ class PatchTest(parameterized.TestCase):
         ),
         "Next state mismatch",
     )
+
+  @parameterized.named_parameters(
+      ("full", 4, False),
+      ("padded", 2, False),
+      ("shorter_than_state", 1, False),
+      ("no_mask", None, False),
+      ("full_with_bias", 4, True),
+      ("padded_with_bias", 2, True),
+  )
+  def test_short_conv_prefill_composite(self, num_valid, conv_bias):
+    config = _get_dummy_lfm2_config()
+    config.conv_bias = conv_bias
+    conv_standard = patch.short_conv_lib.Lfm2ShortConv(config, layer_idx=0)
+    conv_composite = patch.short_conv_lib.Lfm2ShortConv(
+        config, layer_idx=0, use_short_conv_composite=True
+    )
+    conv_composite.load_state_dict(conv_standard.state_dict())
+
+    expected_shape = (1, config.hidden_size, config.conv_L_cache - 1)
+
+    class DummyLayer:
+
+      def __init__(self, state):
+        self.conv_states = state.clone()
+
+    class DummyCache:
+
+      def __init__(self, state):
+        self.layers = [DummyLayer(state)]
+
+    init_state = torch.randn(expected_shape)
+    cache_std = DummyCache(init_state)
+    cache_comp = DummyCache(init_state)
+
+    seq_len = 4
+    x_prefill = torch.randn(1, seq_len, config.hidden_size)
+    valid_mask: torch.Tensor | None = None
+    if num_valid is not None:
+      valid_mask = (torch.arange(seq_len) < num_valid).unsqueeze(0)
+
+    with torch.no_grad():
+      out_std = conv_standard(
+          x_prefill, past_key_values=cache_std, valid_mask=valid_mask
+      )
+      out_comp = conv_composite(
+          x_prefill, past_key_values=cache_comp, valid_mask=valid_mask
+      )
+
+    torch.testing.assert_close(out_comp, out_std, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(
+        cache_comp.layers[0].conv_states, cache_std.layers[0].conv_states
+    )
+
+  @parameterized.named_parameters(
+      ("composite", True),
+      ("decomposed", False),
+  )
+  def test_short_conv_prefill_composite_export(self, use_short_conv_composite):
+    config = _get_dummy_lfm2_config()
+
+    class DummyLayer:
+
+      def __init__(self, state):
+        self.conv_states = state
+
+    class DummyCache:
+
+      def __init__(self, state):
+        self.layers = [DummyLayer(state)]
+
+    class ConvWrapper(torch.nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.conv = patch.short_conv_lib.Lfm2ShortConv(
+            config,
+            layer_idx=0,
+            use_short_conv_composite=use_short_conv_composite,
+        )
+
+      def forward(self, hidden_states, conv_state, valid_mask):
+        cache = DummyCache(conv_state)
+        y = self.conv(
+            hidden_states, past_key_values=cache, valid_mask=valid_mask
+        )
+        return y, cache.layers[0].conv_states
+
+    args = (
+        torch.randn(1, 4, config.hidden_size),
+        torch.randn(1, config.hidden_size, config.conv_L_cache - 1),
+        torch.tensor([[True, True, True, False]]),
+    )
+    module = ConvWrapper().eval()
+    graph_str = str(torch.export.export(module, args).graph)
+    self.assertEqual(
+        "odml.short_conv_step" in graph_str, use_short_conv_composite
+    )
+
+    # The composite survives conversion, and the LiteRT CPU runtime (which runs
+    # the composite decomposition) matches PyTorch.
+    edge_model = litert_torch.convert(module, args)
+    self.assertEqual(
+        b"odml.short_conv_step" in edge_model.model_content(),
+        use_short_conv_composite,
+    )
+    outputs = edge_model(*(arg.numpy() for arg in args))
+    if not isinstance(outputs, tuple):
+      self.fail(f"Expected a tuple of outputs, got {type(outputs)}.")
+    with torch.no_grad():
+      expected_y, expected_state = module(*args)
+    torch.testing.assert_close(
+        torch.as_tensor(outputs[0]), expected_y, rtol=1e-4, atol=1e-4
+    )
+    torch.testing.assert_close(
+        torch.as_tensor(outputs[1]), expected_state, rtol=1e-4, atol=1e-4
+    )
+
+  def test_patch_sets_short_conv_composite_flag(self):
+    config = _get_dummy_lfm2_config()
+    with patch.lfm2_litert_patch():
+      model = modeling_lfm2.Lfm2ForCausalLM(config).eval()
+    convs = [
+        m
+        for m in model.modules()
+        if isinstance(m, patch.short_conv_lib.Lfm2ShortConv)
+    ]
+    self.assertLen(convs, 1)
+    conv = convs[0]
+    self.assertFalse(conv.use_short_conv_composite)
+
+    export_config = exportable_module_config.ExportableModuleConfig(
+        model="dummy",
+        output_dir=None,
+        use_short_conv_composite=True,
+    )
+    with patch.patch_lfm2_model(model, export_config):
+      self.assertTrue(conv.use_short_conv_composite)
 
 
 if __name__ == "__main__":
