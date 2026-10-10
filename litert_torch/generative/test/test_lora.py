@@ -179,10 +179,26 @@ class TestLora(googletest.TestCase):
     recovered_lora = lora_utils.LoRA.from_flatbuffers(flatbuffer_model)
     self.assertEqual(lora, recovered_lora)
 
-  def _get_test_config(self, num_layers, head_dim, num_query_groups):
+  def test_lora_gqa_shapes(self):
+    """Tests that LoRA shapes are correct when num_query_groups > 1 (GQA)."""
+    config = self._get_test_config(
+        num_layers=1, head_dim=8, num_query_groups=2, num_heads=4
+    )
+    lora = lora_utils.LoRA.zeros(rank=16, config=config)
+    attn = lora.adapters[0].attention
+    self.assertEqual(attn.query.b_prime.shape, (16, 32))
+    self.assertEqual(attn.key.b_prime.shape, (16, 16))
+    self.assertEqual(attn.value.b_prime.shape, (16, 16))
+    self.assertEqual(attn.output.a_prime.shape, (32, 16))
+
+  def _get_test_config(
+      self, num_layers, head_dim, num_query_groups, num_heads=1
+  ):
     """Returns a test model config."""
     attn_config = cfg.AttentionConfig(
-        num_heads=1, head_dim=head_dim, num_query_groups=num_query_groups
+        num_heads=num_heads,
+        head_dim=head_dim,
+        num_query_groups=num_query_groups,
     )
     block_config = cfg.TransformerBlockConfig(
         attn_config=attn_config, ff_config=None

@@ -88,6 +88,7 @@ def export(
     prefill_lengths: list[int] | None = None,
     cache_length: int | None = None,
     cache_lengths: list[int] | None = None,
+    lora_ranks: list[int] | str | None = None,
     quantization_recipe: str | None = None,
     enable_dynamic_shape: bool | None = None,
     enable_gpu_dynamic_prefill: bool | None = None,
@@ -169,6 +170,9 @@ def export(
       processes the outer product of prefill_lengths and cache_lengths, creating
       prefill/decode signatures for each combination (e.g.,
       `prefill_{prefill_length}_cache_{cache_length}`).
+    lora_ranks: List of LoRA ranks (or comma-separated string) to export LoRA
+      signatures for (e.g., `prefill_{seq_len}_lora_r{rank}`,
+      `decode_lora_r{rank}`).
     quantization_recipe: The quantization recipes to use, separated by comma.
     enable_dynamic_shape: Whether to enable dynamic shape.
     enable_gpu_dynamic_prefill: Whether to enable GPU dynamic shapes (magic

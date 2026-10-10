@@ -82,6 +82,7 @@ class ExportableModuleConfig:
   prefill_lengths: list[int] = dataclasses.field(default_factory=lambda: [128])
   cache_length: int = 4096
   cache_lengths: list[int] | None = None
+  lora_ranks: list[int] | None = None
   sliding_window_ring_buffer_size: int | None = None
   # For quantization
   quantization_recipe: str | None = "dynamic_wi8_afp32"
@@ -315,6 +316,18 @@ class ExportableModuleConfig:
 
     if not self.cache_lengths:
       self.cache_lengths = [self.cache_length]
+
+    if isinstance(self.lora_ranks, int):
+      self.lora_ranks = [self.lora_ranks]
+    elif isinstance(self.lora_ranks, str):
+      self.lora_ranks = [
+          int(x) for x in self.lora_ranks.split(",") if x.strip()
+      ]
+    elif self.lora_ranks:
+      self.lora_ranks = [int(x) for x in self.lora_ranks]
+
+    if self.lora_ranks and self.fuse_qkv:
+      raise ValueError("`lora_ranks` is not supported with `fuse_qkv=True`.")
 
     if self.enable_dynamic_shape and len(self.cache_lengths) > 1:
       raise ValueError(
