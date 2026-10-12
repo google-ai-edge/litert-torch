@@ -316,7 +316,8 @@ class TestConvertTorchAO(parameterized.TestCase):
       torch_out = torch_module(*args).detach().numpy()
 
     edge_model = litert_torch.convert(torch_module, args, use_v2=True)
-    edge_out = edge_model(*args)
+    # enable_x64 defaults to False, so the converted model takes int32 ids.
+    edge_out = edge_model(args[0].to(torch.int32))
 
     diff = get_diff(edge_out, torch_out)
     self.assertLess(diff["mean_abs_diff"], 1e-2)
@@ -353,7 +354,7 @@ class TestConvertTorchAO(parameterized.TestCase):
       torch_out = torch_module(*args).detach().numpy()
 
     edge_model = litert_torch.convert(torch_module, args, use_v2=True)
-    edge_out = edge_model(*args)
+    edge_out = edge_model(args[0].to(torch.int32))
 
     diff = get_diff(edge_out, torch_out)
     self.assertLess(diff["mean_abs_diff"], 5e-2)
@@ -462,7 +463,7 @@ class TestConvertTorchAO(parameterized.TestCase):
       torch_out = torch_module(*args).detach().numpy()
 
     edge_model = litert_torch.convert(torch_module, args, use_v2=True)
-    edge_out = edge_model(*args)
+    edge_out = edge_model(args[0].to(torch.int32))
 
     diff = get_diff(edge_out, torch_out)
     self.assertLess(diff["mean_abs_diff"], 1e-2)
@@ -499,7 +500,7 @@ class TestConvertTorchAO(parameterized.TestCase):
       torch_out = torch_module(*args).detach().numpy()
 
     edge_model = litert_torch.convert(torch_module, args, use_v2=True)
-    edge_out = edge_model(*args)
+    edge_out = edge_model(args[0].to(torch.int32))
 
     diff = get_diff(edge_out, torch_out)
     self.assertLess(diff["mean_abs_diff"], 5e-2)

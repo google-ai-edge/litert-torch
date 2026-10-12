@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 # ConverterFlags fields set by `_build_tfl_converter_flags`.
 _REQUIRED_CONVERTER_FLAGS = (
     "enable_composite_direct_lowering",
+    "enable_x64",
     "fold_fp16_resource_casts",
     "strict_qdq_mode",
     "enable_debug",
@@ -608,6 +609,7 @@ def export_to_dir(
 
 def _build_tfl_converter_flags(
     *,
+    enable_x64: bool = False,
     fold_fp16_resource_casts: bool = True,
     enable_debug: bool = False,
     debug_dir: Optional[str] = None,
@@ -624,6 +626,7 @@ def _build_tfl_converter_flags(
   flags = converter_flags_pb2.ConverterFlags()
   flags.model_origin_framework = converter_flags_pb2.ConverterFlags.PYTORCH
   flags.enable_composite_direct_lowering = True
+  flags.enable_x64 = enable_x64
   flags.strict_qdq_mode = True
   flags.fold_fp16_resource_casts = fold_fp16_resource_casts
   if enable_debug:
@@ -751,6 +754,7 @@ def convert_signatures_v2(
     export_dir: Optional[str] = None,
     output_file_path: Optional[str] = None,
     delete_in_memory_params: bool = False,
+    enable_x64: bool = False,
     fold_fp16_resource_casts: bool = True,
     allow_reuse_intermediates: bool = False,
     weights_loader: Optional[
@@ -821,6 +825,7 @@ def convert_signatures_v2(
     if os.path.dirname(target_path):
       os.makedirs(os.path.dirname(target_path), exist_ok=True)
     conversion_flags = _build_tfl_converter_flags(
+        enable_x64=enable_x64,
         fold_fp16_resource_casts=fold_fp16_resource_casts,
         enable_debug=enable_debug,
         debug_dir=debug_dir or export_dir,
@@ -889,6 +894,7 @@ def convert_signatures_v2(
       t_python_rest = registry.timings.get("python_rest_s", 0.0)
 
       conversion_flags = _build_tfl_converter_flags(
+          enable_x64=enable_x64,
           fold_fp16_resource_casts=fold_fp16_resource_casts,
           enable_debug=enable_debug,
           debug_dir=debug_dir,
@@ -982,6 +988,7 @@ class Converter:
       export_dir: Optional[str] = None,
       output_file_path: Optional[str] = None,
       delete_in_memory_params: bool = False,
+      enable_x64: bool = False,
       fold_fp16_resource_casts: bool = True,
       allow_reuse_intermediates: bool = False,
       weights_loader: Optional[
@@ -1017,6 +1024,7 @@ class Converter:
         export_dir=export_dir,
         output_file_path=output_file_path,
         delete_in_memory_params=delete_in_memory_params,
+        enable_x64=enable_x64,
         fold_fp16_resource_casts=fold_fp16_resource_casts,
         allow_reuse_intermediates=allow_reuse_intermediates,
         weights_loader=weights_loader,
@@ -1053,6 +1061,7 @@ def convert(
     export_dir: Optional[str] = None,
     output_file_path: Optional[str] = None,
     delete_in_memory_params: bool = False,
+    enable_x64: bool = False,
     fold_fp16_resource_casts: bool = True,
     allow_reuse_intermediates: bool = False,
     weights_loader: Optional[
@@ -1076,6 +1085,7 @@ def convert(
       export_dir=export_dir,
       output_file_path=output_file_path,
       delete_in_memory_params=delete_in_memory_params,
+      enable_x64=enable_x64,
       fold_fp16_resource_casts=fold_fp16_resource_casts,
       allow_reuse_intermediates=allow_reuse_intermediates,
       weights_loader=weights_loader,

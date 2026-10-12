@@ -240,11 +240,6 @@ def convert_signatures(
       logging.warning("lightweight_conversion is ignored when use_v2=True.")
     if runtime_constant_folding:
       logging.warning("runtime_constant_folding is ignored when use_v2=True.")
-    if not enable_x64:
-      logging.warning(
-          "enable_x64=False is not yet applied in use_v2 mode; 64-bit tensors"
-          " are kept."
-      )
 
     from litert_torch._convert import converter_v2  # pylint: disable=g-import-not-at-top
 
@@ -254,6 +249,7 @@ def convert_signatures(
         export_dir=export_dir,
         output_file_path=output_file_path,
         delete_in_memory_params=delete_in_memory_params,
+        enable_x64=enable_x64,
         fold_fp16_resource_casts=fold_fp16_resource_casts,
         allow_reuse_intermediates=allow_reuse_intermediates,
         weights_loader=weights_loader,
