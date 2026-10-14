@@ -270,7 +270,12 @@ class HFCheckpointWeightsLoader:
   `lm_head` weights are reconstructed from their checkpoint components.
   """
 
-  def __init__(self, model_path: str, tie_word_embeddings: bool = False):
+  def __init__(
+      self,
+      model_path: str,
+      tie_word_embeddings: bool = False,
+      config: Any = None,
+  ):
     """Initializes the loader.
 
     Args:
@@ -278,8 +283,11 @@ class HFCheckpointWeightsLoader:
       tie_word_embeddings: Whether `lm_head` shares the embedding table. Only
         then is a missing `lm_head.weight` served from the embedding table;
         the two have the same shape, so a wrong fallback would go unnoticed.
+      config: Optional model config used for architecture-specific parameter
+        adjustments (e.g. Qwen3.5 zero-centered RMSNorm weights).
     """
     self._tie_word_embeddings = tie_word_embeddings
+    self.config = config
     self._handles: dict[str, Any] = {}
     self._checkpoint_dir = self._resolve_checkpoint_dir(model_path)
     self._weight_map = self._load_weight_map()
@@ -339,8 +347,7 @@ class HFCheckpointWeightsLoader:
     return self._handle(path).get_tensor(key)
 
   @staticmethod
-  def _candidates(param_name: str) -> list[str]:
-    """Returns checkpoint keys `param_name` may correspond to, in order."""
+  def _strip_wrapper_prefixes(param_name: str) -> str:
     stripped = param_name
     while True:
       for prefix in _WRAPPER_PREFIXES:
@@ -349,6 +356,12 @@ class HFCheckpointWeightsLoader:
           break
       else:
         break
+    return stripped
+
+  @classmethod
+  def _candidates(cls, param_name: str) -> list[str]:
+    """Returns checkpoint keys `param_name` may correspond to, in order."""
+    stripped = cls._strip_wrapper_prefixes(param_name)
     candidates = [
         param_name,
         stripped,
@@ -359,10 +372,33 @@ class HFCheckpointWeightsLoader:
     ]
     return list(dict.fromkeys(candidates))  # Dedupe, preserving order.
 
+  def _is_qwen3_5_zero_centered_rmsnorm(self, param_name: str) -> bool:
+    if self.config is None:
+      return False
+    cleaned_name = self._strip_wrapper_prefixes(param_name)
+    model_types = {
+        getattr(self.config, "model_type", None),
+        getattr(getattr(self.config, "text_config", None), "model_type", None),
+    }
+    if not (
+        model_types
+        & {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}
+    ):
+      return False
+    return cleaned_name == "norm.weight" or cleaned_name.endswith((
+        ".input_layernorm.weight",
+        ".post_attention_layernorm.weight",
+        ".self_attn.q_norm.weight",
+        ".self_attn.k_norm.weight",
+    ))
+
   def _try_load(self, param_name: str) -> torch.Tensor | None:
     for candidate in self._candidates(param_name):
       if candidate in self._weight_map:
-        return self._get(candidate)
+        tensor = self._get(candidate)
+        if self._is_qwen3_5_zero_centered_rmsnorm(param_name):
+          return tensor.to(torch.float32) + 1.0
+        return tensor
     return None
 
   def _load_fused(
@@ -396,6 +432,36 @@ class HFCheckpointWeightsLoader:
       key = next((k for k in _EMBEDDING_KEYS if k in self._weight_map), None)
       if key is not None:
         tensor = self._get(key)
+    if (
+        tensor is None
+        and param_name.endswith("inv_freq")
+        and self.config is not None
+    ):
+      cfg = getattr(self.config, "text_config", None) or self.config
+      if (
+          cfg is not None
+          and hasattr(cfg, "hidden_size")
+          and hasattr(cfg, "num_attention_heads")
+      ):
+        rope_params = getattr(cfg, "rope_parameters", None) or {}
+        if not isinstance(rope_params, dict):
+          rope_params = {}
+        partial_rotary_factor = float(
+            rope_params.get(
+                "partial_rotary_factor",
+                getattr(cfg, "partial_rotary_factor", 1.0),
+            )
+        )
+        head_dim = getattr(cfg, "head_dim", None) or (
+            cfg.hidden_size // cfg.num_attention_heads
+        )
+        dim = int(head_dim * partial_rotary_factor)
+        base = float(
+            rope_params.get("rope_theta", getattr(cfg, "rope_theta", 10000.0))
+        )
+        tensor = 1.0 / (
+            base ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim)
+        )
     if tensor is None:
       raise KeyError(
           f"'{param_name}' not found in checkpoint {self._checkpoint_dir}."
