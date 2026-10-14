@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import functools
 import gc
+import glob
 import json
 import logging
 import os
@@ -445,6 +446,12 @@ class ParameterRegistry:
           )
         f.write(raw_bytes)
         current_pos += len(raw_bytes)
+      f.flush()
+      if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_DONTNEED"):
+        try:
+          os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+        except OSError:
+          pass
 
     with open(json_path, "w") as f:
       json.dump(self.metadata, f, indent=2)
@@ -579,6 +586,11 @@ def export_to_dir(
         output_names=output_names,
         module=sig.module,
     )
+    del lowered
+    del ir_context
+  del exported_programs
+  gc.collect()
+  _trim_memory()
 
   # Save params.bin and metadata JSON
   with progress.task("Save Params Bin & Metadata"):
@@ -591,7 +603,47 @@ def export_to_dir(
   if delete_in_memory_params:
     _delete_signature_params(signatures)
     registry.delete_in_memory_params()
-    _close_weights_loader(weights_loader)
+    if weights_loader is not None and hasattr(weights_loader, "close"):
+      try:
+        weights_loader.close()
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    if (
+        weights_loader is not None
+        and hasattr(weights_loader, "checkpoint_dir")
+        and export_dir.endswith("text_intermediates")
+    ):
+      try:
+        ckpt_dir = getattr(weights_loader, "checkpoint_dir")
+        if ckpt_dir and os.path.isdir(ckpt_dir):
+          if hasattr(os, "posix_fadvise") and hasattr(
+              os, "POSIX_FADV_DONTNEED"
+          ):
+            for sf in glob.glob(os.path.join(ckpt_dir, "*.safetensors")):
+              try:
+                fd = os.open(sf, os.O_RDONLY)
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                os.close(fd)
+              except OSError:
+                pass
+          if (
+              ".cache/huggingface" in ckpt_dir
+              and shutil.disk_usage(ckpt_dir).free < 100 * 1024**3
+          ):
+            for sf in glob.glob(os.path.join(ckpt_dir, "*.safetensors")):
+              if os.path.islink(sf):
+                real_sf = os.path.realpath(sf)
+                if os.path.exists(real_sf):
+                  os.remove(real_sf)
+              if os.path.exists(sf) or os.path.islink(sf):
+                os.remove(sf)
+            logging.info(
+                "[CONVERTER V2] Deleted safetensors from HF cache %s after"
+                " saving params.bin to free disk space.",
+                ckpt_dir,
+            )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Failed to clean up safetensors cache: %s", e)
     _trim_memory()
 
   t_python_rest = time.perf_counter() - t_python_rest_start
@@ -834,6 +886,32 @@ def convert_signatures_v2(
     with progress.task("MLIR Pipeline Execution"):
       _convert_mlir_bytecode(conversion_flags, export_dir, target_path)
     t_mlir_duration = time.perf_counter() - t_mlir_start
+    if (
+        hasattr(os, "posix_fadvise")
+        and hasattr(os, "POSIX_FADV_DONTNEED")
+        and os.path.exists(target_path)
+    ):
+      try:
+        fd = os.open(target_path, os.O_RDONLY)
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        os.close(fd)
+      except OSError:
+        pass
+    if (
+        not allow_reuse_intermediates or delete_in_memory_params
+    ) and export_dir.endswith((
+        "text_intermediates",
+        "embedder_intermediates",
+    )):
+      try:
+        params_bin_path = os.path.join(export_dir, "params.bin")
+        if os.path.exists(params_bin_path):
+          os.remove(params_bin_path)
+        for mlirbc_file in glob.glob(os.path.join(export_dir, "*.mlirbc")):
+          os.remove(mlirbc_file)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Failed to remove intermediate files: %s", e)
+    _trim_memory()
     t_total_convert = time.perf_counter() - t_conv_start
 
     _log_benchmark_summary(

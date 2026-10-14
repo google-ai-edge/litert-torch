@@ -15,6 +15,8 @@
 """Tests for Qwen3.5 model patch."""
 
 import importlib.metadata
+import os
+import tempfile
 from typing import Any
 
 orig_version = importlib.metadata.version
@@ -32,9 +34,11 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import litert_torch
 from litert_torch.generative.export_hf.core import exportable_module_config
+from litert_torch.generative.export_hf.core import weights_loader
 from litert_torch.generative.export_hf.model_ext import patches as patches_lib
 from litert_torch.generative.export_hf.model_ext.qwen3_5 import modeling_qwen3_5_static
 from litert_torch.generative.export_hf.model_ext.qwen3_5 import patch
+import safetensors.torch
 import torch
 from transformers.models.qwen3_5 import configuration_qwen3_5
 from transformers.models.qwen3_5 import modeling_qwen3_5
@@ -81,6 +85,32 @@ class Qwen3_5PatchTest(parameterized.TestCase):
     x = torch.randn(2, 5, 64)
     expected = orig_norm(x)
     actual = fused_norm(x)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+  def test_qwen3_5_rms_norm_gated_equivalence(self):
+    torch.manual_seed(0)
+    orig_norm = modeling_qwen3_5.Qwen3_5RMSNormGated(64, eps=1e-6)
+    orig_norm.weight.data.uniform_(0.5, 1.5)
+
+    fused_norm = patch.Qwen3_5RMSNormGated(64, eps=1e-6)
+    fused_norm.weight = torch.nn.Parameter(orig_norm.weight.to(torch.float32))
+
+    self.assertIn("eps=1e-06", fused_norm.extra_repr())
+    x = torch.randn(2, 5, 4, 64)
+    gate = torch.randn(2, 5, 4, 64)
+    expected = orig_norm(x, gate)
+    actual = fused_norm(x, gate)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+  def test_l2norm_with_folded_scale_equivalence(self):
+    torch.manual_seed(0)
+    x = torch.randn(2, 5, 4, 128)
+    eps = 1e-6
+    scale = 1.0 / (128**0.5)
+    expected = (
+        x * torch.rsqrt((x * x).sum(dim=-1, keepdim=True) + eps)
+    ) * scale
+    actual = modeling_qwen3_5_static.l2norm(x, dim=-1, eps=eps, scale=scale)
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
   @parameterized.named_parameters(
@@ -452,5 +482,49 @@ class Qwen3_5PatchTest(parameterized.TestCase):
     edge_model = litert_torch.convert(wrapper, (x, pos_ids))
     self.assertIn(b"odml.qkv_norm_rope", edge_model.model_content())
 
+  def test_hf_checkpoint_weights_loader_qwen3_5(self):
+    torch.manual_seed(0)
+    cfg = self._make_config(partial_rotary_factor=0.25)
+    model = modeling_qwen3_5_static.Qwen3_5StaticForCausalLM(cfg).eval()
+    for module in model.modules():
+      if isinstance(
+          module,
+          (modeling_qwen3_5.Qwen3_5RMSNorm, modular_qwen3_5.Qwen3_5RMSNorm),
+      ):
+        module.weight.data.uniform_(-0.1, 0.1)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      raw_state = {
+          k: v.detach().to(torch.bfloat16)
+          for k, v in model.state_dict().items()
+      }
+      safetensors.torch.save_file(
+          raw_state, os.path.join(tmpdir, "model.safetensors")
+      )
+      loader = weights_loader.HFCheckpointWeightsLoader(tmpdir, config=cfg)
+
+      # 1. Zero-centered RMSNorm weights should have +1.0 added in float32
+      for norm_key in (
+          "model.layers.0.input_layernorm.weight",
+          "model.layers.0.post_attention_layernorm.weight",
+          "model.layers.1.self_attn.q_norm.weight",
+          "model.layers.1.self_attn.k_norm.weight",
+          "model.norm.weight",
+      ):
+        loaded = loader(f"static_model.{norm_key}")
+        expected = raw_state[norm_key].to(torch.float32) + 1.0
+        self.assertEqual(loaded.dtype, torch.float32)
+        torch.testing.assert_close(loaded, expected)
+
+      # 2. Gated RMSNorm in linear_attn is NOT zero-centered (no +1.0 shift)
+      gated_key = "model.layers.0.linear_attn.norm.weight"
+      loaded_gated = loader(f"static_model.{gated_key}")
+      torch.testing.assert_close(loaded_gated, raw_state[gated_key])
+
+      # 3. Partial rotary inv_freq buffer fallback matches Qwen3_5StaticRotaryEmbedding
+      loaded_inv_freq = loader("static_model.model.rotary_emb.inv_freq")
+      torch.testing.assert_close(
+          loaded_inv_freq, model.model.rotary_emb.inv_freq
+      )
 if __name__ == "__main__":
   absltest.main()
