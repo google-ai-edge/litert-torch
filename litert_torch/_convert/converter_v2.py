@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import functools
 import gc
+import glob
 import json
 import logging
 import os
@@ -579,6 +580,11 @@ def export_to_dir(
         output_names=output_names,
         module=sig.module,
     )
+    del lowered
+    del ir_context
+  del exported_programs
+  gc.collect()
+  _trim_memory()
 
   # Save params.bin and metadata JSON
   with progress.task("Save Params Bin & Metadata"):
@@ -591,7 +597,37 @@ def export_to_dir(
   if delete_in_memory_params:
     _delete_signature_params(signatures)
     registry.delete_in_memory_params()
-    _close_weights_loader(weights_loader)
+    if weights_loader is not None and hasattr(weights_loader, "close"):
+      try:
+        weights_loader.close()
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    if (
+        weights_loader is not None
+        and hasattr(weights_loader, "checkpoint_dir")
+        and export_dir.endswith("text_intermediates")
+    ):
+      try:
+        ckpt_dir = getattr(weights_loader, "checkpoint_dir")
+        if (
+            ckpt_dir
+            and os.path.isdir(ckpt_dir)
+            and ".cache/huggingface" in ckpt_dir
+        ):
+          for sf in glob.glob(os.path.join(ckpt_dir, "*.safetensors")):
+            if os.path.islink(sf):
+              real_sf = os.path.realpath(sf)
+              if os.path.exists(real_sf):
+                os.remove(real_sf)
+            if os.path.exists(sf) or os.path.islink(sf):
+              os.remove(sf)
+          logging.info(
+              "[CONVERTER V2] Deleted safetensors from HF cache %s after saving"
+              " params.bin to free disk space.",
+              ckpt_dir,
+          )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Failed to clean up safetensors cache: %s", e)
     _trim_memory()
 
   t_python_rest = time.perf_counter() - t_python_rest_start
@@ -834,6 +870,16 @@ def convert_signatures_v2(
     with progress.task("MLIR Pipeline Execution"):
       _convert_mlir_bytecode(conversion_flags, export_dir, target_path)
     t_mlir_duration = time.perf_counter() - t_mlir_start
+    if not allow_reuse_intermediates and export_dir.endswith("text_intermediates"):
+      try:
+        params_bin_path = os.path.join(export_dir, "params.bin")
+        if os.path.exists(params_bin_path):
+          os.remove(params_bin_path)
+        for mlirbc_file in glob.glob(os.path.join(export_dir, "*.mlirbc")):
+          os.remove(mlirbc_file)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Failed to remove intermediate files: %s", e)
+    _trim_memory()
     t_total_convert = time.perf_counter() - t_conv_start
 
     _log_benchmark_summary(
