@@ -187,6 +187,30 @@ class HFCheckpointWeightsLoaderTest(absltest.TestCase):
         ]),
     )
 
+  def test_fused_gate_up_from_w1_w3(self):
+    # LFM2 names its gate / up projections `w1` / `w3`.
+    tensors = {
+        "model.layers.0.feed_forward.w1.weight": torch.randn(6, 4),
+        "model.layers.0.feed_forward.w2.weight": torch.randn(4, 6),
+        "model.layers.0.feed_forward.w3.weight": torch.randn(6, 4),
+    }
+    ckpt_dir = self.create_tempdir().full_path
+    safetensors.torch.save_file(
+        tensors, os.path.join(ckpt_dir, "model.safetensors")
+    )
+    loader = weights_loader_lib.HFCheckpointWeightsLoader(ckpt_dir)
+    torch.testing.assert_close(
+        loader("model.model.layers.0.feed_forward.gate_up_proj.weight"),
+        torch.cat([
+            tensors["model.layers.0.feed_forward.w1.weight"],
+            tensors["model.layers.0.feed_forward.w3.weight"],
+        ]),
+    )
+    torch.testing.assert_close(
+        loader("model.model.layers.0.feed_forward.w2.weight"),
+        tensors["model.layers.0.feed_forward.w2.weight"],
+    )
+
   def test_tied_lm_head(self):
     loader = weights_loader_lib.HFCheckpointWeightsLoader(
         self.ckpt_dir, tie_word_embeddings=True

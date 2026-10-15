@@ -46,6 +46,14 @@ _EMBEDDING_KEYS = (
     "model.language_model.embed_tokens.weight",
     "transformer.wte.weight",
 )
+# Fused projections created by `fuse_qkv` / `fuse_gate_up` patches and the
+# checkpoint components they concatenate (along dim 0), tried in order.
+_FUSED_PROJECTIONS = (
+    ("qkv_proj", ("q_proj", "k_proj", "v_proj")),
+    ("gate_up_proj", ("gate_proj", "up_proj")),
+    # LFM2 names its gate / up projections `w1` / `w3`.
+    ("gate_up_proj", ("w1", "w3")),
+)
 
 
 @contextlib.contextmanager
@@ -379,14 +387,10 @@ class HFCheckpointWeightsLoader:
 
   def __call__(self, param_name: str) -> torch.Tensor:
     tensor = self._try_load(param_name)
-    if tensor is None:
-      tensor = self._load_fused(
-          param_name, "qkv_proj", ("q_proj", "k_proj", "v_proj")
-      )
-    if tensor is None:
-      tensor = self._load_fused(
-          param_name, "gate_up_proj", ("gate_proj", "up_proj")
-      )
+    for fused, parts in _FUSED_PROJECTIONS:
+      if tensor is not None:
+        break
+      tensor = self._load_fused(param_name, fused, parts)
     if (
         tensor is None
         and self._tie_word_embeddings
