@@ -23,31 +23,57 @@ import torch
 from torch.nn import functional as F
 import transformers
 
-# Fixed chunk length for Qwen3ASRAudioAttention.
+# Number of encoder tokens per chunk of n_window * 2 mel frames.
 _CHUNK_LEN = 13
+
+# Mask value between attention windows. Finite to avoid inf arithmetic.
+_MASK_VALUE = -1e4
+
+
+def _get_window_mask(seqlen: int, window: int) -> torch.Tensor:
+  """Returns a block-diagonal additive mask of [1, 1, seqlen, seqlen].
+
+  Built with numpy so that the exported graph holds it as a constant.
+
+  Args:
+    seqlen: The number of encoder tokens.
+    window: The number of encoder tokens in an attention window.
+  """
+  window_ids = np.arange(seqlen) // window
+  same_window = window_ids[:, None] == window_ids[None, :]
+  mask = np.where(same_window, 0.0, _MASK_VALUE).astype(np.float32)
+  return torch.from_numpy(mask[None, None])
 
 
 def _audio_attention_forward(
     self, hidden_states: torch.Tensor, **kwargs
 ) -> torch.Tensor:
-  """Patched Qwen3ASRAudioAttention.forward() to avoid splits and loops."""
+  """Patched Qwen3ASRAudioAttention.forward() to avoid splits and loops.
+
+  Like get_audio_cu_seqlens() in transformers, attends within windows of
+  n_window_infer mel frames from the start of the input, the last window
+  shorter. One SDPA covers all windows with a block-diagonal mask.
+  """
   seqlen, _ = hidden_states.size()
-  num_chunks = seqlen // _CHUNK_LEN
+  window = _CHUNK_LEN * (
+      self.config.n_window_infer // (self.config.n_window * 2)
+  )
 
   q = self.q_proj(hidden_states).reshape(seqlen, self.num_heads, -1)
   k = self.k_proj(hidden_states).reshape(seqlen, self.num_heads, -1)
   v = self.v_proj(hidden_states).reshape(seqlen, self.num_heads, -1)
 
-  q = q.view(num_chunks, _CHUNK_LEN, self.num_heads, self.head_dim)
-  k = k.view(num_chunks, _CHUNK_LEN, self.num_heads, self.head_dim)
-  v = v.view(num_chunks, _CHUNK_LEN, self.num_heads, self.head_dim)
+  q = q.view(1, seqlen, self.num_heads, self.head_dim)
+  k = k.view(1, seqlen, self.num_heads, self.head_dim)
+  v = v.view(1, seqlen, self.num_heads, self.head_dim)
 
   q = q.transpose(1, 2)
   k = k.transpose(1, 2)
   v = v.transpose(1, 2)
 
+  mask = None if seqlen <= window else _get_window_mask(seqlen, window)
   attn_output, _ = asr_model._sdpa(
-      self, q, k, v, attention_mask=None, scaling=self.scaling, **kwargs
+      self, q, k, v, attention_mask=mask, scaling=self.scaling, **kwargs
   )
   attn_output = attn_output.view(seqlen, -1)
   attn_output = self.out_proj(attn_output)
