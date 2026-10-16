@@ -209,12 +209,8 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
     # Build input .litertlm
     input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
     builder = litertlm_builder.LitertLmFileBuilder()
-    builder.add_tflite_model(
-        main_model_path, litertlm_builder.TfLiteModelType.PREFILL_DECODE
-    )
-    builder.add_tflite_model(
-        aux_model_path, litertlm_builder.TfLiteModelType.AUX
-    )
+    builder.add_tflite_model(main_model_path, 'prefill_decode')
+    builder.add_tflite_model(aux_model_path, 'aux')
     builder.add_llm_metadata(metadata_path)
     builder.add_sentencepiece_tokenizer(tokenizer_path)
 
@@ -327,12 +323,8 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
 
     input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
     builder = litertlm_builder.LitertLmFileBuilder()
-    builder.add_tflite_model(
-        main_model_path, litertlm_builder.TfLiteModelType.PREFILL_DECODE
-    )
-    builder.add_tflite_model(
-        aux_model_path, litertlm_builder.TfLiteModelType.AUX
-    )
+    builder.add_tflite_model(main_model_path, 'prefill_decode')
+    builder.add_tflite_model(aux_model_path, 'aux')
     builder.add_llm_metadata(metadata_path)
     builder.add_sentencepiece_tokenizer(tokenizer_path)
     with open(input_litertlm_path, 'wb') as f:
@@ -413,12 +405,8 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
 
     input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
     builder = litertlm_builder.LitertLmFileBuilder()
-    builder.add_tflite_model(
-        main_model_path, litertlm_builder.TfLiteModelType.PREFILL_DECODE
-    )
-    builder.add_tflite_model(
-        aux_model_path, litertlm_builder.TfLiteModelType.AUX
-    )
+    builder.add_tflite_model(main_model_path, 'prefill_decode')
+    builder.add_tflite_model(aux_model_path, 'aux')
     builder.add_llm_metadata(metadata_path)
     builder.add_sentencepiece_tokenizer(tokenizer_path)
     with open(input_litertlm_path, 'wb') as f:
@@ -485,12 +473,8 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
 
     input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
     builder = litertlm_builder.LitertLmFileBuilder()
-    builder.add_tflite_model(
-        main_model_path, litertlm_builder.TfLiteModelType.PREFILL_DECODE
-    )
-    builder.add_tflite_model(
-        aux_model_path, litertlm_builder.TfLiteModelType.AUX
-    )
+    builder.add_tflite_model(main_model_path, 'prefill_decode')
+    builder.add_tflite_model(aux_model_path, 'aux')
     builder.add_llm_metadata(metadata_path)
     builder.add_sentencepiece_tokenizer(tokenizer_path)
     with open(input_litertlm_path, 'wb') as f:
@@ -537,12 +521,8 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
 
     input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
     builder = litertlm_builder.LitertLmFileBuilder()
-    builder.add_tflite_model(
-        main_model_path, litertlm_builder.TfLiteModelType.PREFILL_DECODE
-    )
-    builder.add_tflite_model(
-        aux_model_path, litertlm_builder.TfLiteModelType.AUX
-    )
+    builder.add_tflite_model(main_model_path, 'prefill_decode')
+    builder.add_tflite_model(aux_model_path, 'aux')
     builder.add_llm_metadata(metadata_path)
     builder.add_sentencepiece_tokenizer(tokenizer_path)
     with open(input_litertlm_path, 'wb') as f:
@@ -602,12 +582,8 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
 
     input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
     builder = litertlm_builder.LitertLmFileBuilder()
-    builder.add_tflite_model(
-        main_model_path, litertlm_builder.TfLiteModelType.PREFILL_DECODE
-    )
-    builder.add_tflite_model(
-        aux_model_path, litertlm_builder.TfLiteModelType.AUX
-    )
+    builder.add_tflite_model(main_model_path, 'prefill_decode')
+    builder.add_tflite_model(aux_model_path, 'aux')
     builder.add_llm_metadata(metadata_path)
     builder.add_sentencepiece_tokenizer(tokenizer_path)
     with open(input_litertlm_path, 'wb') as f:
@@ -680,17 +656,15 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
 
     input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
     builder = litertlm_builder.LitertLmFileBuilder()
-    builder.add_tflite_model(
-        text_enc_path, litertlm_builder.TfLiteModelType.TEXT_ENCODER
-    )
+    builder.add_tflite_model(text_enc_path, 'text_encoder')
     builder.add_tflite_model(
         audio_enc_path,
-        litertlm_builder.TfLiteModelType.AUDIO_ENCODER_HW,
+        'audio_encoder_hw',
         backend_constraint='cpu',
     )
     builder.add_tflite_model(
         vision_enc_path,
-        litertlm_builder.TfLiteModelType.VISION_ENCODER,
+        'vision_encoder',
         prefer_activation_type='fp16',
     )
     builder.add_llm_metadata(metadata_path)
@@ -765,17 +739,15 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
 
     input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
     builder = litertlm_builder.LitertLmFileBuilder()
-    builder.add_tflite_model(
-        text_enc_path, litertlm_builder.TfLiteModelType.TEXT_ENCODER
-    )
+    builder.add_tflite_model(text_enc_path, 'text_encoder')
     builder.add_tflite_model(
         audio_enc_path,
-        litertlm_builder.TfLiteModelType.AUDIO_ENCODER_HW,
+        'audio_encoder_hw',
         backend_constraint='cpu',
     )
     builder.add_tflite_model(
         vision_enc_path,
-        litertlm_builder.TfLiteModelType.VISION_ENCODER,
+        'vision_encoder',
         prefer_activation_type='fp16',
     )
     builder.add_llm_metadata(metadata_path)
@@ -866,9 +838,7 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
 
     input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
     builder = litertlm_builder.LitertLmFileBuilder()
-    builder.add_tflite_model(
-        text_enc_path, litertlm_builder.TfLiteModelType.TEXT_ENCODER
-    )
+    builder.add_tflite_model(text_enc_path, 'text_encoder')
     builder.add_llm_metadata(metadata_path)
     builder.add_sentencepiece_tokenizer(tokenizer_path)
     with open(input_litertlm_path, 'wb') as f:
@@ -926,9 +896,7 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
 
     input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
     builder = litertlm_builder.LitertLmFileBuilder()
-    builder.add_tflite_model(
-        text_enc_path, litertlm_builder.TfLiteModelType.TEXT_ENCODER
-    )
+    builder.add_tflite_model(text_enc_path, 'text_encoder')
     builder.add_llm_metadata(metadata_path)
     builder.add_sentencepiece_tokenizer(tokenizer_path)
     with open(input_litertlm_path, 'wb') as f:
@@ -1000,12 +968,8 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
 
     input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
     builder = litertlm_builder.LitertLmFileBuilder()
-    builder.add_tflite_model(
-        text_enc_path, litertlm_builder.TfLiteModelType.TEXT_ENCODER
-    )
-    builder.add_tflite_model(
-        vision_enc_path, litertlm_builder.TfLiteModelType.VISION_ENCODER
-    )
+    builder.add_tflite_model(text_enc_path, 'text_encoder')
+    builder.add_tflite_model(vision_enc_path, 'vision_encoder')
     builder.add_llm_metadata(metadata_path)
     builder.add_sentencepiece_tokenizer(tokenizer_path)
     with open(input_litertlm_path, 'wb') as f:
@@ -1073,9 +1037,7 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
 
     input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
     builder = litertlm_builder.LitertLmFileBuilder()
-    builder.add_tflite_model(
-        text_enc_path, litertlm_builder.TfLiteModelType.TEXT_ENCODER
-    )
+    builder.add_tflite_model(text_enc_path, 'text_encoder')
     builder.add_llm_metadata(metadata_path)
     builder.add_sentencepiece_tokenizer(tokenizer_path)
     with open(input_litertlm_path, 'wb') as f:
