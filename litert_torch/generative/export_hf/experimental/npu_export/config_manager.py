@@ -58,6 +58,12 @@ class NpuPipelineConfig:
   # Stage 3 Static Range Quantization Defaults
   calibration_range_scale: float = 1.0
 
+  # NPU Executor Metadata settings
+  enable_neon_for_npu_greedy_sampling: bool | None = None
+  use_hw_masking_for_npu: bool | None = None
+  use_hw_cache_update_for_npu: bool | None = None
+  use_hw_ple_for_npu: bool | None = None
+
   @property
   def quantization_recipe(self) -> str:
     """Backward-compatible property alias pointing to weight_quantization_recipe."""
