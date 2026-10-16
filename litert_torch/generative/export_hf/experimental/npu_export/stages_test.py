@@ -16,6 +16,7 @@
 
 import os
 from typing import Any
+from unittest import mock
 from absl import flags
 from absl.testing import absltest
 from litert_torch.generative.export_hf.experimental.npu_export import config_manager
@@ -37,6 +38,16 @@ def dummy_func(
 
 
 class StagesTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    # build_pipeline_config reads the HF config for the prefill-mask check.
+    # Stub the check so that these tests make no Hub request.
+    self.enter_context(
+        mock.patch.object(
+            config_manager, "warn_if_prefill_mask_exceeds_htp_limit"
+        )
+    )
 
   def test_bind_cfg_automatic_reflection(self):
     cfg = config_manager.build_pipeline_config(
