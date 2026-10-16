@@ -76,6 +76,13 @@ class TokenizerConfig:
 PROMPT_TEMPLATE_PREFIX = '<start_of_turn>user\n'
 PROMPT_TEMPLATE_SUFFIX = '<end_of_turn>\n<start_of_turn>model\n'
 
+# Sentinel used to probe whether a chat template preserves plain-string
+# content. Searching the rendered output for the prompt itself does not
+# detect a drop reliably: a prompt like 'User:' can be a substring of the
+# template's own boilerplate, so the search succeeds while the content is
+# gone.
+_CONTENT_PROBE = 'KIMAIRA_CALIBRATION_PROBE'
+
 
 class Tokenizer:
   """Tokenizes the input string."""
@@ -162,37 +169,37 @@ class Tokenizer:
       return prompt
 
     if self.tx_tokenizer and getattr(self.tx_tokenizer, 'chat_template', None):
-      try:
-        messages = (
-            prompt
-            if isinstance(prompt, list)
-            else [{'role': 'user', 'content': prompt}]
-        )
-        formatted = self.tx_tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        # Guard: Check that prompt text was not dropped (e.g. SmolVLM2 list schema)
-        raw_text = (
-            prompt
-            if isinstance(prompt, str)
-            else str(messages[-1].get('content', ''))
-        )
-        if isinstance(formatted, str) and (
-            not raw_text or raw_text in formatted
-        ):
-          return formatted
+      # Guard: probe the template with a sentinel before trusting it with the
+      # real prompt (e.g. SmolVLM2's list schema drops plain-string content).
+      if not self._chat_template_keeps_content():
         logging.warning(
-            'apply_chat_template dropped the prompt content; falling back to'
-            ' default formatting.'
+            'chat template does not preserve plain-string content; falling'
+            ' back to default formatting.'
         )
-      except Exception as e:  # pylint: disable=broad-exception-caught
-        logging.warning(
-            'Failed to apply chat template (%s); falling back to default'
-            ' formatting.',
-            e,
-        )
+      else:
+        try:
+          messages = (
+              prompt
+              if isinstance(prompt, list)
+              else [{'role': 'user', 'content': prompt}]
+          )
+          formatted = self.tx_tokenizer.apply_chat_template(
+              messages,
+              tokenize=False,
+              add_generation_prompt=True,
+          )
+          if isinstance(formatted, str):
+            return formatted
+          logging.warning(
+              'apply_chat_template did not return a string; falling back to'
+              ' default formatting.'
+          )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          logging.warning(
+              'Failed to apply chat template (%s); falling back to default'
+              ' formatting.',
+              e,
+          )
 
     # Fallback when no chat template is available or template execution failed
     raw_str = (
@@ -201,6 +208,18 @@ class Tokenizer:
         else '\n'.join([str(m.get('content', '')) for m in prompt])
     )
     return PROMPT_TEMPLATE_PREFIX + raw_str + PROMPT_TEMPLATE_SUFFIX
+
+  def _chat_template_keeps_content(self) -> bool:
+    """Returns whether the chat template reproduces plain-string content."""
+    try:
+      rendered = self.tx_tokenizer.apply_chat_template(
+          [{'role': 'user', 'content': _CONTENT_PROBE}],
+          tokenize=False,
+          add_generation_prompt=True,
+      )
+    except Exception:  # pylint: disable=broad-exception-caught
+      return False
+    return isinstance(rendered, str) and _CONTENT_PROBE in rendered
 
   def tokenize_internal(self, input_string: str):
     """Tokenizes the input string."""
