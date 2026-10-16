@@ -88,6 +88,16 @@ _NORMALIZE_FUNCS = {
 }
 
 
+def _is_byte_level(tokenizer: transformers.PreTrainedTokenizer) -> bool:
+  """Returns True when the vocab is GPT-2 style byte-level.
+
+  In such a vocab the 256 byte tokens are single characters of the GPT-2
+  byte<->unicode table, e.g. the space byte 0x20 is spelled "Ġ".
+  """
+  vocab = tokenizer.get_vocab()
+  return "Ġ" in vocab and all(c in vocab for c in ("Ċ", "Ã", "Â"))
+
+
 def _add_token(
     token: str,
     id_: int,
@@ -98,15 +108,37 @@ def _add_token(
     normalize_tokens: str = "decode",
 ):
   """Adds a token to the SentencePieceModel protobuf with a derived type."""
-  unk_token = tokenizer.unk_token or tokenizer.pad_token or tokenizer.eos_token
-  if token == unk_token:
+  # Only the tokenizer's own unk_token may become the UNKNOWN piece. Falling
+  # back to pad/eos would type that token UNKNOWN, and SentencePiece then both
+  # emits its id for unencodable input and never matches its text in prompts.
+  unk_token = tokenizer.unk_token
+  if unk_token is not None and token == unk_token:
     type_ = spm_model.ModelProto.SentencePiece.UNKNOWN
-  elif token in tokenizer.special_tokens_map:
-    type_ = spm_model.ModelProto.SentencePiece.CONTROL
-    sp_model.trainer_spec.control_symbols.append(token)
-  elif token in tokenizer.get_added_vocab():
+  elif (
+      token in tokenizer.all_special_tokens
+      or token in tokenizer.get_added_vocab()
+  ):
+    # Special tokens must be USER_DEFINED: SentencePiece never matches CONTROL
+    # pieces in input text.
     type_ = spm_model.ModelProto.SentencePiece.USER_DEFINED
     sp_model.trainer_spec.user_defined_symbols.append(token)
+  elif (
+      len(token) == 1
+      and token in _BYTE_DECODE_MAP
+      and _is_byte_level(tokenizer)
+  ):
+    # A byte-level token stands for a byte, not for the character its GPT-2
+    # spelling happens to be. Emit it as a BYTE piece so that e.g. a
+    # standalone "é" does not encode to the 0xE9 byte token's id.
+    sp_model.pieces.add(
+        piece="<0x%02X>" % _BYTE_DECODE_MAP[token],
+        score=-id_,
+        type=spm_model.ModelProto.SentencePiece.BYTE,
+    )
+    counts[spm_model.ModelProto.SentencePiece.BYTE] = (
+        counts.get(spm_model.ModelProto.SentencePiece.BYTE, 0) + 1
+    )
+    return
   else:
     type_ = spm_model.ModelProto.SentencePiece.NORMAL
 
@@ -165,6 +197,14 @@ def _build_spm_model_from_tokenizer(
 
   id_to_token = {id: tk for tk, id in tokenizer.vocab.items()}
   tokens_seen = set(tokenizer.vocab.keys())
+  if _is_byte_level(tokenizer):
+    # The byte tokens become <0xXX> pieces, so their raw spellings (e.g. "é"
+    # for byte 0xE9) no longer occupy the surface space; a merged token that
+    # decodes to "é" keeps that surface instead of being dropped as a
+    # duplicate.
+    tokens_seen -= {
+        t for t in tokens_seen if len(t) == 1 and t in _BYTE_DECODE_MAP
+    }
   counts = {}
   for id_ in range(len(tokenizer.vocab)):
     _add_token(
@@ -175,6 +215,59 @@ def _build_spm_model_from_tokenizer(
         tokens_seen,
         counts,
         normalize_tokens,
+    )
+
+  if _is_byte_level(tokenizer):
+    sp_model.trainer_spec.byte_fallback = True
+    present = {
+        p.piece
+        for p in sp_model.pieces
+        if p.type == spm_model.ModelProto.SentencePiece.BYTE
+    }
+    missing = [b for b in range(256) if "<0x%02X>" % b not in present]
+    if missing:
+      # Some vocabs never learned a standalone token for a few bytes, but
+      # SentencePiece requires all 256 BYTE pieces when byte_fallback is on.
+      # Appended past the vocab, these pieces can only be emitted for bytes
+      # the original tokenizer cannot encode either.
+      logging.warning(
+          "%d byte tokens absent from the vocab;"
+          " appending BYTE pieces past the vocab: %s",
+          len(missing),
+          ["0x%02X" % b for b in missing],
+      )
+      for b in missing:
+        sp_model.pieces.add(
+            piece="<0x%02X>" % b,
+            score=0.0,
+            type=spm_model.ModelProto.SentencePiece.BYTE,
+        )
+  if not any(
+      p.type == spm_model.ModelProto.SentencePiece.UNKNOWN
+      for p in sp_model.pieces
+  ):
+    # SentencePiece requires an UNKNOWN piece. When the tokenizer has no
+    # unk_token, append a dedicated <unk> past the vocab instead of typing
+    # pad/eos as UNKNOWN. Some vocabs (e.g. Qwen2.5) contain a literal
+    # "<unk>" token without it being the unk_token, and SentencePiece
+    # rejects duplicate piece surfaces, so pick an unused name.
+    existing_pieces = {p.piece for p in sp_model.pieces}
+    unk_piece = "<unk>"
+    suffix = 0
+    while unk_piece in existing_pieces:
+      suffix += 1
+      unk_piece = "<unk_%d>" % suffix
+    sp_model.pieces.add(
+        piece=unk_piece,
+        score=0.0,
+        type=spm_model.ModelProto.SentencePiece.UNKNOWN,
+    )
+    sp_model.trainer_spec.unk_id = len(sp_model.pieces) - 1
+    sp_model.trainer_spec.unk_piece = unk_piece
+    logging.info(
+        "No unk_token: appended %s at id %d",
+        unk_piece,
+        sp_model.trainer_spec.unk_id,
     )
 
   logging.info("number of tokens: %d", len(sp_model.pieces))
