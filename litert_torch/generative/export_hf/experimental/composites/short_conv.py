@@ -74,16 +74,18 @@ def short_conv(
     conv_weight: torch.Tensor,
     conv_bias: Optional[torch.Tensor] = None,
     num_valid_tokens: Optional[torch.Tensor] = None,
+    is_gated: bool = True,
+    use_silu: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-  """Computes the LFM2 gated short convolution `y = C * conv(B * x)`.
+  """Computes gated (`y = C * conv(B * x)`) or ungated short convolution.
 
   This is the decomposition of `odml.short_conv_step`, and what runs when the
   composite is disabled. Arguments and results are the same as
   `apply_short_conv_step`.
 
   Args:
-    in_proj_out: Fused input projection tensor [batch, seq_len, 3 *
-      hidden_size], holding B, C and x.
+    in_proj_out: Input projection tensor [batch, seq_len, 3 * hidden_size] if
+      is_gated=True, or [batch, seq_len, hidden_size] if is_gated=False.
     conv_state: Convolution state tensor [batch, hidden_size, L - 1].
     conv_weight: Depthwise convolution weight [hidden_size, 1, L] or
       [hidden_size, L].
@@ -91,14 +93,23 @@ def short_conv(
     num_valid_tokens: Optional int32 tensor [1] with the number of valid
       (non-padding) tokens at the start of the sequence, in [0, seq_len]. When
       omitted, all `seq_len` tokens are treated as valid.
+    is_gated: If True, splits in_proj_out into (b, c, x_proj) and computes
+      y = c * conv(b * x_proj). If False, applies depthwise conv directly to
+      in_proj_out.
+    use_silu: If True, applies SiLU activation to the convolution output.
 
   Returns:
     y: Output activation tensor [batch, seq_len, hidden_size] ready for
       out_proj.
     next_state: Updated state tensor [batch, hidden_size, L - 1].
   """
-  b, c, x_proj = in_proj_out.chunk(3, dim=-1)
-  conv_input = b * x_proj
+  if is_gated:
+    b, c, x_proj = in_proj_out.chunk(3, dim=-1)
+    conv_input = b * x_proj
+  else:
+    c = None
+    conv_input = in_proj_out
+
   if in_proj_out.shape[1] == 1 and num_valid_tokens is None:
     # Single-token decode: the depthwise conv is a multiply-add over the L
     # taps. Reshapes instead of transposes keep it a direct dot product.
@@ -110,7 +121,10 @@ def short_conv(
     conv_out = (padded_input * w.unsqueeze(0)).sum(dim=-1)
     if conv_bias is not None:
       conv_out = conv_out + conv_bias.unsqueeze(0)
-    return c * conv_out.unsqueeze(1), next_state
+    if use_silu:
+      conv_out = F.silu(conv_out)
+    y = c * conv_out.unsqueeze(1) if c is not None else conv_out.unsqueeze(1)
+    return y, next_state
 
   conv_out, next_state = causal_conv1d_with_state(
       conv_input.transpose(1, 2),
@@ -119,7 +133,10 @@ def short_conv(
       conv_bias,
       num_valid_tokens,
   )
-  return c * conv_out.transpose(1, 2), next_state
+  if use_silu:
+    conv_out = F.silu(conv_out)
+  conv_out_t = conv_out.transpose(1, 2)
+  return (c * conv_out_t if c is not None else conv_out_t), next_state
 
 
 def apply_short_conv_step(
@@ -129,8 +146,10 @@ def apply_short_conv_step(
     conv_bias: Optional[torch.Tensor] = None,
     num_valid_tokens: Optional[torch.Tensor] = None,
     conv_L_cache: int = 3,
+    is_gated: bool = True,
+    use_silu: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-  """Emits the LFM2 gated short convolution as `odml.short_conv_step`.
+  """Emits the short convolution as `odml.short_conv_step`.
 
   Covers decode (seq_len = 1) and prefill (seq_len >= 1). When
   `num_valid_tokens` is provided, the valid tokens must form a prefix of the
@@ -139,8 +158,8 @@ def apply_short_conv_step(
   valid token. The composite decomposes to `short_conv`.
 
   Args:
-    in_proj_out: Fused input projection tensor [batch, seq_len, 3 *
-      hidden_size].
+    in_proj_out: Input projection tensor [batch, seq_len, 3 * hidden_size] if
+      is_gated=True, or [batch, seq_len, hidden_size] if is_gated=False.
     conv_state: Convolution state tensor [batch, hidden_size, conv_L_cache - 1].
     conv_weight: Depthwise convolution weight [hidden_size, 1, conv_L_cache] or
       [hidden_size, conv_L_cache].
@@ -149,15 +168,23 @@ def apply_short_conv_step(
       (non-padding) tokens at the start of the sequence, in [0, seq_len]. When
       omitted, all `seq_len` tokens are treated as valid.
     conv_L_cache: Kernel length / cache size (default 3).
+    is_gated: If True, splits in_proj_out into (b, c, x_proj) and computes
+      y = c * conv(b * x_proj). If False, applies depthwise conv directly to
+      in_proj_out.
+    use_silu: If True, applies SiLU activation to the convolution output.
 
   Returns:
     y: Output activation tensor [batch, seq_len, hidden_size] ready for
       out_proj.
     next_state: Updated state tensor [batch, hidden_size, conv_L_cache - 1].
   """
-  attrs = {
+  attrs: dict[str, int | bool] = {
       "conv_L_cache": int(conv_L_cache),
   }
+  if not is_gated:
+    attrs["is_gated"] = False
+  if use_silu:
+    attrs["use_silu"] = True
   builder = composite.StableHLOCompositeBuilder(
       name="odml.short_conv_step", attr=attrs
   )
@@ -183,7 +210,13 @@ def apply_short_conv_step(
     )
 
   y, next_state = short_conv(
-      in_proj_out, conv_state, conv_weight, conv_bias, num_valid_tokens
+      in_proj_out,
+      conv_state,
+      conv_weight,
+      conv_bias,
+      num_valid_tokens,
+      is_gated=is_gated,
+      use_silu=use_silu,
   )
   y, next_state = builder.mark_outputs(y, next_state)
   return y, next_state
