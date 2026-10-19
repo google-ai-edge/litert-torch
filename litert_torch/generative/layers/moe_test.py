@@ -17,12 +17,29 @@ from absl.testing import absltest as googletest
 from litert_torch import backend
 from litert_torch.generative.layers import moe
 import torch
+import transformers
+from transformers.models.gemma4 import modeling_gemma4
+from transformers.models.qwen3_moe import modeling_qwen3_moe
 
 
 def _model_to_mlir(model, args):
   ep = torch.export.export(model, args)
   mlir = backend.export.exported_program_to_mlir(ep)
   return mlir.get_text()
+
+
+def _init_experts(experts):
+  experts.config._experts_implementation = "eager"  # pylint: disable=protected-access
+  with torch.no_grad():
+    experts.gate_up_proj.normal_()
+    experts.down_proj.normal_()
+  return experts
+
+
+def _route(num_tokens, num_experts, num_active_experts):
+  scores = torch.randn(num_tokens, num_experts).softmax(dim=-1)
+  top_k_weights, top_k_index = torch.topk(scores, num_active_experts, dim=-1)
+  return top_k_index, top_k_weights
 
 
 class MoeExpertsTest(googletest.TestCase):
@@ -141,6 +158,70 @@ class MoeExpertsTest(googletest.TestCase):
     self.assertIn('"tfl.custom"', ir_text)
     self.assertIn('custom_code = "moe"', ir_text)
     self.assertNotIn("odml.moe_experts", ir_text)
+
+
+class LitertMoeExpertsForwardTest(googletest.TestCase):
+
+  def _assert_matches_eager(self, experts, num_active_experts):
+    torch.manual_seed(0)
+    hidden_states = torch.randn(6, experts.hidden_dim)
+    top_k_index, top_k_weights = _route(
+        6, experts.num_experts, num_active_experts
+    )
+
+    with torch.no_grad():
+      expected_output = experts(hidden_states, top_k_index, top_k_weights)
+      actual_output = moe.litert_moe_experts_forward(
+          experts, hidden_states, top_k_index, top_k_weights
+      )
+
+    torch.testing.assert_close(
+        actual_output, expected_output, rtol=1e-4, atol=1e-4
+    )
+
+  def test_reads_num_experts_per_tok(self):
+    # Qwen3-MoE (like most MoE configs in transformers) has no
+    # `top_k_experts`.
+    config = transformers.Qwen3MoeConfig(
+        hidden_size=16,
+        moe_intermediate_size=8,
+        num_experts=4,
+        num_experts_per_tok=2,
+        hidden_act="gelu_pytorch_tanh",
+    )
+    torch.manual_seed(0)
+    experts = _init_experts(modeling_qwen3_moe.Qwen3MoeExperts(config))
+    self.assertFalse(hasattr(config, "top_k_experts"))
+
+    self._assert_matches_eager(experts, num_active_experts=2)
+
+  def test_top_k_experts_takes_precedence(self):
+    config = modeling_gemma4.Gemma4TextConfig(
+        hidden_size=16, moe_intermediate_size=8, num_experts=4, top_k_experts=2
+    )
+    # A disagreeing `num_experts_per_tok` must not change the Gemma 4 path.
+    config.num_experts_per_tok = 3
+    torch.manual_seed(0)
+    experts = _init_experts(modeling_gemma4.Gemma4TextExperts(config))
+
+    self._assert_matches_eager(experts, num_active_experts=2)
+
+  def test_missing_num_active_experts_raises(self):
+    config = transformers.Qwen3MoeConfig(
+        hidden_size=16,
+        moe_intermediate_size=8,
+        num_experts=4,
+        num_experts_per_tok=2,
+    )
+    experts = modeling_qwen3_moe.Qwen3MoeExperts(config)
+    # A config that names the count neither way.
+    experts.config = transformers.PretrainedConfig()
+    top_k_index, top_k_weights = _route(2, 4, 2)
+
+    with self.assertRaisesRegex(ValueError, "num_experts_per_tok"):
+      moe.litert_moe_experts_forward(
+          experts, torch.randn(2, 16), top_k_index, top_k_weights
+      )
 
 
 class BindPerExpertScaleTest(googletest.TestCase):
