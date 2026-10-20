@@ -31,6 +31,14 @@ class KokoroTtsExtension(extension_lib.ModelExtension):
 
   model_types = ('kokoro', 'kokoro_tts', 'kokoro-82m', 'kokoro_82m')
 
+  def get_export_defaults(self, config_dict, task=None):
+    """See base class."""
+    del config_dict, task
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.TEXT_TO_SPEECH,
+        runtime_model_name='kokoro',
+    )
+
   def get_tts_model_cls(self, model_type):
     """See base class."""
     del model_type

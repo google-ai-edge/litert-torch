@@ -30,6 +30,14 @@ class Qwen3TtsExtension(extension_lib.ModelExtension):
 
   model_types = ('qwen3_tts', 'qwen3_tts_talker')
 
+  def get_export_defaults(self, config_dict, task=None):
+    """See base class."""
+    del config_dict, task
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.TEXT_TO_SPEECH,
+        runtime_model_name='qwen3-tts',
+    )
+
   def get_tts_model_cls(self, model_type):
     """See base class."""
     del model_type

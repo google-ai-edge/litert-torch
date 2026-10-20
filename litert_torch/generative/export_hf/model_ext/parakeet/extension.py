@@ -35,6 +35,26 @@ class ParakeetCtcExtension(extension_lib.ModelExtension):
 
   model_types = ('parakeet_ctc',)
 
+  def get_export_defaults(self, config_dict, task=None):
+    """See base class."""
+    del config_dict, task
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.AUTOMATIC_SPEECH_RECOGNITION,
+        export_kwargs={
+            'input_sec': 5.0,
+        },
+        runtime_model_name='parakeet-ctc',
+    )
+
+  def get_speech2text_bundle_spec(self, model_config):
+    """See base class."""
+    del model_config
+    return extension_lib.Speech2TextBundleSpec(
+        asr_model_type='parakeet',
+        tflite_model_type='audio_encoder',
+        mel_frames_per_second=100,
+    )
+
   def get_speech_exportables(self, model_config, export_config=None):
     """See base class."""
     del model_config, export_config
@@ -51,6 +71,26 @@ class ParakeetTdtExtension(extension_lib.ModelExtension):
   """Built-in extension for Parakeet Token-and-Duration Transducer (TDT) ASR."""
 
   model_types = ('parakeet_tdt',)
+
+  def get_export_defaults(self, config_dict, task=None):
+    """See base class."""
+    del config_dict, task
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.AUTOMATIC_SPEECH_RECOGNITION,
+        export_kwargs={
+            'input_sec': 5.0,
+        },
+        runtime_model_name='parakeet-tdt',
+    )
+
+  def get_speech2text_bundle_spec(self, model_config):
+    """See base class."""
+    del model_config
+    return extension_lib.Speech2TextBundleSpec(
+        asr_model_type='parakeet',
+        tflite_model_type='encoder_decoder',
+        mel_frames_per_second=100,
+    )
 
   def get_speech_model_cls(self, model_type):
     """See base class."""

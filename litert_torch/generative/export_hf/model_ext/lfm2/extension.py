@@ -30,3 +30,14 @@ class Lfm2Extension(extension_lib.ModelExtension):
   """Built-in extension for LFM2 hybrid attention + short-conv LLMs."""
 
   model_types = ('lfm2',)
+
+  def get_export_defaults(self, config_dict, task=None):
+    """See base class."""
+    del config_dict, task
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.TEXT_GENERATION,
+        export_kwargs={
+            'quantization_recipe': 'dynamic_wi4b32_afp32',
+        },
+        litert_lm_model_family='lfm2',
+    )

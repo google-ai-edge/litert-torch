@@ -520,6 +520,78 @@ def package_image_gen_model(
   )
 
 
+def speech2text_metadata_pbtext(
+    spec: extension_lib.Speech2TextBundleSpec, input_sec: float | None
+) -> str:
+  """Returns the `Speech2TextMetadata` textproto for a speech model.
+
+  The runtime fills every field the metadata leaves unset with per-model
+  defaults (e.g. a 30 s window for Whisper), so the exported input window is
+  written explicitly: an `input_sec` override changes the TFLite input shape,
+  and the runtime must feed the same number of samples / mel frames.
+
+  Args:
+    spec: The extension's `Speech2TextBundleSpec`.
+    input_sec: Input audio window of the exported model, in seconds.
+
+  Returns:
+    The metadata in text format.
+  """
+  lines = [f'asr_model_type {{\n  {spec.asr_model_type} {{\n  }}\n}}']
+  if input_sec:
+    lines.append(f'input_milliseconds: {round(input_sec * 1000)}')
+    if spec.mel_frames_per_second:
+      n_frames = round(input_sec * spec.mel_frames_per_second)
+      lines.append(f'log_mel_spectrogram_config {{\n  n_frames: {n_frames}\n}}')
+  return '\n'.join(lines) + '\n'
+
+
+def package_speech2text_model(
+    source_model_artifacts: export_lib.SourceModelArtifacts,
+    export_config: exportable_module.ExportableModuleConfig,
+    exported_model_artifacts: export_lib.ExportedModelArtifacts,
+    spec: extension_lib.Speech2TextBundleSpec,
+) -> export_lib.ExportedModelArtifacts:
+  """Packs an encoder-decoder speech model, its metadata and tokenizer."""
+  del source_model_artifacts  # Unused.
+  work_dir = export_config.work_dir or export_config.output_dir
+  output_dir = export_config.output_dir or export_config.work_dir
+  tokenizer_model_path = (
+      export_config.tokenizer_path_override
+      or exported_model_artifacts.tokenizer_model_path
+  )
+  metadata_path = os.path.join(work_dir, 'speech2text_metadata.pbtext')  # pyrefly: ignore[no-matching-overload]
+  with open(metadata_path, 'w') as f:
+    f.write(speech2text_metadata_pbtext(spec, export_config.input_sec))
+
+  builder = litertlm_builder.LitertLmFileBuilder()
+  builder.add_system_metadata(
+      litertlm_builder.Metadata(
+          key='Authors',
+          value='ODML',
+          dtype=litertlm_builder.DType.STRING,
+      )
+  )
+  builder.add_speech2text_metadata(metadata_path)
+  if tokenizer_model_path:
+    if tokenizer_model_path.endswith('.json'):
+      builder.add_hf_tokenizer(tokenizer_model_path)
+    else:
+      builder.add_sentencepiece_tokenizer(tokenizer_model_path)
+  builder.add_tflite_model(
+      exported_model_artifacts.prefill_decode_model_path,  # pyrefly: ignore[bad-argument-type]
+      spec.tflite_model_type,
+  )
+
+  model_path = os.path.join(output_dir, 'model.litertlm')  # pyrefly: ignore[no-matching-overload]
+  with open(model_path, 'wb') as f:
+    builder.build(f)
+  return dataclasses.replace(
+      exported_model_artifacts,
+      litert_lm_model_path=model_path,
+  )
+
+
 _ANY2ANY_TFLITE_MODEL_TYPES: dict[str, str] = {
     'text_embedder': 'tf_lite_text_embedder',
     'vision_encoder': 'tf_lite_vision_encoder',

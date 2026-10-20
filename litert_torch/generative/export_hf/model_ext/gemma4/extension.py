@@ -49,6 +49,34 @@ class Gemma4Extension(extension_lib.ModelExtension):
   )
   extra_kwargs_keys = ('gemma4_vision_max_soft_tokens',)
 
+  def get_export_defaults(self, config_dict, task=None):
+    """See base class."""
+    vlm = config_dict.get('model_type') == 'gemma4' and task in (
+        None,
+        extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT,
+    )
+    # E2B/E4B use per-layer embeddings and their own chat template.
+    per_layer = extension_lib.text_config_dict(config_dict).get(
+        'hidden_size_per_layer_input'
+    )
+    return extension_lib.ExportDefaults(
+        task=(
+            extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT
+            if vlm
+            else extension_lib.ExportTask.TEXT_GENERATION
+        ),
+        export_kwargs={
+            'quantization_recipe': 'dynamic_wi4b32_afp32',
+            'externalize_embedder': True,
+            'export_vision_encoder': vlm,
+        },
+        litert_lm_chat_template=(
+            'gemma4/chat_template_e2b_e4b.jinja'
+            if per_layer
+            else 'gemma4/chat_template.jinja'
+        ),
+    )
+
   def get_prefill_decode_exportables(self, model_config, export_config):
     """See base class."""
     if model_config.get_text_config().hidden_size_per_layer_input:
