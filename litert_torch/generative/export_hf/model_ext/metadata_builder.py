@@ -191,6 +191,32 @@ try:
           sliding_window_size
       )
 
+    npu_fields = {}
+    for attr in (
+        'enable_neon_for_npu_greedy_sampling',
+        'use_hw_masking_for_npu',
+        'use_hw_cache_update_for_npu',
+        'use_hw_ple_for_npu',
+    ):
+      val = getattr(export_config, attr, None)
+      if val is None and hasattr(export_config, 'extra_kwargs'):
+        val = export_config.extra_kwargs.get(attr, None)
+      if val is not None:
+        npu_fields[attr] = val
+
+    # Models with a ringbuffer must use the handwritten KV cache update path
+    # because they do not use dynamic_update_slice and reuse the same KV cache
+    # buffers on model input and output.
+    if enable_ring_buffer and 'use_hw_cache_update_for_npu' not in npu_fields:
+      npu_fields['use_hw_cache_update_for_npu'] = True
+
+    if npu_fields or getattr(export_config, 'split_cache', False):
+      npu_metadata = executor_metadata.llm_npu_executor_metadata
+      for attr, val in npu_fields.items():
+        setattr(npu_metadata, attr, val)
+      if not npu_fields and hasattr(npu_metadata, 'SetInParent'):
+        npu_metadata.SetInParent()
+
     return executor_metadata
 
 except ImportError:
