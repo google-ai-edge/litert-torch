@@ -139,6 +139,19 @@ def recurrent_gated_delta_rule(
   return core_attn_out, new_recurrent_state
 
 
+def _chunk_rule_constants(chunk_size: int, dtype: torch.dtype, device: torch.device):
+  eye = torch.tensor(
+      [[1.0 if i == j else 0.0 for j in range(chunk_size)]
+       for i in range(chunk_size)], dtype=dtype, device=device)
+  tril0_f = torch.tensor(
+      [[1.0 if j <= i else 0.0 for j in range(chunk_size)]
+       for i in range(chunk_size)], dtype=dtype, device=device)
+  tril1_f = torch.tensor(
+      [[1.0 if j < i else 0.0 for j in range(chunk_size)]
+       for i in range(chunk_size)], dtype=dtype, device=device)
+  return eye, tril0_f, tril1_f
+
+
 def chunk_gated_delta_rule(
     q_t: torch.Tensor,
     k_t: torch.Tensor,
@@ -177,50 +190,49 @@ def chunk_gated_delta_rule(
   v_beta_c = v_beta.reshape(B_H, num_chunks, chunk_size, -1)
   g_c = g_t.reshape(B_H, num_chunks, chunk_size)
 
-  idx = torch.arange(chunk_size, device=q_t.device, dtype=torch.int32)
-  mask_triu = idx.unsqueeze(1) <= idx.unsqueeze(0)
-  mask_tril = idx.unsqueeze(1) >= idx.unsqueeze(0)
-  eye_mask = idx.unsqueeze(1) == idx.unsqueeze(0)
+  eye, tril0_f, tril1_f = _chunk_rule_constants(chunk_size, torch.float32, q_t.device)
 
   g_cumsum = g_c.cumsum(dim=-1)
   # diff is 4D: [B_H, num_chunks, chunk_size, 1] - [B_H, num_chunks, 1, chunk_size]
-  diff = g_cumsum.unsqueeze(-1) - g_cumsum.unsqueeze(-2)
-  decay_mask = torch.where(
-      mask_tril, torch.where(mask_tril, diff, 0.0).exp(), 0.0
-  )
-  # attn is 4D: [B_H, num_chunks, chunk_size, chunk_size]
-  attn = -((k_beta_c @ k_c.transpose(-1, -2)) * decay_mask).masked_fill(
-      mask_triu, 0
-  )
+  diff = torch.clamp((g_cumsum.unsqueeze(-1) - g_cumsum.unsqueeze(-2)) * tril0_f, min=-50.0, max=0.0)
+  decay_mask = diff.exp().float() * tril0_f
+  attn = -((k_beta_c @ k_c.transpose(-1, -2)) * decay_mask) * tril1_f
+  rows = [attn[..., 0, :]]
   for i in range(1, chunk_size):
-    row = attn[..., i, :i]
-    sub = attn[..., :i, :i]
-    attn[..., i, :i] = row + (row.unsqueeze(-2) @ sub).squeeze(-2)
-  attn = torch.where(eye_mask, attn + 1.0, attn)
+    prev = torch.stack(rows, dim=-2)
+    row_full = attn[..., i, :]
+    row_lead = row_full[..., :i]
+    sub = prev[..., :i]
+    upd = row_lead + (row_lead.unsqueeze(-1) * sub).sum(-2)
+    rows.append(torch.cat([upd, row_full[..., i:]], dim=-1))
+  attn = torch.stack(rows, dim=-2) + eye
   v_local = attn @ v_beta_c
-  k_cumdecay = attn @ (k_beta_c * g_cumsum.exp().unsqueeze(-1))
+  g_exp = torch.clamp(g_cumsum, min=-50.0, max=0.0).exp()
+  k_cumdecay = attn @ (k_beta_c * g_exp.unsqueeze(-1))
 
   # Collapse recurrent_state [batch, num_v_heads, head_k_dim, head_v_dim] to 3D [B_H, head_k_dim, head_v_dim]
   new_recurrent_state = recurrent_state.to(v_local.dtype).reshape(B_H, -1, v_t.shape[-1])
-  core_attn_out = torch.zeros_like(v_local)
-
+  outs = []
   for i in range(num_chunks):
     # q_i, k_i, v_i are 3D: [B_H, chunk_size, head_dim]
     q_i, k_i, v_i = q_c[:, i], k_c[:, i], v_local[:, i]
     attn_i = q_i @ k_i.transpose(-1, -2) * decay_mask[:, i]
     v_prime = k_cumdecay[:, i] @ new_recurrent_state
     v_new = v_i - v_prime
-    attn_inter = (q_i * g_cumsum[:, i, :, None].exp()) @ new_recurrent_state
-    core_attn_out[:, i] = attn_inter + attn_i @ v_new
+    attn_inter = (q_i * g_exp[:, i, :, None]) @ new_recurrent_state
+    outs.append(attn_inter + attn_i @ v_new)
+    decay_step = torch.clamp(g_cumsum[:, i, -1, None] - g_cumsum[:, i], min=-50.0, max=0.0).exp()[..., None]
+    chunk_decay = torch.clamp(g_cumsum[:, i, -1, None, None], min=-50.0, max=0.0).exp()
     new_recurrent_state = (
-        new_recurrent_state * g_cumsum[:, i, -1, None, None].exp()
-        + (k_i * (g_cumsum[:, i, -1, None] - g_cumsum[:, i]).exp()[..., None]).transpose(-1, -2) @ v_new
+        new_recurrent_state * chunk_decay
+        + (k_i * decay_step).transpose(-1, -2) @ v_new
     )
 
   # Reshape back to [batch_size, num_v_heads, seq_len, head_v_dim] and recurrent_state back to [batch, num_v_heads, head_k_dim, head_v_dim]
-  core_attn_out = core_attn_out.reshape(batch_size, num_v_heads, total_len, -1)[:, :, :seq_len]
+  core_attn_out = torch.stack(outs, dim=1).reshape(batch_size, num_v_heads, total_len, -1)[:, :, :seq_len]
   new_recurrent_state = new_recurrent_state.reshape(batch_size, num_v_heads, -1, v_t.shape[-1])
   return core_attn_out, new_recurrent_state
+
 
 
 class Qwen3_5StaticGatedDeltaNet(nn.Module):
@@ -236,8 +248,8 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
       conv_kernel_size: int = 4,
       rms_norm_eps: float = 1e-6,
       layer_idx: int = 0,
-      use_fused_gdn: bool = True,
-      gdn_mode: int = 0,
+      use_fused_gdn: bool = False,
+      gdn_mode: int = 1,
       use_fp32: bool = True,
   ):
     super().__init__()
@@ -302,7 +314,7 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
           batch_size, self.num_v_heads, self.head_k_dim, self.head_v_dim,
           dtype=torch.float32, device=hidden_states.device
       )
-    if getattr(self, "use_fused_gdn", True):
+    if getattr(self, "use_fused_gdn", False):
       mask_arg = (
           valid_mask
           if valid_mask is not None
@@ -434,84 +446,9 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
       gdn_mode = self.gdn_mode
       chunk_size = 64
       if gdn_mode == 1 and seq_len >= chunk_size:
-        # Chunked decomposed prefill
-        num_chunks = seq_len // chunk_size
-
-        v_beta = v_t * beta_t.unsqueeze(-1)
-        k_beta = k_t * beta_t.unsqueeze(-1)
-
-        q_c, k_c, v_c, k_beta_c, v_beta_c = [
-            x.reshape(
-                batch_size,
-                self.num_v_heads,
-                num_chunks,
-                chunk_size,
-                x.shape[-1],
-            )
-            for x in (q_t, k_t, v_t, k_beta, v_beta)
-        ]
-        g_c = g_t.reshape(batch_size, self.num_v_heads, num_chunks, chunk_size)
-
-        idx = torch.arange(chunk_size, device=q_t.device, dtype=torch.int32)
-        mask_triu = idx.unsqueeze(1) <= idx.unsqueeze(0)
-        mask_tril = idx.unsqueeze(1) >= idx.unsqueeze(0)
-        eye_mask = idx.unsqueeze(1) == idx.unsqueeze(0)
-
-        g_cumsum = g_c.cumsum(dim=-1)
-        diff = g_cumsum.unsqueeze(-1) - g_cumsum.unsqueeze(-2)
-        decay_mask = torch.where(
-            mask_tril, torch.where(mask_tril, diff, 0.0).exp(), 0.0
-        )
-
-        attn_in = -(
-            (k_beta_c @ k_c.transpose(-1, -2)) * decay_mask
-        ).masked_fill(mask_triu, 0)
-
-        attn = attn_in.clone()
-        for i in range(1, chunk_size):
-          row = attn[..., i, :i]
-          sub = attn[..., :i, :i]
-          attn[..., i, :i] = row + (row.unsqueeze(-2) @ sub).squeeze(-2)
-
-        attn = torch.where(eye_mask, attn + 1.0, attn)
-        v_local = attn @ v_beta_c
-
-        k_beta_exp = k_beta_c * g_cumsum.exp().unsqueeze(-1)
-        k_cumdecay = attn @ k_beta_exp
-
-        new_recurrent_state = recurrent_state.to(q_t.dtype)
-        core_attn_outs = []
-        for i in range(num_chunks):
-          q_i = q_c[:, :, i]
-          k_i = k_c[:, :, i]
-          v_i = v_local[:, :, i]
-
-          exp_g = g_cumsum[:, :, i].exp()
-          attn_inter = (q_i * exp_g.unsqueeze(-1)) @ new_recurrent_state
-
-          v_prime = k_cumdecay[:, :, i] @ new_recurrent_state
-          v_new = v_i - v_prime
-
-          attn_i = (q_i @ k_i.transpose(-1, -2)) * decay_mask[:, :, i]
-
-          core_attn_outs.append(attn_inter + attn_i @ v_new)
-
-          exp_last = g_cumsum[:, :, i, -1, None, None].exp()
-          exp_diff = (
-              (g_cumsum[:, :, i, -1, None] - g_cumsum[:, :, i])
-              .exp()
-              .unsqueeze(-1)
-          )
-          k_scaled = k_i * exp_diff
-
-          new_recurrent_state = (
-              new_recurrent_state * exp_last
-              + k_scaled.transpose(-1, -2) @ v_new
-          )
-
-        core_attn_out = torch.stack(core_attn_outs, dim=2)
-        core_attn_out = core_attn_out.reshape(
-            batch_size, self.num_v_heads, seq_len, self.head_v_dim
+        # Chunked decomposed prefill (rank <= 4 for GPU delegates)
+        core_attn_out, new_recurrent_state = chunk_gated_delta_rule(
+            q_t, k_t, v_t, beta_t, g_t, recurrent_state
         )
 
       else:
@@ -589,8 +526,8 @@ class Qwen3_5StaticDecoderLayer(nn.Module):
           conv_kernel_size=config.linear_conv_kernel_dim,
           rms_norm_eps=config.rms_norm_eps,
           layer_idx=layer_idx,
-          use_fused_gdn=getattr(config, "use_fused_gdn", True),
-          gdn_mode=getattr(config, "gdn_mode", 0),
+          use_fused_gdn=getattr(config, "use_fused_gdn", False),
+          gdn_mode=getattr(config, "gdn_mode", 1),
           use_fp32=getattr(config, "gdn_use_fp32", True),
       )
     elif self.block_type == "full_attention":

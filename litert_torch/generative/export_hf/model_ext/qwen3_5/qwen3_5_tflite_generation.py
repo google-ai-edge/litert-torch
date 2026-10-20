@@ -80,6 +80,16 @@ _USE_GPU = flags.DEFINE_bool(
     False,
     "Whether to use GPU backend.",
 )
+_APPLY_GPU_COMPOSITES = flags.DEFINE_bool(
+    "apply_gpu_composites",
+    True,
+    "Whether to apply GPU composites during export.",
+)
+_SKIP_EXPORT_IF_EXISTS = flags.DEFINE_bool(
+    "skip_export_if_exists",
+    False,
+    "Skip export if model.litertlm already exists in output_dir.",
+)
 
 
 def extract_litert_lm_response(conv: Any, prompt: str, max_new_tokens: int) -> str:
@@ -129,49 +139,58 @@ def run_tflite_generation_checks() -> None:
   if not output_dir:
     output_dir = tempfile.mkdtemp(prefix="qwen3_5_tflite_float_")
   os.makedirs(output_dir, exist_ok=True)
-  print(f"=== Exporting {model_id} to float TFLite in: {output_dir} ===")
 
   current_dir = os.path.dirname(os.path.abspath(__file__))
-  base_override_path = (
-      _LLM_METADATA_OVERRIDE_PATH.value
-      or os.path.join(current_dir, "qwen3_5_metadata_override.pbtext")
-  )
   template_path = (
       _JINJA_TEMPLATE_PATH.value
       or os.path.join(current_dir, "qwen3_5_chat_template.jinja")
   )
-  print(f"=== Loading base metadata override from: {base_override_path} ===")
-  metadata = llm_metadata_pb2.LlmMetadata()
-  with open(base_override_path, "r") as f:
-    text_format.Parse(f.read(), metadata)
-
   print(f"=== Loading modified Jinja template from: {template_path} ===")
   with open(template_path, "r") as f:
     chat_template_content = f.read()
-  print("=== Injecting modified Jinja chat template ===")
-  metadata.jinja_prompt_template = chat_template_content
 
-  temp_override_fd, temp_override_path = tempfile.mkstemp(suffix=".pbtext")
-  try:
-    with os.fdopen(temp_override_fd, "w") as f:
-      f.write(text_format.MessageToString(metadata))
+  exported_model_path = os.path.join(output_dir, "model.litertlm")
+  if _SKIP_EXPORT_IF_EXISTS.value and os.path.exists(exported_model_path):
+    print(f"=== Found existing bundle at {exported_model_path}; skipping export ===")
+  else:
+    print(f"=== Exporting {model_id} to float TFLite in: {output_dir} ===")
 
-    litert_torch_export.export(
-        model=model_id,
-        output_dir=output_dir,
-        quantization_recipe="",  # Float TFLite export
-        keep_temporary_files=True,
-        bundle_litert_lm=True,
-        cache_length=cache_length,
-        prefill_lengths=[prefill_chunk_size],
-        externalize_embedder=True,
-        single_token_embedder=True,
-        use_jinja_template=True,
-        litert_lm_llm_metadata_override=temp_override_path,
+    base_override_path = (
+        _LLM_METADATA_OVERRIDE_PATH.value
+        or os.path.join(current_dir, "qwen3_5_metadata_override.pbtext")
     )
-  finally:
-    if os.path.exists(temp_override_path):
-      os.remove(temp_override_path)
+    print(f"=== Loading base metadata override from: {base_override_path} ===")
+    metadata = llm_metadata_pb2.LlmMetadata()
+    with open(base_override_path, "r") as f:
+      text_format.Parse(f.read(), metadata)
+
+    print("=== Injecting modified Jinja chat template ===")
+    metadata.jinja_prompt_template = chat_template_content
+
+    temp_override_fd, temp_override_path = tempfile.mkstemp(suffix=".pbtext")
+    try:
+      with os.fdopen(temp_override_fd, "w") as f:
+        f.write(text_format.MessageToString(metadata))
+
+      litert_torch_export.export(
+          model=model_id,
+          output_dir=output_dir,
+          quantization_recipe="",  # Float TFLite export
+          keep_temporary_files=True,
+          bundle_litert_lm=True,
+          cache_length=cache_length,
+          prefill_lengths=[prefill_chunk_size],
+          externalize_embedder=True,
+          single_token_embedder=True,
+          use_jinja_template=True,
+          apply_gpu_composites=_APPLY_GPU_COMPOSITES.value,
+          use_sdpa_composite=False,
+          use_bool_mask=False,
+          litert_lm_llm_metadata_override=temp_override_path,
+      )
+    finally:
+      if os.path.exists(temp_override_path):
+        os.remove(temp_override_path)
 
   exported_model_path = os.path.join(output_dir, "model.litertlm")
   if not os.path.exists(exported_model_path):

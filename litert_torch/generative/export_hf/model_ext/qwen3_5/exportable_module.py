@@ -46,7 +46,7 @@ def create_qwen3_5_attention_mask(
     return torch.where(
         causal_bool,
         torch.zeros((1,), dtype=dtype, device=device),
-        torch.full((1,), -1e38, dtype=dtype, device=device),
+        torch.full((1,), -45824.0, dtype=dtype, device=device),
     )
 
 
