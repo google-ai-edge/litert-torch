@@ -451,11 +451,14 @@ def apply_qwen3_5_model_patches(
       export_config, "use_qkv_norm_rope_composite", False
   )
   extra_kwargs = getattr(export_config, "extra_kwargs", None) or {}
+
+  default_use_fused_gdn = False
+  default_gdn_mode = 1
   use_fused_gdn = extra_kwargs.get(
-      "use_fused_gdn", getattr(export_config, "use_fused_gdn", True)
+      "use_fused_gdn", getattr(export_config, "use_fused_gdn", default_use_fused_gdn)
   )
   gdn_mode = extra_kwargs.get(
-      "gdn_mode", getattr(export_config, "gdn_mode", 0)
+      "gdn_mode", getattr(export_config, "gdn_mode", default_gdn_mode)
   )
   gdn_use_fp32 = extra_kwargs.get(
       "gdn_use_fp32", getattr(export_config, "gdn_use_fp32", True)
