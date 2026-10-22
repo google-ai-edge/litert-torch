@@ -551,8 +551,6 @@ class TestConvert(testing.V1V2TestCase):
 
   def test_convert_downcasts_x64_by_default(self):
     """enable_x64 defaults to False: int64 inputs and outputs become int32."""
-    if self.use_v2:
-      self.skipTest("enable_x64 is not yet applied with use_v2.")
 
     class SampleModel(nn.Module):
 
@@ -562,12 +560,17 @@ class TestConvert(testing.V1V2TestCase):
     model = SampleModel().eval()
     args = (torch.randint(0, 100, (1, 8), dtype=torch.int64),)
 
-    with self.assertLogs(level="WARNING") as logs:
+    if self.use_v2:
+      # The V2 pipeline downcasts in the TFLite converter and does not emit
+      # the per-signature downcast warning.
       edge_model = litert_torch.convert(model, args)
-    downcast_logs = [m for m in logs.output if "downcasts 64-bit" in m]
-    self.assertLen(downcast_logs, 1)
-    self.assertIn("input 'args_0' (torch.int64)", downcast_logs[0])
-    self.assertIn("output 'output_0' (torch.int64)", downcast_logs[0])
+    else:
+      with self.assertLogs(level="WARNING") as logs:
+        edge_model = litert_torch.convert(model, args)
+      downcast_logs = [m for m in logs.output if "downcasts 64-bit" in m]
+      self.assertLen(downcast_logs, 1)
+      self.assertIn("input 'args_0' (torch.int64)", downcast_logs[0])
+      self.assertIn("output 'output_0' (torch.int64)", downcast_logs[0])
     inputs, outputs = self._io_dtypes(edge_model)
     self.assertEqual(set(inputs.values()), {np.int32})
     self.assertEqual(set(outputs.values()), {np.int32})
@@ -597,9 +600,6 @@ class TestConvert(testing.V1V2TestCase):
     truncating them, so framework sentinels like `iinfo(long).max` still act as
     +inf/-inf for min/argmax after conversion.
     """
-    if self.use_v2:
-      self.skipTest("enable_x64 is not yet applied with use_v2.")
-
     int64_max = torch.iinfo(torch.int64).max
     int64_min = torch.iinfo(torch.int64).min
 
