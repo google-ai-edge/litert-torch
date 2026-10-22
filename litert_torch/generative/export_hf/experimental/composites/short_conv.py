@@ -53,9 +53,22 @@ def causal_conv1d_with_state(
       token, [batch, channels, L - 1].
   """
   state_len = conv_state.shape[-1]
+  seq_len = x.shape[-1]
   padded = torch.cat([conv_state, x], dim=-1)
-  weight = conv_weight if conv_weight.dim() == 3 else conv_weight.unsqueeze(1)
-  conv_out = F.conv1d(padded, weight, conv_bias, groups=weight.shape[0])
+  weight = conv_weight.squeeze(1) if conv_weight.dim() == 3 else conv_weight
+  # Tap-wise multiply-add instead of `F.conv1d`: inside the
+  # `odml.short_conv_step` decomposition `conv_weight` is a subgraph argument
+  # rather than a constant, so a lowered `tfl.depthwise_conv_2d` would get a
+  # non-static filter, which the quantizer skips and XNNPACK rejects, leaving
+  # the slow builtin float kernel. Slices, muls and adds stay on XNNPACK.
+  num_taps = weight.shape[-1]
+  conv_out = padded[:, :, 0:seq_len] * weight[:, 0].unsqueeze(0).unsqueeze(-1)
+  for k in range(1, num_taps):
+    conv_out = conv_out + padded[:, :, k : k + seq_len] * weight[
+        :, k
+    ].unsqueeze(0).unsqueeze(-1)
+  if conv_bias is not None:
+    conv_out = conv_out + conv_bias.unsqueeze(0).unsqueeze(-1)
   if num_valid_tokens is None:
     next_state = padded[:, :, -state_len:]
   else:
