@@ -15,6 +15,7 @@
 """LiteRT converter integrations: MLIR to flatbuffer conversions."""
 
 import dataclasses
+import gc
 import logging
 
 from litert_torch import backend
@@ -162,7 +163,8 @@ def exported_programs_to_flatbuffer(
   )
 
   lowered_programs = []
-  for exported_program, sig in zip(exported_programs, signatures):
+  for sig in signatures:
+    exported_program = exported_programs.pop(0)
     # Convert ExportedProgram to Mlir Module.
     with progress.task(f"Lower to MLIR: {sig.name}"):
       lowered = backend.export.exported_program_to_mlir(
@@ -184,12 +186,17 @@ def exported_programs_to_flatbuffer(
         output_names=output_names,
     )
     lowered_programs.append(lowered)
+    del exported_program
+  gc.collect()
 
   # Merge all lowered modules into one module.
   with progress.task("Merge MLIR Modules"):
     merged_module = converter_api_ext.merge_modules(
         [lowered.module for lowered in lowered_programs]
     )
+  del lowered_programs
+  del cross_program_inline_consts_ctx
+  gc.collect()
 
   # Prepare ai-edge-quantizer recipe.
   translated_recipe = None

@@ -623,6 +623,32 @@ def get_prefill_decode_exportable_cls(
     )
 
 
+@contextlib.contextmanager
+def _temporarily_detach_submodules(
+    root: torch.nn.Module,
+    submodule_paths: list[str],
+):
+  """Temporarily detaches unused submodules so torch.export does not lift them."""
+  saved = []
+  for path in submodule_paths:
+    parent = root
+    parts = path.split('.')
+    for part in parts[:-1]:
+      parent = getattr(parent, part, None)
+      if parent is None:
+        break
+    else:
+      leaf = parts[-1]
+      if hasattr(parent, leaf) and getattr(parent, leaf) is not None:
+        saved.append((parent, leaf, getattr(parent, leaf)))
+        setattr(parent, leaf, None)
+  try:
+    yield
+  finally:
+    for parent, leaf, orig in reversed(saved):
+      setattr(parent, leaf, orig)
+
+
 @progress.task('Export text prefill-decode model')
 def export_text_prefill_decode_model(
     source_model_artifacts: SourceModelArtifacts,
@@ -641,9 +667,25 @@ def export_text_prefill_decode_model(
       else source_model_artifacts.model_config.model_type
   )
 
+  unused_submodules = [
+      'model.vision_tower',
+      'model.embed_vision',
+      'model.audio_tower',
+      'model.embed_audio',
+      'vision_tower',
+      'audio_tower',
+  ]
+  if export_config.externalize_embedder:
+    unused_submodules.extend([
+        'model.language_model.embed_tokens_per_layer',
+        'language_model.embed_tokens_per_layer',
+        'embed_tokens_per_layer',
+    ])
+
   # Patch model instance for export.
-  with model_ext_patches.patch_model(
-      model, model_type, export_config
+  with (
+      _temporarily_detach_submodules(model, unused_submodules),
+      model_ext_patches.patch_model(model, model_type, export_config),
   ):
     text_model_config = source_model_artifacts.text_model_config
     quantization_recipe = export_config.quantization_recipe
@@ -799,9 +841,9 @@ def export_embedder_model(
       and source_model_artifacts.text_model_config
       else source_model_artifacts.model_config.model_type
   )
-  # Patch model instance for export.
-  with model_ext_patches.patch_model(model, model_type, export_config):
-    embedding = model.get_input_embeddings()
+  embedding = model.get_input_embeddings()
+  # Patch embedding instance for export without fusing all decoder layers.
+  with model_ext_patches.patch_model(embedding, model_type, export_config):
     embedder_module = external_emb_module.LiteRTExportableModuleForEmbedder(
         embedding
     )
@@ -883,9 +925,22 @@ def export_vision_encoder_models(
         encode_module.eval(),
         sample_kwargs=sample_inputs,
     )
-  lrt_model = converter.convert(strict_export=False)
+  unused_for_vision = [
+      'model.language_model.layers',
+      'model.language_model.embed_tokens_per_layer',
+      'model.audio_tower',
+      'model.embed_audio',
+      'lm_head',
+  ]
+  with _temporarily_detach_submodules(model, unused_for_vision):
+    lrt_model = converter.convert(
+        lightweight_conversion=export_config.experimental_lightweight_conversion,
+        strict_export=False,
+    )
   vision_encoder_path = os.path.join(work_dir, 'vision_encoder.tflite')  # pyrefly: ignore[no-matching-overload]
   lrt_model.export(vision_encoder_path)
+  del lrt_model
+  gc.collect()
   quantization_recipe_list = (
       quantization_recipe.split(',') if quantization_recipe else [None]
   )
@@ -906,9 +961,15 @@ def export_vision_encoder_models(
           adapter_module.eval(),
           sample_kwargs=sample_inputs,
       )
-    lrt_model = converter.convert(strict_export=False)
+    with _temporarily_detach_submodules(model, unused_for_vision):
+      lrt_model = converter.convert(
+          lightweight_conversion=export_config.experimental_lightweight_conversion,
+          strict_export=False,
+      )
     adapter_path = os.path.join(work_dir, 'vision_adapter.tflite')  # pyrefly: ignore[no-matching-overload]
     lrt_model.export(adapter_path)
+    del lrt_model
+    gc.collect()
     quantization_recipe_list = (
         quantization_recipe.split(',') if quantization_recipe else [None]
     )
@@ -992,9 +1053,22 @@ def export_audio_encoder_models_for_llm(
         encode_module.eval(),
         sample_kwargs=sample_inputs,
     )
-  lrt_model = converter.convert(strict_export=False)
+  unused_for_audio = [
+      'model.language_model.layers',
+      'model.language_model.embed_tokens_per_layer',
+      'model.vision_tower',
+      'model.embed_vision',
+      'lm_head',
+  ]
+  with _temporarily_detach_submodules(model, unused_for_audio):
+    lrt_model = converter.convert(
+        lightweight_conversion=export_config.experimental_lightweight_conversion,
+        strict_export=False,
+    )
   audio_encoder_path = os.path.join(work_dir, 'audio_encoder.tflite')  # pyrefly: ignore[no-matching-overload]
   lrt_model.export(audio_encoder_path)
+  del lrt_model
+  gc.collect()
   quantization_recipe_list = (
       quantization_recipe.split(',') if quantization_recipe else [None]
   )
@@ -1015,9 +1089,15 @@ def export_audio_encoder_models_for_llm(
           adapter_module.eval(),
           sample_kwargs=sample_inputs,
       )
-    lrt_model = converter.convert(strict_export=False)
+    with _temporarily_detach_submodules(model, unused_for_audio):
+      lrt_model = converter.convert(
+          lightweight_conversion=export_config.experimental_lightweight_conversion,
+          strict_export=False,
+      )
     adapter_path = os.path.join(work_dir, 'audio_adapter.tflite')  # pyrefly: ignore[no-matching-overload]
     lrt_model.export(adapter_path)
+    del lrt_model
+    gc.collect()
     for recipe in quantization_recipe_list:
       adapter_path = maybe_quantize_model(adapter_path, recipe)
       gc.collect()
@@ -1316,6 +1396,22 @@ def export_additional_models_impl(
   model_path = os.path.join(work_dir, f'{name}.tflite')
   weights_loader = source_model_artifacts.weights_loader
   with contextlib.ExitStack() as stack:
+    if name == 'per_layer_embedder':
+      stack.enter_context(
+          _temporarily_detach_submodules(
+              model,
+              [
+                  'model.language_model.layers',
+                  'model.language_model.embed_tokens',
+                  'model.language_model.per_layer_model_projection',
+                  'model.vision_tower',
+                  'model.embed_vision',
+                  'model.audio_tower',
+                  'model.embed_audio',
+                  'lm_head',
+              ],
+          )
+      )
     if weights_loader is not None:
       # Parameters are on meta (Converter V2): trace on meta and serve real
       # buffer values to the converter, as for the prefill/decode model.
@@ -1339,11 +1435,15 @@ def export_additional_models_impl(
           sample_kwargs=sample_inputs,
       )
     lrt_model = converter.convert(
+        lightweight_conversion=export_config.experimental_lightweight_conversion,
         strict_export=False,
         **_v2_convert_kwargs(export_config, weights_loader, model_path),
     )
   if not export_config.use_v2:
     lrt_model.export(model_path)
+  del lrt_model
+  del converter
+  gc.collect()
   quantization_recipe_list = (
       quantization_recipe.split(',') if quantization_recipe else [None]
   )

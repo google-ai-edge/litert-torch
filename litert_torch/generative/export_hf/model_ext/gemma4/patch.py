@@ -177,8 +177,8 @@ try:
         use_swiglu_composite: bool = False,
     ):
       super().__init__()
-      self.gate_proj = original_mlp.gate_proj
-      self.up_proj = original_mlp.up_proj
+      gate_proj = original_mlp.gate_proj
+      up_proj = original_mlp.up_proj
       self.down_proj = original_mlp.down_proj
       self.act_fn = original_mlp.act_fn
 
@@ -188,24 +188,44 @@ try:
           _glu_activation_name(self.act_fn) if use_swiglu_composite else None
       )
 
-      # Fuse gate and up projections
-      gate_out_features = self.gate_proj.out_features
-      up_out_features = self.up_proj.out_features
+      # Fuse gate and up projections without keeping duplicate unfused storages.
+      gate_out_features = gate_proj.out_features
+      up_out_features = up_proj.out_features
 
       self.gate_up_proj = torch.nn.Linear(
-          self.gate_proj.in_features,
+          gate_proj.in_features,
           gate_out_features + up_out_features,
-          bias=self.gate_proj.bias is not None,
+          bias=gate_proj.bias is not None,
+          device="meta",
       )
 
-      # Copy weights and biases
       with torch.no_grad():
-        self.gate_up_proj.weight.copy_(
-            torch.cat([self.gate_proj.weight, self.up_proj.weight], dim=0)
+        fused_weight = torch.cat([gate_proj.weight, up_proj.weight], dim=0)
+        self.gate_up_proj.weight = torch.nn.Parameter(
+            fused_weight, requires_grad=gate_proj.weight.requires_grad
         )
-        if self.gate_up_proj.bias is not None:
-          self.gate_up_proj.bias.copy_(
-              torch.cat([self.gate_proj.bias, self.up_proj.bias], dim=0)
+        gate_view, up_view = self.gate_up_proj.weight.split(
+            [gate_out_features, up_out_features], dim=0
+        )
+        gate_proj.weight = torch.nn.Parameter(
+            gate_view, requires_grad=gate_proj.weight.requires_grad
+        )
+        up_proj.weight = torch.nn.Parameter(
+            up_view, requires_grad=up_proj.weight.requires_grad
+        )
+        if gate_proj.bias is not None:
+          fused_bias = torch.cat([gate_proj.bias, up_proj.bias], dim=0)
+          self.gate_up_proj.bias = torch.nn.Parameter(
+              fused_bias, requires_grad=gate_proj.bias.requires_grad
+          )
+          gate_b_view, up_b_view = self.gate_up_proj.bias.split(
+              [gate_out_features, up_out_features], dim=0
+          )
+          gate_proj.bias = torch.nn.Parameter(
+              gate_b_view, requires_grad=gate_proj.bias.requires_grad
+          )
+          up_proj.bias = torch.nn.Parameter(
+              up_b_view, requires_grad=up_proj.bias.requires_grad
           )
 
       self.gate_size = gate_out_features
@@ -262,43 +282,88 @@ try:
       ) and not self.is_kv_shared_layer
       self.use_rope_composite = use_rope_composite
 
-      self.q_proj = original_attn.q_proj
+      if not self.fuse_qkv:
+        self.q_proj = original_attn.q_proj
 
       if not self.is_kv_shared_layer:
         self.k_norm = original_attn.k_norm
         self.v_norm = original_attn.v_norm
-        self.k_proj = original_attn.k_proj
-        self.v_proj = original_attn.v_proj
 
         if self.fuse_qkv:
-          q_out_features = self.q_proj.out_features
-          k_out_features = self.k_proj.out_features
-          v_out_features = (
-              self.v_proj.out_features if self.v_proj is not None else 0
-          )
+          q_proj = original_attn.q_proj
+          k_proj = original_attn.k_proj
+          v_proj = original_attn.v_proj
+          q_out_features = q_proj.out_features
+          k_out_features = k_proj.out_features
+          v_out_features = v_proj.out_features if v_proj is not None else 0
 
           self.qkv_proj = torch.nn.Linear(
-              self.q_proj.in_features,
+              q_proj.in_features,
               q_out_features + k_out_features + v_out_features,
-              bias=self.q_proj.bias is not None,
+              bias=q_proj.bias is not None,
+              device="meta",
           )
 
-          # Copy weights and biases
+          # Fuse weights and rebind original projections to views so unfused
+          # storages can be freed immediately.
           with torch.no_grad():
-            tensors_to_cat = [self.q_proj.weight, self.k_proj.weight]
-            if self.v_proj is not None:
-              tensors_to_cat.append(self.v_proj.weight)
-            self.qkv_proj.weight.copy_(torch.cat(tensors_to_cat, dim=0))
+            tensors_to_cat = [q_proj.weight, k_proj.weight]
+            if v_proj is not None:
+              tensors_to_cat.append(v_proj.weight)
+            fused_qkv_weight = torch.cat(tensors_to_cat, dim=0)
+            self.qkv_proj.weight = torch.nn.Parameter(
+                fused_qkv_weight, requires_grad=q_proj.weight.requires_grad
+            )
+            if v_proj is not None:
+              q_view, k_view, v_view = self.qkv_proj.weight.split(
+                  [q_out_features, k_out_features, v_out_features], dim=0
+              )
+              v_proj.weight = torch.nn.Parameter(
+                  v_view, requires_grad=v_proj.weight.requires_grad
+              )
+            else:
+              q_view, k_view = self.qkv_proj.weight.split(
+                  [q_out_features, k_out_features], dim=0
+              )
+            q_proj.weight = torch.nn.Parameter(
+                q_view, requires_grad=q_proj.weight.requires_grad
+            )
+            k_proj.weight = torch.nn.Parameter(
+                k_view, requires_grad=k_proj.weight.requires_grad
+            )
 
-            if self.qkv_proj.bias is not None:
-              biases_to_cat = [self.q_proj.bias, self.k_proj.bias]
-              if self.v_proj is not None:
-                biases_to_cat.append(self.v_proj.bias)
-              self.qkv_proj.bias.copy_(torch.cat(biases_to_cat, dim=0))
+            if q_proj.bias is not None:
+              biases_to_cat = [q_proj.bias, k_proj.bias]
+              if v_proj is not None:
+                biases_to_cat.append(v_proj.bias)
+              fused_qkv_bias = torch.cat(biases_to_cat, dim=0)
+              self.qkv_proj.bias = torch.nn.Parameter(
+                  fused_qkv_bias, requires_grad=q_proj.bias.requires_grad
+              )
+              if v_proj is not None:
+                qb_view, kb_view, vb_view = self.qkv_proj.bias.split(
+                    [q_out_features, k_out_features, v_out_features], dim=0
+                )
+                v_proj.bias = torch.nn.Parameter(
+                    vb_view, requires_grad=v_proj.bias.requires_grad
+                )
+              else:
+                qb_view, kb_view = self.qkv_proj.bias.split(
+                    [q_out_features, k_out_features], dim=0
+                )
+              q_proj.bias = torch.nn.Parameter(
+                  qb_view, requires_grad=q_proj.bias.requires_grad
+              )
+              k_proj.bias = torch.nn.Parameter(
+                  kb_view, requires_grad=k_proj.bias.requires_grad
+              )
 
           self.q_size = q_out_features
           self.k_size = k_out_features
           self.v_size = v_out_features
+        else:
+          self.k_proj = original_attn.k_proj
+          self.v_proj = original_attn.v_proj
 
     def _get_rope_base(self) -> float:
       rope_base = 500000.0
@@ -449,7 +514,7 @@ try:
         if (
             getattr(self, "use_qkv_norm_rope_composite", False)
             and self.fuse_qkv
-            and self.v_proj is not None
+            and self.v_size > 0
             and not is_last_kv_donor_in_prefill
         ):
           position_ids = kwargs.get("position_ids", None)
@@ -477,7 +542,7 @@ try:
         else:
           if self.fuse_qkv:
             qkv = self.qkv_proj(hidden_states)
-            if self.v_proj is not None:
+            if self.v_size > 0:
               q, k, v = qkv.split(
                   [self.q_size, self.k_size, self.v_size], dim=-1
               )

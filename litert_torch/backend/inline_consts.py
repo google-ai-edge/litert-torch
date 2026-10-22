@@ -74,7 +74,11 @@ class InlineConstsContext(lowerings.context.LoweringContextPlugin):
 def _tensor_to_mlir_compatible_array(tensor: torch.Tensor) -> np.ndarray:
   """Converts a tensor to a numpy array that is compatible with MLIR contiguity and endianness."""
   if hasattr(tensor, 'detach'):
-    arr = tensor.contiguous().detach().cpu().numpy()
+    t = tensor.contiguous().detach().cpu()
+    if t.dtype == torch.bfloat16:
+      arr = t.view(torch.uint16).numpy()
+    else:
+      arr = t.numpy()
   else:
     arr = np.array(tensor)
 
@@ -159,7 +163,7 @@ def tensor_lowering_placeholder_lowering(
     return _build_const(cached_attr, tensor_type)
 
   use_resource_attr = const_ctx.enable_resource_constants
-  if x.dtype not in [torch.float32, torch.int32]:
+  if x.dtype not in [torch.float32, torch.bfloat16, torch.int32]:
     use_resource_attr = False
 
   # If the tensor is too small, just use a dense elements attr.
@@ -188,7 +192,8 @@ def tensor_lowering_placeholder_lowering(
     )
   else:
     arr = _tensor_to_mlir_compatible_array(x)
-    attr = ir.DenseElementsAttr.get(arr, type=tensor_type)
+    buf = memoryview(arr.view(np.uint8)) if x.dtype == torch.bfloat16 else arr
+    attr = ir.DenseElementsAttr.get(buf, type=tensor_type)
 
   const_ctx.constant_cache[x_fingerprint] = attr
   return _build_const(attr, tensor_type)

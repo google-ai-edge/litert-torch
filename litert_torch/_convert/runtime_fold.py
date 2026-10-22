@@ -68,12 +68,27 @@ class RuntimeFoldPass(mu.core.ModulePassBase):
     # Set iteration order is arbitrary, and a mismatch pairs folded arrays with
     # the wrong constants.
     output_cst_values = []
+    cst_ops_set = set(cst_ops)
     for op in cst_ops:
       if "tfl.no_value" in op.name or isinstance(op, tfl.ConstOp):
         continue
       for val in op.results:
-        if any(use.operation not in cst_ops for use in val.uses):
+        if any(use.operation not in cst_ops_set for use in val.uses):
           output_cst_values.append(val)
+
+    # Prune cst_ops to only operations backward-reachable from output_cst_values
+    # so large model weight ConstOps are not cloned into the temporary module.
+    needed_ops = set()
+    worklist = [val.owner for val in output_cst_values]
+    while worklist:
+      op = worklist.pop()
+      if op in needed_ops or op not in cst_ops_set:
+        continue
+      needed_ops.add(op)
+      for operand in op.operands:
+        if hasattr(operand, "owner"):
+          worklist.append(operand.owner)
+    cst_ops = [op for op in cst_ops if op in needed_ops]
 
     return cst_ops, output_cst_values
 

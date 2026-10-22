@@ -313,6 +313,12 @@ class PatchTest(parameterized.TestCase):
           model.model.layers[0].self_attn, patch.FusedGemma4TextAttention
       )
       self.assertTrue(model.model.layers[0].self_attn.fuse_qkv)
+      # Fused modules must not register dead unfused projections as submodules.
+      self.assertFalse(hasattr(model.model.layers[0].mlp, "gate_proj"))
+      self.assertFalse(hasattr(model.model.layers[0].mlp, "up_proj"))
+      self.assertFalse(hasattr(model.model.layers[0].self_attn, "q_proj"))
+      self.assertFalse(hasattr(model.model.layers[0].self_attn, "k_proj"))
+      self.assertFalse(hasattr(model.model.layers[0].self_attn, "v_proj"))
 
     self.assertIsInstance(
         model.model.layers[0].mlp, modeling_gemma4.Gemma4TextMLP
