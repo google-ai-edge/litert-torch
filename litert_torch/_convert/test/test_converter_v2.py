@@ -26,8 +26,10 @@ from litert_torch.backend import export as export_lib
 import numpy as np
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from absl.testing import absltest as googletest
+from tensorflow.lite.python import schema_py_generated as schema_fb  # pylint: disable=g-direct-tensorflow-import
 
 
 class SimpleLinearModel(nn.Module):
@@ -71,6 +73,87 @@ class SharedWeightsModel2(nn.Module):
 
   def forward(self, x):
     return (x @ self.shared) * self.head
+
+
+class SliceConstantModel(nn.Module):
+  """Slices a parameter that is imported as a resource constant."""
+
+  def __init__(self):
+    super().__init__()
+    self.table = nn.Parameter(torch.randn(2, 1024, 64))
+
+  def forward(self, x, y):
+    return x @ self.table[0] + y @ self.table[1]
+
+
+class SoftplusConstantModel(nn.Module):
+  """Applies softplus to a small parameter."""
+
+  def __init__(self):
+    super().__init__()
+    self.per_dim_scale = nn.Parameter(torch.randn(128))
+
+  def forward(self, x):
+    return x * F.softplus(self.per_dim_scale)
+
+
+class SinusoidalConstantModel(nn.Module):
+  """Computes a sinusoidal positional table from a small buffer."""
+
+  def __init__(self):
+    super().__init__()
+    inv_timescales = torch.exp(torch.arange(512, dtype=torch.float32) * -0.018)
+    self.register_buffer(
+        "inv_timescales", inv_timescales[None, None, :], persistent=False
+    )
+
+  def forward(self, x):
+    position_ids = torch.arange(12, -1, -1, dtype=torch.float32)[..., None]
+    scaled_time = position_ids * self.inv_timescales
+    return x + torch.cat(
+        [torch.sin(scaled_time), torch.cos(scaled_time)], dim=-1
+    )
+
+
+class ConstantInputLinearModel(nn.Module):
+  """Applies a linear layer to a constant buffer."""
+
+  def __init__(self):
+    super().__init__()
+    self.register_buffer(
+        "pos_embed", torch.randn(1, 13, 1024), persistent=False
+    )
+    self.proj = nn.Linear(1024, 1024, bias=False)
+
+  def forward(self, q):
+    k = self.proj(self.pos_embed).view(13, 16, 64).permute(1, 2, 0)
+    return q @ k.unsqueeze(0)
+
+
+def _ops_with_only_constant_inputs(content: bytes) -> list[str]:
+  """Returns the names of ops whose inputs are all constant tensors."""
+  model = schema_fb.ModelT.InitFromPackedBuf(bytearray(content), 0)
+  builtin_names = {
+      v: k
+      for k, v in vars(schema_fb.BuiltinOperator).items()
+      if not k.startswith("_")
+  }
+  op_names = [
+      builtin_names[max(oc.builtinCode, oc.deprecatedBuiltinCode)]
+      for oc in model.operatorCodes
+  ]
+
+  def is_constant(subgraph, tensor_index):
+    buffer = model.buffers[subgraph.tensors[tensor_index].buffer]
+    return (buffer.data is not None and len(buffer.data)) or buffer.offset > 1
+
+  result = []
+  for subgraph in model.subgraphs:
+    for op in subgraph.operators:
+      inputs = [i for i in op.inputs if i >= 0]
+      if inputs and all(is_constant(subgraph, i) for i in inputs):
+        result.append(op_names[op.opcodeIndex])
+  return result
 
 
 class TestConverterV2(googletest.TestCase):
@@ -511,6 +594,38 @@ class TestConverterV2(googletest.TestCase):
 
   def test_is_supported(self):
     self.assertTrue(converter_v2_lib.is_supported())
+
+  def _assert_constant_subgraphs_folded(self, m, sample_input):
+    out_file = self.create_tempfile("model.tflite").full_path
+    edge_model = litert_torch.convert(
+        m, sample_input, use_v2=True, output_file_path=out_file
+    )
+    with open(out_file, "rb") as f:
+      self.assertEmpty(_ops_with_only_constant_inputs(f.read()))
+    res = edge_model(*[x.numpy() for x in sample_input])
+    expected = m(*sample_input).detach().numpy()
+    np.testing.assert_allclose(res, expected, rtol=1e-3, atol=1e-3)
+
+  def test_slice_of_constant_is_folded(self):
+    self._assert_constant_subgraphs_folded(
+        SliceConstantModel().eval(),
+        (torch.randn(1, 1024), torch.randn(1, 1024)),
+    )
+
+  def test_softplus_of_constant_is_folded(self):
+    self._assert_constant_subgraphs_folded(
+        SoftplusConstantModel().eval(), (torch.randn(1, 4, 128),)
+    )
+
+  def test_sinusoidal_table_of_constant_is_folded(self):
+    self._assert_constant_subgraphs_folded(
+        SinusoidalConstantModel().eval(), (torch.randn(1, 13, 1024),)
+    )
+
+  def test_linear_of_constant_is_folded(self):
+    self._assert_constant_subgraphs_folded(
+        ConstantInputLinearModel().eval(), (torch.randn(1, 16, 20, 64),)
+    )
 
   def test_unsupported_tensorflow_raises_actionable_error(self):
     with mock.patch.object(
