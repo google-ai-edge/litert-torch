@@ -28,6 +28,7 @@ import litert_lm_builder as litertlm_builder
 from litert_lm_builder.runtime.proto import llm_metadata_pb2
 from litert_lm_builder.runtime.proto import llm_model_type_pb2
 from litert_lm_builder.runtime.proto import sampler_params_pb2
+from litert_lm_builder.runtime.proto import text2image_metadata_pb2
 
 _PH = 'KIMAIRA'
 
@@ -407,22 +408,35 @@ def build_llm_metadata(
   return llm_metadata
 
 
+_Text2ImageMetadata = text2image_metadata_pb2.Text2ImageMetadata
 _IMAGE_GEN_TFLITE_MODEL_TYPES = {
-    'text_encoder': 'tf_lite_text_encoder',
-    'text_encoder_0': 'tf_lite_text_encoder_0',
-    'text_encoder_1': 'tf_lite_text_encoder_1',
-    'text_encoder_2': 'tf_lite_text_encoder_2',
-    'dit': 'tf_lite_image_denoiser',
-    'dit_initial': 'tf_lite_diffusion_transformer_initial',
-    'dit_double_block_0': 'tf_lite_diffusion_transformer_double_block_0',
-    'dit_double_block_1': 'tf_lite_diffusion_transformer_double_block_1',
-    'dit_single_block_0': 'tf_lite_diffusion_transformer_single_block_0',
-    'dit_single_block_1': 'tf_lite_diffusion_transformer_single_block_1',
-    'dit_single_block_2': 'tf_lite_diffusion_transformer_single_block_2',
-    'dit_single_block_3': 'tf_lite_diffusion_transformer_single_block_3',
-    'dit_final': 'tf_lite_diffusion_transformer_final',
-    'vae_decoder': 'tf_lite_image_decoder',
-    'vae_encoder': 'tf_lite_image_encoder',
+    'text_encoder': _Text2ImageMetadata.TF_LITE_TEXT_ENCODER,
+    'text_encoder_0': _Text2ImageMetadata.TF_LITE_TEXT_ENCODER_0,
+    'text_encoder_1': _Text2ImageMetadata.TF_LITE_TEXT_ENCODER_1,
+    'text_encoder_2': _Text2ImageMetadata.TF_LITE_TEXT_ENCODER_2,
+    'dit': _Text2ImageMetadata.TF_LITE_IMAGE_DENOISER,
+    'dit_initial': _Text2ImageMetadata.TF_LITE_DIFFUSION_TRANSFORMER_INITIAL,
+    'dit_double_block_0': (
+        _Text2ImageMetadata.TF_LITE_DIFFUSION_TRANSFORMER_DOUBLE_BLOCK_0
+    ),
+    'dit_double_block_1': (
+        _Text2ImageMetadata.TF_LITE_DIFFUSION_TRANSFORMER_DOUBLE_BLOCK_1
+    ),
+    'dit_single_block_0': (
+        _Text2ImageMetadata.TF_LITE_DIFFUSION_TRANSFORMER_SINGLE_BLOCK_0
+    ),
+    'dit_single_block_1': (
+        _Text2ImageMetadata.TF_LITE_DIFFUSION_TRANSFORMER_SINGLE_BLOCK_1
+    ),
+    'dit_single_block_2': (
+        _Text2ImageMetadata.TF_LITE_DIFFUSION_TRANSFORMER_SINGLE_BLOCK_2
+    ),
+    'dit_single_block_3': (
+        _Text2ImageMetadata.TF_LITE_DIFFUSION_TRANSFORMER_SINGLE_BLOCK_3
+    ),
+    'dit_final': _Text2ImageMetadata.TF_LITE_DIFFUSION_TRANSFORMER_FINAL,
+    'vae_decoder': _Text2ImageMetadata.TF_LITE_IMAGE_DECODER,
+    'vae_encoder': _Text2ImageMetadata.TF_LITE_IMAGE_ENCODER,
 }
 
 
@@ -600,53 +614,53 @@ def package_model(
   if export_config.experimental_use_fp16:
     builder.add_tflite_model(
         exported_model_artifacts.prefill_decode_model_path,  # pyrefly: ignore[bad-argument-type]
-        litertlm_builder.TfLiteModelType.PREFILL_DECODE,
+        llm_metadata_pb2.LlmMetadata.TF_LITE_PREFILL_DECODE,
         prefer_activation_type='fp32_fp16',
     )
   else:
     builder.add_tflite_model(
         exported_model_artifacts.prefill_decode_model_path,  # pyrefly: ignore[bad-argument-type]
-        litertlm_builder.TfLiteModelType.PREFILL_DECODE,
+        llm_metadata_pb2.LlmMetadata.TF_LITE_PREFILL_DECODE,
     )
   if exported_model_artifacts.embedder_model_path:
     builder.add_tflite_model(
         exported_model_artifacts.embedder_model_path,
-        litertlm_builder.TfLiteModelType.EMBEDDER,
+        llm_metadata_pb2.LlmMetadata.TF_LITE_EMBEDDER,
     )
   if exported_model_artifacts.vision_encoder_model_path:
     builder.add_tflite_model(
         exported_model_artifacts.vision_encoder_model_path,
-        litertlm_builder.TfLiteModelType.VISION_ENCODER,
+        llm_metadata_pb2.LlmMetadata.TF_LITE_VISION_ENCODER,
     )
   if exported_model_artifacts.vision_adapter_model_path:
     builder.add_tflite_model(
         exported_model_artifacts.vision_adapter_model_path,
-        litertlm_builder.TfLiteModelType.VISION_ADAPTER,
+        llm_metadata_pb2.LlmMetadata.TF_LITE_VISION_ADAPTER,
     )
   if exported_model_artifacts.eoi_model_path:
     builder.add_tflite_model(
         exported_model_artifacts.eoi_model_path,
-        litertlm_builder.TfLiteModelType.END_OF_VISION,
+        llm_metadata_pb2.LlmMetadata.TF_LITE_END_OF_VISION,
     )
   if exported_model_artifacts.audio_encoder_model_path:
     builder.add_tflite_model(
         exported_model_artifacts.audio_encoder_model_path,
-        litertlm_builder.TfLiteModelType.AUDIO_ENCODER_HW,
+        llm_metadata_pb2.LlmMetadata.TF_LITE_AUDIO_ENCODER_HW,
     )
   if exported_model_artifacts.audio_adapter_model_path:
     builder.add_tflite_model(
         exported_model_artifacts.audio_adapter_model_path,
-        litertlm_builder.TfLiteModelType.AUDIO_ADAPTER,
+        llm_metadata_pb2.LlmMetadata.TF_LITE_AUDIO_ADAPTER,
     )
   if exported_model_artifacts.eoa_model_path:
     builder.add_tflite_model(
         exported_model_artifacts.eoa_model_path,
-        litertlm_builder.TfLiteModelType.END_OF_AUDIO,
+        llm_metadata_pb2.LlmMetadata.TF_LITE_END_OF_AUDIO,
     )
   if exported_model_artifacts.auxiliary_model_path:
     builder.add_tflite_model(
         exported_model_artifacts.auxiliary_model_path,
-        litertlm_builder.TfLiteModelType.AUX,
+        llm_metadata_pb2.LlmMetadata.TF_LITE_AUX,
     )
   if exported_model_artifacts.additional_model_paths:
     for (
@@ -654,7 +668,7 @@ def package_model(
         model_path,
     ) in exported_model_artifacts.additional_model_paths.items():
       if name == 'per_layer_embedder':
-        model_type = litertlm_builder.TfLiteModelType.PER_LAYER_EMBEDDER
+        model_type = llm_metadata_pb2.LlmMetadata.TF_LITE_PER_LAYER_EMBEDDER
       else:
         raise ValueError(f'Unsupported additional model type: {name}')
       builder.add_tflite_model(

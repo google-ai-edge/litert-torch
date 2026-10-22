@@ -36,6 +36,26 @@ from litert_lm_builder.runtime.proto import llm_metadata_pb2
 gfile = None
 
 
+def _model_type_wire_string(model_type: int) -> str:
+  """Returns the TF-free section model type string of an `LlmMetadata` model type.
+
+  `pack_litertlm` only adds `LlmMetadata` when `llm_metadata_path` exists, and
+  the builder can only resolve proto enum model types against an added
+  `LlmMetadata`, so the model types are passed as TF-free strings.
+
+  Args:
+    model_type: An `LlmMetadata.TfLiteModelType` value.
+
+  Returns:
+    The lowercase TF-free model type string, e.g. 'prefill_decode'.
+  """
+  return (
+      llm_metadata_pb2.LlmMetadata.TfLiteModelType.Name(model_type)
+      .lower()
+      .removeprefix('tf_lite_')
+  )
+
+
 def _open(path: str | pathlib.Path, mode: str = 'r'):
   if gfile:
     return gfile.Open(str(path), mode)
@@ -327,25 +347,33 @@ def pack_litertlm(
 
   builder.add_tflite_model(
       tflite_model_path=prefilldecode_model_path,
-      model_type=litertlm_builder.TfLiteModelType.PREFILL_DECODE,
+      model_type=_model_type_wire_string(
+          llm_metadata_pb2.LlmMetadata.TF_LITE_PREFILL_DECODE
+      ),
   )
 
   if embedder_model_path:
     builder.add_tflite_model(
         tflite_model_path=embedder_model_path,
-        model_type=litertlm_builder.TfLiteModelType.EMBEDDER,
+        model_type=_model_type_wire_string(
+            llm_metadata_pb2.LlmMetadata.TF_LITE_EMBEDDER
+        ),
     )
 
   if auxiliary_model_path:
     builder.add_tflite_model(
         tflite_model_path=auxiliary_model_path,
-        model_type=litertlm_builder.TfLiteModelType.AUX,
+        model_type=_model_type_wire_string(
+            llm_metadata_pb2.LlmMetadata.TF_LITE_AUX
+        ),
     )
 
   if ple_model_path:
     builder.add_tflite_model(
         tflite_model_path=ple_model_path,
-        model_type=litertlm_builder.TfLiteModelType.PER_LAYER_EMBEDDER,
+        model_type=_model_type_wire_string(
+            llm_metadata_pb2.LlmMetadata.TF_LITE_PER_LAYER_EMBEDDER
+        ),
     )
 
   if spm_path:
