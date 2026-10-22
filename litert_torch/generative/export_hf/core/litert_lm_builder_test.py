@@ -25,6 +25,7 @@ from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.core import litert_lm_builder
 import litert_lm_builder as litertlm_builder
+import transformers
 
 _EMPTY_CHAT_TEMPLATES = ((None, None), (None, None), (None, None))
 
@@ -163,7 +164,12 @@ class _FakeModel:
   generation_config = None
 
 
-def _build_llm_metadata(tokenizer, chat_templates=_EMPTY_CHAT_TEMPLATES):
+def _build_llm_metadata(
+    tokenizer,
+    chat_templates=_EMPTY_CHAT_TEMPLATES,
+    litert_lm_model_type_override="generic",
+    transpile_chat_template=False,
+):
   return litert_lm_builder.build_llm_metadata(
       source_model_artifacts=export_lib.SourceModelArtifacts(
           model=_FakeModel(),
@@ -172,12 +178,320 @@ def _build_llm_metadata(tokenizer, chat_templates=_EMPTY_CHAT_TEMPLATES):
           tokenizer=tokenizer,
       ),
       export_config=exportable_module.ExportableModuleConfig(
-          model="test-model"
+          model="test-model",
+          experimental_transpile_chat_template_for_minijinja=(
+              transpile_chat_template
+          ),
       ),
       chat_templates=chat_templates,
       exported_model_artifacts=export_lib.ExportedModelArtifacts(),
-      litert_lm_model_type_override="generic",
+      litert_lm_model_type_override=litert_lm_model_type_override,
   )
+
+
+# The two shapes of FunctionGemma chat template. The HF one formats each tool
+# declaration itself from the tool dict; LiteRT-LM's
+# `google-function-gemma.jinja` prints declarations the runtime already
+# rendered.
+_DICT_TOOLS_TEMPLATE = "declaration:{{ tool['function']['name'] }}"
+_STRING_TOOLS_TEMPLATE = "{{ tool | trim }}"
+
+
+class _FakeFunctionGemmaTokenizer:
+  """FunctionGemma tokenizer stub; renders the template shape it is given."""
+
+  bos_token = None
+  eos_token = "<end_of_turn>"
+
+  def __init__(self, chat_template):
+    self.chat_template = chat_template
+
+  def apply_chat_template(
+      self,
+      messages,
+      tools=None,
+      chat_template=None,
+      tokenize=False,
+      add_generation_prompt=False,
+  ):
+    del tokenize, add_generation_prompt
+    template = (
+        chat_template if chat_template is not None else self.chat_template
+    )
+    rendered = ""
+    for tool in tools or []:
+      if template == _DICT_TOOLS_TEMPLATE:
+        declaration = f"declaration:{tool['function']['name']}{{}}"
+      else:
+        declaration = str(tool).strip()
+      rendered += (
+          f"<start_function_declaration>{declaration}"
+          "<end_function_declaration>"
+      )
+    for message in messages:
+      rendered += (
+          f"<start_of_turn>{message['role']}\n{message['content']}"
+          "<end_of_turn>\n"
+      )
+    return rendered
+
+
+# The HF FunctionGemma chat template: a verbatim copy of
+# runtime/components/testdata/google-function-gemma-hf.jinja in
+# google-ai-edge/LiteRT-LM at commit d3bcc69cbb3f.
+# pylint: disable=line-too-long
+_HF_FUNCTION_GEMMA_TEMPLATE = r"""{# --- MACRO DEFINITION --- #}
+{% macro format_parameters(properties, required) -%}
+    {%- set standard_keys = ['description', 'type', 'properties', 'required', 'nullable'] -%}
+    {%- set ns = namespace(found_first=false) -%}
+    {%- for key, value in properties.items() -%}
+        {%- if key not in standard_keys -%}
+            {%- if ns.found_first %},{% endif -%}
+            {%- set ns.found_first = true -%}
+            {{- key }}:{description:<escape>{{ value['description'] }}<escape>,nullable:{{ 'false' if key in required else 'true' }},type:<escape>{{ value['type'] | upper }}<escape>
+            {%- if value['type'] | upper == 'STRING' -%}
+                {%- if value['enum'] is not none -%}
+                    ,enum:{{ format_argument(value['enum']) }}
+                {%- endif -%}
+            {%- elif value['type'] | upper == 'OBJECT' -%}
+                ,properties:{
+                {%- if value['properties'] is defined and value['properties'] is mapping -%}
+                    {{- format_parameters(value['properties'], value['required'] | default([])) -}}
+                {%- elif value is mapping -%}
+                    {{- format_parameters(value, value['required'] | default([])) -}}
+                {%- endif -%}
+                },required:[
+                {%- for item in value['required'] | default([]) -%}
+                    <escape>{{- item -}}<escape>
+                    {%- if not loop.last %},{% endif -%}
+                {%- endfor -%}
+                ]
+            {%- elif value['type'] | upper == 'ARRAY' -%}
+                {%- if value['items'] is mapping and value['items'] -%}
+                    ,items:{
+                    {%- set ns_items = namespace(found_first=false) -%}
+                    {%- for item_key, item_value in value['items'].items() -%}
+                        {%- if item_value is not none -%}
+                            {%- if ns_items.found_first %},{% endif -%}
+                            {%- set ns_items.found_first = true -%}
+                            {%- if item_key == 'properties' -%}
+                                properties:{
+                                {%- if item_value is mapping -%}
+                                    {{- format_parameters(item_value, value['items']['required'] | default([])) -}}
+                                {%- endif -%}
+                                }
+                            {%- elif item_key == 'required' -%}
+                                required:[
+                                {%- for req_item in item_value -%}
+                                    <escape>{{- req_item -}}<escape>
+                                    {%- if not loop.last %},{% endif -%}
+                                {%- endfor -%}
+                                ]
+                            {%- elif item_key == 'type' -%}
+                                type:<escape>{{ item_value | upper }}<escape>
+                            {%- else -%}
+                                {{ item_key }}:{{ item_value }}
+                            {%- endif -%}
+                        {%- endif -%}
+                    {%- endfor -%}
+                    }
+                {%- endif -%}
+            {%- endif -%}
+            }
+        {%- endif -%}
+    {%- endfor -%}
+{%- endmacro %}
+{% macro format_function_declaration(tool_data) -%}
+declaration:{{- tool_data['function']['name'] -}}
+{description:<escape>{{- tool_data['function']['description'] -}}
+<escape>,parameters:{properties:{
+{{- format_parameters(tool_data['function']['parameters']['properties'], tool_data['function']['parameters']['required']) -}}},required:[
+{%- for item in tool_data['function']['parameters']['required'] -%}
+<escape>{{- item -}}<escape>
+{%- if not loop.last %},{% endif -%}
+{%- endfor -%} ],type:<escape>{{ tool_data['function']['parameters']['type'] | upper }}<escape>}}
+{%- endmacro %}
+{% macro format_argument(argument) -%}
+{%- if argument is string -%}
+    {{- '<escape>' + argument + '<escape>' -}}
+{%- elif argument is boolean -%}
+    {%- if argument -%}
+        {{- '<escape>true<escape>' -}}
+    {%- else -%}
+        {{- '<escape>false<escape>' -}}
+    {%- endif -%}
+{%- elif argument is mapping -%}
+    {{- '{' -}}
+    {%- set ns = namespace(found_first=false) -%}
+    {%- for key, value in argument.items() -%}
+        {%- if ns.found_first %},{% endif -%}
+        {%- set ns.found_first = true -%}
+        {{- '<escape>' + key + '<escape>' -}}:{{- format_argument(value) -}}
+    {%- endfor -%}
+    {{- '}' -}}
+{%- elif argument is sequence -%}
+    {{- '[' -}}
+    {%- for item in argument -%}
+        {{- format_argument(item) -}}
+        {%- if not loop.last %},{% endif -%}
+    {%- endfor -%}
+    {{- ']' -}}
+{%- else -%}
+    {{- argument -}}
+{%- endif -%}
+{%- endmacro %}
+{{ bos_token }}
+{%- set ns = namespace(prev_message_type=None) -%}
+{#- Tool Declarations -#}
+{%- set loop_messages = messages -%}
+{%- if tools or (messages and (messages[0]['role'] == 'system' or messages[0]['role'] == 'developer')) -%}
+    {{- '<start_of_turn>developer
+' -}}
+    {%- if messages and (messages[0]['role'] == 'system' or messages[0]['role'] == 'developer') -%}
+        {%- if messages[0]['content'] is string -%}
+            {{- messages[0]['content'] | trim -}}
+        {%- elif messages[0]['content'] is sequence -%}
+            {%- for item in messages[0]['content'] -%}
+                {%- if item['type'] == 'text' -%}
+                    {{- item['text'] | trim -}}
+                {%- endif -%}
+            {%- endfor -%}
+        {%- endif -%}
+        {%- set loop_messages = messages[1:] -%}
+    {%- endif -%}
+    {%- for tool in tools %}
+        {{- '<start_function_declaration>' -}}
+        {{- format_function_declaration(tool) | trim }}
+        {{- '<end_function_declaration>' -}}
+    {%- endfor %}
+    {{- '<end_of_turn>
+'}}
+{%- endif %}
+{#- Loop through messages. -#}
+{%- for message in loop_messages -%}
+    {%- if (message['role'] == 'assistant') -%}
+        {#- Rename "assistant" to "model". -#}
+        {%- set role = "model" -%}
+    {%- else -%}
+        {%- set role = message['role'] -%}
+    {%- endif -%}
+    {%- if role != 'tool' -%}
+        {%- if ns.prev_message_type == 'tool_call' -%}
+            {{ raise_exception("Tool call must be followed by a tool response.") }}
+        {%- endif -%}
+        {%- if ns.prev_message_type != 'tool_response' -%}
+            {{- '<start_of_turn>' + role + '
+'}}
+        {%- endif -%}
+        {%- set ns.prev_message_type = None -%}
+        {%- if 'content' in message and message['content'] is not none -%}
+            {%- if message['content'] is string -%}
+                {{ message['content'] | trim }}
+            {%- elif message['content'] is sequence -%}
+                {%- for item in message['content'] -%}
+                    {%- if item['type'] == 'image' -%}
+                        {{ '<start_of_image>' }}
+                    {%- elif item['type'] == 'text' -%}
+                        {{ item['text'] | trim }}
+                    {%- endif -%}
+                {%- endfor -%}
+            {%- else -%}
+                {{ raise_exception("Invalid content type in user/assistant message") }}
+            {%- endif -%}
+            {%- set ns.prev_message_type = 'content' -%}
+        {%- endif -%}
+        {%- if 'tool_calls' in message and message['tool_calls'] and message['tool_calls'] is iterable -%}
+            {#- Tool Calls -#}
+            {%- for tool_call in message['tool_calls'] -%}
+                {% set function = tool_call['function'] %}
+                {{-  '<start_function_call>call:' + function['name'] + '{' -}}
+                {%- if 'arguments' in function -%}
+                    {%- if function['arguments'] is mapping -%}
+                        {%- set ns = namespace(found_first=false) -%}
+                        {%- for key, value in function['arguments'].items() -%}
+                            {%- if ns.found_first %},{% endif -%}
+                            {%- set ns.found_first = true -%}
+                            {{- key -}}:{{- format_argument(value) -}}
+                        {%- endfor -%}
+                    {%- elif function['arguments'] is string -%}
+                        {# This handles string-JSON, just in case #}
+                    {{ function['arguments'] }}
+                    {%- endif %}
+                    {{- '}<end_function_call>' -}}
+                {%- endif -%}
+            {%- endfor -%}
+            {%- if loop.last -%}
+                {{ '<start_function_response>' }}
+            {%- endif -%}
+            {%- set ns.prev_message_type = 'tool_call' -%}
+        {%- endif -%}
+    {%- else -%}
+        {#- Tool Responses -#}
+        {%- if 'content' in message and message['content'] is not none -%}
+            {%- if message['content'] is mapping -%}
+                {%- if 'name' in message['content'] and 'response' in message['content'] -%}
+                    {{ '<start_function_response>response:' + message['content']['name'] | trim + '{' }}
+                    {%- set response_ns = namespace(found_first=false) -%}
+                    {%- for key, value in message['content']['response'].items() -%}
+                        {%- if response_ns.found_first %},{% endif -%}
+                        {%- set response_ns.found_first = true -%}
+                        {{- key -}}:{{- format_argument(value) -}}
+                    {%- endfor -%}
+                    {{- '}<end_function_response>' -}}
+                {%- else -%}
+                    {{ raise_exception("Invalid tool response mapping: must contain 'name' and 'response' keys.") }}
+                {%- endif -%}
+            {%- elif message['content'] is string -%}
+                {{ '<start_function_response>' + message['content'] | trim + '<end_function_response>' }}
+            {%- elif message['content'] is sequence -%}
+                {%- for item in message['content'] -%}
+                    {%- if item is mapping -%}
+                        {%- if 'name' in item and 'response' in item -%}
+                            {{ '<start_function_response>response:' + item['name'] | trim + '{' }}
+                            {%- set response_ns = namespace(found_first=false) -%}
+                            {%- for key, value in item['response'].items() -%}
+                                {%- if response_ns.found_first %},{% endif -%}
+                                {%- set response_ns.found_first = true -%}
+                                {{- key -}}:{{- format_argument(value) -}}
+                            {%- endfor -%}
+                            {{- '}<end_function_response>' -}}
+                        {%- else -%}
+                            {{ raise_exception("Invalid tool response mapping in sequence: must contain 'name' and 'response' keys.") }}
+                        {%- endif -%}
+                    {%- elif item is string -%}
+                    {{ '<start_function_response>' + item | trim + '<end_function_response>' }}
+                    {%- else -%}
+                        {{ raise_exception("Invalid item type in tool response sequence: must be mapping or string.") }}
+                    {%- endif -%}
+                {%- endfor -%}
+            {%- else -%}
+                {{ raise_exception("Invalid content type in tool message") }}
+            {%- endif -%}
+        {%- endif -%}
+        {%- set ns.prev_message_type = 'tool_response' -%}
+    {%- endif -%}
+    {%- if ns.prev_message_type not in ['tool_call', 'tool_response'] -%}
+        {{ '<end_of_turn>
+' }}
+    {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+    {%- if ns.prev_message_type != 'tool_response' -%}
+        {{- '<start_of_turn>model\n' -}}
+    {%- endif -%}
+{%- endif -%}"""
+# pylint: enable=line-too-long
+
+
+class _HfTemplateTokenizer(transformers.PreTrainedTokenizer):
+  """A transformers tokenizer with no vocabulary, for rendering templates.
+
+  Its `apply_chat_template(..., tokenize=False)` is transformers' own, so the
+  template renders the way it does for the source model's tokenizer.
+  """
+
+  def get_vocab(self):
+    return {}
 
 
 class TokenizerPrependsBosTest(parameterized.TestCase):
@@ -267,6 +581,111 @@ class TokenizerPrependsBosTest(parameterized.TestCase):
         litert_lm_builder._tokenizer_prepends_bos(
             _UnprobeableTokenizer(bos_token="<s>")
         )
+    )
+
+
+class BuildLlmMetadataFunctionGemmaTest(parameterized.TestCase):
+
+  def _function_gemma(self, tokenizer, chat_templates):
+    llm_metadata = _build_llm_metadata(
+        tokenizer,
+        chat_templates=chat_templates,
+        litert_lm_model_type_override="function_gemma",
+    )
+    self.assertTrue(llm_metadata.llm_model_type.HasField("function_gemma"))
+    return llm_metadata.llm_model_type.function_gemma
+
+  def test_template_formats_fc_when_it_renders_declarations(self):
+    # The runtime formats tool declarations in C++ by default and hands the
+    # template strings. A bundled template that reads the tool dict (the HF
+    # FunctionGemma template) then fails to render any prompt with tools, so
+    # it must be paired with use_template_for_fc_format.
+    tokenizer = _FakeFunctionGemmaTokenizer(_DICT_TOOLS_TEMPLATE)
+    function_gemma = self._function_gemma(tokenizer, _DICT_TOOLS_TEMPLATE)
+    self.assertTrue(function_gemma.use_template_for_fc_format)
+
+  def test_runtime_formats_fc_when_template_prints_tools(self):
+    # `{{ tool | trim }}` templates need the declarations the runtime
+    # rendered; the probe tool's name shows up in the output either way.
+    tokenizer = _FakeFunctionGemmaTokenizer(_STRING_TOOLS_TEMPLATE)
+    function_gemma = self._function_gemma(tokenizer, _STRING_TOOLS_TEMPLATE)
+    self.assertFalse(function_gemma.use_template_for_fc_format)
+
+  @parameterized.named_parameters(
+      ("dict_tools_override", _STRING_TOOLS_TEMPLATE, _DICT_TOOLS_TEMPLATE),
+      ("string_tools_override", _DICT_TOOLS_TEMPLATE, _STRING_TOOLS_TEMPLATE),
+  )
+  def test_fc_format_follows_the_bundled_jinja_template(
+      self, tokenizer_template, bundled_template
+  ):
+    # jinja_chat_template_override case: the bundled template is not the
+    # tokenizer's own, and the bundled one is what the runtime renders.
+    tokenizer = _FakeFunctionGemmaTokenizer(tokenizer_template)
+    function_gemma = self._function_gemma(tokenizer, bundled_template)
+    self.assertEqual(
+        function_gemma.use_template_for_fc_format,
+        bundled_template == _DICT_TOOLS_TEMPLATE,
+    )
+
+  def test_runtime_formats_fc_without_a_jinja_template(self):
+    # prompt_templates (prefix/suffix) path: the runtime falls back to its
+    # own template, which expects pre-rendered declarations.
+    tokenizer = _FakeFunctionGemmaTokenizer(_DICT_TOOLS_TEMPLATE)
+    function_gemma = self._function_gemma(tokenizer, _EMPTY_CHAT_TEMPLATES)
+    self.assertFalse(function_gemma.use_template_for_fc_format)
+
+  def test_runtime_formats_fc_when_template_cannot_render_tools(self):
+    # _FakeTokenizer.apply_chat_template takes no `tools`; a tokenizer that
+    # cannot be probed keeps the previous metadata and says why.
+    tokenizer = _FakeTokenizer(
+        bos_token=None, bos_token_id=None, prepends_bos=False
+    )
+    with self.assertLogs(logger="absl", level="WARNING") as logs:
+      function_gemma = self._function_gemma(tokenizer, "<|user|>{{ content }}")
+    self.assertFalse(function_gemma.use_template_for_fc_format)
+    warning = "\n".join(logs.output)
+    self.assertIn("use_template_for_fc_format", warning)
+    self.assertIn("unexpected keyword argument 'tools'", warning)
+
+  def test_hf_template_formats_fc(self):
+    tokenizer = _HfTemplateTokenizer(chat_template=_HF_FUNCTION_GEMMA_TEMPLATE)
+    self.assertTrue(
+        litert_lm_builder._template_formats_tool_declarations(
+            tokenizer, _HF_FUNCTION_GEMMA_TEMPLATE
+        )
+    )
+
+  def test_template_formats_fc_when_it_reads_required(self):
+    # Like the HF template, this one reads the tool's `required` list without
+    # a default; `tojson` fails on a missing one unless the probe sets it.
+    template = (
+        "{% for tool in tools %}declaration:{{ tool['function']['name'] }}"
+        "{{ tool['function']['parameters']['required'] | tojson }}"
+        "{% endfor %}"
+    )
+    tokenizer = _HfTemplateTokenizer(chat_template=template)
+    self.assertTrue(
+        litert_lm_builder._template_formats_tool_declarations(
+            tokenizer, template
+        )
+    )
+
+  def test_fc_format_probes_the_template_before_the_minijinja_rewrite(self):
+    # The minijinja transpile turns `.split()` into a `split` filter, which
+    # jinja2 does not have, so the probe renders the template as written.
+    template = (
+        "{% for tool in tools %}declaration:{{ tool['function']['name'] }}"
+        "{% endfor %}{{ messages[0]['content'].split() | join(' ') }}"
+    )
+    llm_metadata = _build_llm_metadata(
+        _HfTemplateTokenizer(chat_template=template),
+        chat_templates=template,
+        litert_lm_model_type_override="function_gemma",
+        transpile_chat_template=True,
+    )
+    self.assertIn("| split", llm_metadata.jinja_prompt_template)
+    self.assertTrue(
+        llm_metadata.llm_model_type.function_gemma.use_template_for_fc_format
     )
 
 
