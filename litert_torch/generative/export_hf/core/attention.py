@@ -25,6 +25,21 @@ import transformers
 from litert_torch.backend import composite
 
 
+def _append_sink_logits(
+    padded_logits: torch.Tensor, s_aux: torch.Tensor, g: int
+) -> torch.Tensor:
+  """Appends per-head attention sink logits along the key sequence dimension."""
+  b_dim, kv_groups_dim, gt, _ = padded_logits.shape
+  num_query_groups = s_aux.numel() // g
+  b_actual = (b_dim * kv_groups_dim) // num_query_groups
+  t = gt // g
+  sink_logits = s_aux.to(padded_logits.dtype).reshape(1, num_query_groups, g, 1)
+  if b_actual != 1 or t != 1:
+    sink_logits = sink_logits.expand(b_actual, num_query_groups, g, t)
+  sink_logits = sink_logits.reshape(b_dim, kv_groups_dim, gt, 1)
+  return torch.cat([padded_logits, sink_logits], dim=-1)
+
+
 def scaled_dot_product_attention_transposed(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -36,6 +51,7 @@ def scaled_dot_product_attention_transposed(
     scale: Optional[float] = None,
     softcap: Optional[float] = None,
     alibi_bias: Optional[torch.Tensor] = None,
+    s_aux: Optional[torch.Tensor] = None,
 ):
   """Scaled dot product attention with transposed key and value.
 
@@ -50,6 +66,7 @@ def scaled_dot_product_attention_transposed(
     scale (float): the optional scale factor.
     softcap (float): the optional softcap for the logits.
     alibi_bias (torch.Tensor): optional alibi bias tensor.
+    s_aux (torch.Tensor): optional attention sink logit offset tensor.
 
   Returns:
     The output tensor of scaled_dot_product_attention_transposed.
@@ -95,6 +112,8 @@ def scaled_dot_product_attention_transposed(
     mask = torch.cat(mask_to_bc, dim=-2)  # 1, 1, gt, s
 
   padded_logits = logits + mask
+  if s_aux is not None:
+    padded_logits = _append_sink_logits(padded_logits, s_aux, g)
   # TODO(weiyiw): Re-enable this with when compiler is updated
   if padded_logits.dtype != torch.float32:
     attrs = {"axis": -1}
@@ -107,6 +126,8 @@ def scaled_dot_product_attention_transposed(
   probs = F.softmax(padded_logits, dim=-1)
   if builder is not None:
     probs = builder.mark_outputs(probs)
+  if s_aux is not None:
+    probs = probs[..., :-1]
 
   probs = probs.type_as(key[0] if isinstance(key, tuple) else key)
   if v_ts_idx == 3:
@@ -163,16 +184,23 @@ def transposed_attention(
         " passing the kwargs correctly."
     )
 
+  s_aux = kwargs.get("s_aux", getattr(module, "sinks", None))
   apply_gpu_composites = bool(kwargs.get("apply_gpu_composites", False))
   use_sdpa_composite = bool(
       kwargs.get("use_sdpa_composite", False)
       or kwargs.get("sdpa_use_composite", False)
   )
+  if s_aux is not None:
+    use_sdpa_composite = False
 
   if apply_gpu_composites or use_sdpa_composite:
     is_global = kwargs.get("is_global", None)
     if is_global is None:
-      is_sliding = getattr(module, "is_sliding", False)
+      is_sliding = (
+          getattr(module, "is_sliding", False)
+          or getattr(module, "sliding_window", None) is not None
+          or kwargs.get("sliding_window", None) is not None
+      )
       if hasattr(module, "layer_type"):
         is_sliding = getattr(module, "layer_type", "") == "sliding_attention"
       is_global = not is_sliding
@@ -189,8 +217,8 @@ def transposed_attention(
     past_key_value = kwargs.get("past_key_value", None)
     enable_ring_buffer = bool(kwargs.get("enable_ring_buffer", False))
     layer_idx = getattr(module, "layer_idx", None)
-    use_fused_sdpa_cache_update = bool(
-        kwargs.get("use_fused_sdpa_cache_update", False)
+    use_fused_sdpa_cache_update = (
+        bool(kwargs.get("use_fused_sdpa_cache_update", False)) and s_aux is None
     )
     # Whether this layer leaves the KV cache unwritten. By default KV-shared
     # layers (e.g. Gemma 4) skip, since they reuse a preceding donor layer's
@@ -236,6 +264,7 @@ def transposed_attention(
         skip_cache_update=skip_cache_update,
         use_fused_sdpa_cache_update=use_fused_sdpa_cache_update,
         runtime_param_tensor=kwargs.get("runtime_param_tensor", None),
+        s_aux=s_aux,
     )
     return sdpa_out, None
 
@@ -252,6 +281,7 @@ def transposed_attention(
       mask=attention_mask,
       scale=scaling,
       softcap=softcap,
+      s_aux=s_aux,
   )
   # b, kg, t, h
   sdpa_out = sdpa_out.reshape(b, -1, seq_len, h).permute(0, 2, 1, 3)

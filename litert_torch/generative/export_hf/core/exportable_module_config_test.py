@@ -243,6 +243,8 @@ class ConverterV2OptionsTest(parameterized.TestCase):
       dict(task="image_text_to_text"),
       dict(task="multimodal_lm"),
       dict(task="text_to_speech"),
+      dict(moe_exports_implementation="litert_moe"),
+      dict(moe_exports_implementation="litert_moe_sequential"),
   )
   def test_supported(self, **kwargs):
     config = _config(use_v2=True, delete_in_memory_params=True, **kwargs)
@@ -263,11 +265,6 @@ class ConverterV2OptionsTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       ("task", dict(task="text_to_image"), "task="),
-      (
-          "moe",
-          dict(moe_exports_implementation="litert_moe_sequential"),
-          "moe_exports_implementation",
-      ),
       (
           "mixed_precision",
           dict(experimental_use_mixed_precision=True),

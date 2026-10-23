@@ -320,6 +320,10 @@ def with_tensors(
       return tensors[name]
     return weights_loader(name)
 
+  if hasattr(weights_loader, "close"):
+    load.close = weights_loader.close  # type: ignore[attr-defined]
+  if hasattr(weights_loader, "checkpoint_dir"):
+    load.checkpoint_dir = weights_loader.checkpoint_dir  # type: ignore[attr-defined]
   return load
 
 
@@ -354,7 +358,21 @@ def submodule_weights_loader(
       raise KeyError(name)
     return weights_loader(f"{fqn}.{name.removeprefix(wrapper_prefix)}")
 
+  if hasattr(weights_loader, "close"):
+    load.close = weights_loader.close  # type: ignore[attr-defined]
+  if hasattr(weights_loader, "checkpoint_dir"):
+    load.checkpoint_dir = weights_loader.checkpoint_dir  # type: ignore[attr-defined]
   return load
+
+
+def _flatten_expert_weight(weight: torch.Tensor) -> torch.Tensor:
+  """Converts [experts, out_channels, in_channels] to OHWI delegate layout."""
+  num_experts, out_channels, in_channels = weight.shape
+  return (
+      weight.permute(1, 0, 2)
+      .contiguous()
+      .reshape(out_channels, num_experts, 1, in_channels)
+  )
 
 
 def _has_all_weights(checkpoint_dir: str) -> bool:
@@ -378,16 +396,24 @@ class HFCheckpointWeightsLoader:
   `lm_head` weights are reconstructed from their checkpoint components.
   """
 
-  def __init__(self, model_path: str, tie_word_embeddings: bool = False):
+  def __init__(
+      self,
+      model_path: str,
+      tie_word_embeddings: bool = False,
+      config: Any = None,
+  ):
     """Initializes the loader.
 
     Args:
       model_path: Local checkpoint directory or HuggingFace repo id.
       tie_word_embeddings: Whether `lm_head` shares the embedding table. Only
-        then is a missing `lm_head.weight` served from the embedding table;
-        the two have the same shape, so a wrong fallback would go unnoticed.
+        then is a missing `lm_head.weight` served from the embedding table; the
+        two have the same shape, so a wrong fallback would go unnoticed.
+      config: Optional model config used for architecture-specific parameter
+        adjustments.
     """
     self._tie_word_embeddings = tie_word_embeddings
+    self.config = config
     self._handles: dict[str, Any] = {}
     self._checkpoint_dir = self._resolve_checkpoint_dir(model_path)
     self._weight_map = self._load_weight_map()
@@ -401,6 +427,10 @@ class HFCheckpointWeightsLoader:
         len(self._weight_map),
         self._checkpoint_dir,
     )
+
+  @property
+  def checkpoint_dir(self) -> str:
+    return self._checkpoint_dir
 
   @staticmethod
   def _resolve_checkpoint_dir(model_path: str) -> str:
@@ -467,11 +497,35 @@ class HFCheckpointWeightsLoader:
     ]
     return list(dict.fromkeys(candidates))  # Dedupe, preserving order.
 
+  def _has_candidate(self, param_name: str) -> bool:
+    return any(c in self._weight_map for c in self._candidates(param_name))
+
   def _try_load(self, param_name: str) -> torch.Tensor | None:
     for candidate in self._candidates(param_name):
       if candidate in self._weight_map:
         return self._get(candidate)
+    if param_name.endswith(".self_attn.sinks"):
+      return self._try_load(
+          param_name.removesuffix(".sinks") + ".softmax_offset"
+      )
     return None
+
+  def _stack_per_expert_weights(
+      self, head: str, proj: str
+  ) -> torch.Tensor | None:
+    """Stacks `{head}{i}.{proj}.weight` across experts `i = 0, 1, ...`."""
+    first = self._try_load(f"{head}0.{proj}.weight")
+    if first is None:
+      return None
+    tensors = [first]
+    idx = 1
+    while True:
+      w = self._try_load(f"{head}{idx}.{proj}.weight")
+      if w is None:
+        break
+      tensors.append(w)
+      idx += 1
+    return torch.stack(tensors, dim=0)
 
   def _load_fused(
       self, param_name: str, fused: str, parts: tuple[str, ...]
@@ -484,6 +538,83 @@ class HFCheckpointWeightsLoader:
     if any(t is None for t in tensors):
       return None
     return torch.cat(tensors, dim=0)
+
+  def _load_moe(self, param_name: str) -> torch.Tensor | None:
+    """Reconstructs flattened (`litert_moe`) or split (`litert_moe_sequential`) MoE expert weights."""
+    if param_name.endswith("flattened_gate_weight"):
+      head = param_name.removesuffix("flattened_gate_weight")
+      gate_up = self._try_load(f"{head}gate_up_proj")
+      if gate_up is not None:
+        gate_w, _ = gate_up.chunk(2, dim=1)
+        return _flatten_expert_weight(gate_w)
+      gate_w = self._try_load(f"{head}gate_proj")
+      if gate_w is not None:
+        return _flatten_expert_weight(gate_w)
+      gate_w = self._stack_per_expert_weights(head, "gate_proj")
+      if gate_w is not None:
+        return _flatten_expert_weight(gate_w)
+      return None
+
+    if param_name.endswith("flattened_ff1_weight"):
+      head = param_name.removesuffix("flattened_ff1_weight")
+      gate_up = self._try_load(f"{head}gate_up_proj")
+      if gate_up is not None:
+        _, ff1_w = gate_up.chunk(2, dim=1)
+        return _flatten_expert_weight(ff1_w)
+      ff1_w = self._try_load(f"{head}up_proj")
+      if ff1_w is not None:
+        return _flatten_expert_weight(ff1_w)
+      ff1_w = self._stack_per_expert_weights(head, "up_proj")
+      if ff1_w is not None:
+        return _flatten_expert_weight(ff1_w)
+      return None
+
+    if param_name.endswith("flattened_linear_weight"):
+      head = param_name.removesuffix("flattened_linear_weight")
+      down_w = self._try_load(f"{head}down_proj")
+      if down_w is not None:
+        return _flatten_expert_weight(down_w)
+      down_w = self._stack_per_expert_weights(head, "down_proj")
+      if down_w is not None:
+        return _flatten_expert_weight(down_w)
+      return None
+
+    if param_name.endswith("per_expert_scale"):
+      head = param_name.removesuffix("per_expert_scale")
+      for attr in ("down_proj", "gate_up_proj", "gate_proj"):
+        expert_w = self._try_load(f"{head}{attr}")
+        if expert_w is not None:
+          return torch.ones((1, 1, 1, expert_w.shape[0]), dtype=torch.float32)
+      if self._has_candidate(f"{head}0.down_proj.weight"):
+        num_experts = 1
+        while self._has_candidate(f"{head}{num_experts}.down_proj.weight"):
+          num_experts += 1
+        return torch.ones((1, 1, 1, num_experts), dtype=torch.float32)
+      return None
+
+    for split_attr, source_attr in (
+        ("split_gate_up_proj", "gate_up_proj"),
+        ("split_down_proj", "down_proj"),
+        ("split_gate_up_bias", "gate_up_bias"),
+        ("split_down_bias", "down_bias"),
+    ):
+      head, sep, tail = param_name.rpartition(f"{split_attr}.")
+      if sep and tail.isdigit():
+        source = self._try_load(f"{head}{source_attr}")
+        if source is not None:
+          return source[int(tail)].contiguous()
+        if split_attr == "split_gate_up_proj":
+          gate = self._try_load(f"{head}{tail}.gate_proj.weight")
+          up = self._try_load(f"{head}{tail}.up_proj.weight")
+          if gate is not None and up is not None:
+            return torch.cat([gate, up], dim=0).contiguous()
+        elif split_attr == "split_down_proj":
+          down = self._try_load(f"{head}{tail}.down_proj.weight")
+          if down is not None:
+            return down.contiguous()
+        return None
+
+    return None
 
   def __call__(self, param_name: str) -> torch.Tensor:
     tensor = self._try_load(param_name)
@@ -499,6 +630,8 @@ class HFCheckpointWeightsLoader:
       tensor = self._load_fused(
           param_name, "gate_up_proj", ("gate_proj", "up_proj")
       )
+    if tensor is None:
+      tensor = self._load_moe(param_name)
     if (
         tensor is None
         and self._tie_word_embeddings
@@ -508,6 +641,36 @@ class HFCheckpointWeightsLoader:
       key = next((k for k in _EMBEDDING_KEYS if k in self._weight_map), None)
       if key is not None:
         tensor = self._get(key)
+    if (
+        tensor is None
+        and param_name.endswith("inv_freq")
+        and self.config is not None
+    ):
+      cfg = getattr(self.config, "text_config", None) or self.config
+      if (
+          cfg is not None
+          and hasattr(cfg, "hidden_size")
+          and hasattr(cfg, "num_attention_heads")
+      ):
+        rope_params = getattr(cfg, "rope_parameters", None) or {}
+        if not isinstance(rope_params, dict):
+          rope_params = {}
+        partial_rotary_factor = float(
+            rope_params.get(
+                "partial_rotary_factor",
+                getattr(cfg, "partial_rotary_factor", 1.0),
+            )
+        )
+        head_dim = getattr(cfg, "head_dim", None) or (
+            cfg.hidden_size // cfg.num_attention_heads
+        )
+        dim = int(head_dim * partial_rotary_factor)
+        base = float(
+            rope_params.get("rope_theta", getattr(cfg, "rope_theta", 10000.0))
+        )
+        tensor = 1.0 / (
+            base ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim)
+        )
     if tensor is None:
       raise KeyError(
           f"'{param_name}' not found in checkpoint {self._checkpoint_dir}."
