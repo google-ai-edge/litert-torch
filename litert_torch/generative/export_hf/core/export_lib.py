@@ -220,6 +220,7 @@ def pre_flatten_model_experts(model: nn.Module) -> nn.Module:
         and getattr(module, 'num_experts', None) is not None
     ):
       num_experts = int(getattr(module, 'num_experts'))
+      device = module.gate_up_proj.device
       gate_w, ff1_w = module.gate_up_proj.data.chunk(2, dim=1)
       module.flattened_gate_weight = nn.Parameter(
           moe.flatten_expert_weight(gate_w)
@@ -235,7 +236,9 @@ def pre_flatten_model_experts(model: nn.Module) -> nn.Module:
       delattr(module, 'down_proj')
 
       module.per_expert_scale = nn.Parameter(
-          torch.ones((1, 1, 1, num_experts), dtype=torch.float32),
+          torch.ones(
+              (1, 1, 1, num_experts), dtype=torch.float32, device=device
+          ),
           requires_grad=False,
       )
       gc.collect()
@@ -246,6 +249,7 @@ def pre_flatten_model_experts(model: nn.Module) -> nn.Module:
         and getattr(module, 'num_experts', None) is not None
     ):
       num_experts = int(getattr(module, 'num_experts'))
+      device = module.gate_proj.device
       module.flattened_gate_weight = nn.Parameter(
           moe.flatten_expert_weight(module.gate_proj.data)
       )
@@ -259,7 +263,9 @@ def pre_flatten_model_experts(model: nn.Module) -> nn.Module:
       )
       delattr(module, 'down_proj')
       module.per_expert_scale = nn.Parameter(
-          torch.ones((1, 1, 1, num_experts), dtype=torch.float32),
+          torch.ones(
+              (1, 1, 1, num_experts), dtype=torch.float32, device=device
+          ),
           requires_grad=False,
       )
       gc.collect()
@@ -450,6 +456,14 @@ def load_model(
 
   config._attn_implementation = 'lrt_transposed_attention'  # pylint: disable=protected-access
 
+  if (
+      getattr(config, 'model_type', None) == 'flint'
+      and export_config.moe_exports_implementation is None
+  ):
+    export_config.moe_exports_implementation = (
+        'litert_moe_sequential' if export_config.split_cache else 'litert_moe'
+    )
+
   if export_config.moe_exports_implementation:
     config._experts_implementation = export_config.moe_exports_implementation  # pylint: disable=protected-access
     if hasattr(config, 'text_config'):
@@ -490,6 +504,7 @@ def load_model(
               and output_emb is not None
               and output_emb.weight is input_emb.weight
           ),
+          config=config,
       )
       weights_loader_lib.load_persistent_buffers_(model, weights_loader)
     elif export_config.use_random_weights:
@@ -562,12 +577,6 @@ def load_model(
     except Exception as e:  # pylint: disable=broad-exception-caught
       print(f'Failed to load chat template: {e}')
 
-  if export_config.moe_exports_implementation and export_config.use_v2:
-    if any(_is_moe_experts(m) for m in model.modules()):
-      raise NotImplementedError(
-          '`moe_exports_implementation` (implied by `split_cache`) is not'
-          ' supported for models with experts when `use_v2=True`.'
-      )
   if export_config.moe_exports_implementation == 'litert_moe_sequential':
     model = pre_split_model_experts(model)
   elif export_config.moe_exports_implementation == 'litert_moe':

@@ -16,6 +16,7 @@
 
 from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module
+from litert_torch.generative.export_hf.model_ext.flint import metadata_builder as flint_metadata_builder
 from litert_torch.generative.export_hf.model_ext.gemma3 import metadata_builder as gemma3_metadata_builder
 from litert_torch.generative.export_hf.model_ext.gemma4 import metadata_builder as gemma4_metadata_builder
 import transformers
@@ -35,6 +36,8 @@ def get_metadata_builder(
     return gemma4_metadata_builder.build_llm_metadata
   elif model_config.model_type == 'gemma4_unified':
     return gemma4_metadata_builder.build_llm_metadata
+  elif model_config.model_type == 'flint':
+    return flint_metadata_builder.build_llm_metadata
   else:
     return (
         lambda source_model_artifacts, export_config, exported_model_artifacts, llm_metadata: llm_metadata

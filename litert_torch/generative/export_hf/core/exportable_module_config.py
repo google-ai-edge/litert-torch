@@ -83,6 +83,19 @@ _DTYPE_ALIASES: dict[str, torch.dtype] = {
 }
 
 
+def parse_bool(val: Any, field_name: str) -> bool:
+  """Parses a bool or CLI string ('true'/'false') into a bool."""
+  if isinstance(val, bool):
+    return val
+  if isinstance(val, str):
+    lowered = val.strip().lower()
+    if lowered == "true":
+      return True
+    if lowered == "false":
+      return False
+  raise TypeError(f"{field_name} must be bool, got {type(val).__name__}.")
+
+
 def _parse_dtype(dtype: str) -> torch.dtype:
   """Parses a dtype string (e.g. "bfloat16") into a torch.dtype."""
   parsed = _DTYPE_ALIASES.get(str(dtype).lower().strip())
@@ -233,6 +246,14 @@ class ExportableModuleConfig:
   prefill_length_dim: torch.export.Dim | None = None
   externalize_rope: bool = False
 
+  def _normalize_bool_fields(self):
+    """Normalizes string boolean values passed via python-fire CLI flags."""
+    for field in dataclasses.fields(self):
+      if field.type in (bool, "bool", bool | None, "bool | None"):
+        val = getattr(self, field.name)
+        if val is not None and not isinstance(val, bool):
+          setattr(self, field.name, parse_bool(val, field.name))
+
   def _normalize_sdpa_composite(self):
     """Normalizes `use_sdpa_composite` and resolves GPU optimization flags.
 
@@ -247,7 +268,7 @@ class ExportableModuleConfig:
     )
     legacy_decode = self.extra_kwargs.pop("use_sdpa_composite", None)
     if legacy_decode is not None and not self.use_sdpa_composite:
-      self.use_sdpa_composite = legacy_decode
+      self.use_sdpa_composite = parse_bool(legacy_decode, "use_sdpa_composite")
 
     if legacy_prefill is not None:
       warnings.warn(
@@ -256,7 +277,7 @@ class ExportableModuleConfig:
           DeprecationWarning,
           stacklevel=3,
       )
-      if legacy_prefill:
+      if parse_bool(legacy_prefill, "use_sdpa_composite_for_prefill"):
         self.use_sdpa_composite = True
 
     # Fill every unset flag with the master-switch default first and apply the
@@ -325,6 +346,7 @@ class ExportableModuleConfig:
   def __post_init__(self):
     """Refines configuration based on task-specific rules."""
     self._validate_extra_kwargs()
+    self._normalize_bool_fields()
     self._normalize_sdpa_composite()
     if self.prefill_logits is None:
       self.prefill_logits = bool(
@@ -471,10 +493,6 @@ class ExportableModuleConfig:
         ExportTask.ANY_TO_ANY,
     ):
       unsupported.append(f"task={self.task}")
-    # `split_cache` always sets `litert_moe_sequential`, which only affects
-    # models with experts; those are rejected when the model is loaded.
-    if self.moe_exports_implementation and not self.split_cache:
-      unsupported.append("moe_exports_implementation")
     if self.experimental_use_mixed_precision:
       unsupported.append("experimental_use_mixed_precision")
     if unsupported:

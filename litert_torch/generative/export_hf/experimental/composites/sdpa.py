@@ -72,6 +72,21 @@ def _sync_and_rebind_cache(past_key_value, layer_idx, new_k, new_v):
       l.values = new_v
 
 
+def _append_sink_logits(
+    padded_logits: torch.Tensor, s_aux: torch.Tensor, g: int
+) -> torch.Tensor:
+  """Appends per-head attention sink logits along the key sequence dimension."""
+  b_dim, kv_groups_dim, gt, _ = padded_logits.shape
+  num_query_groups = s_aux.numel() // g
+  b_actual = (b_dim * kv_groups_dim) // num_query_groups
+  t = gt // g
+  sink_logits = s_aux.to(padded_logits.dtype).reshape(1, num_query_groups, g, 1)
+  if b_actual != 1 or t != 1:
+    sink_logits = sink_logits.expand(b_actual, num_query_groups, g, t)
+  sink_logits = sink_logits.reshape(b_dim, kv_groups_dim, gt, 1)
+  return torch.cat([padded_logits, sink_logits], dim=-1)
+
+
 def _commit_cache_update(
     past_key_value, layer, layer_idx, new_k, new_v, rebind_by_layer
 ):
@@ -119,6 +134,7 @@ def ring_buffer_sdpa(
     # it is used (`ring_buffer_sdpa`), and remove `runtime_param_tensor`.
     runtime_param_tensor: Optional[torch.Tensor] = None,
     use_sdpa_composite: bool = False,
+    s_aux: Optional[torch.Tensor] = None,
 ):
   """Ring buffer SDPA.
 
@@ -147,11 +163,12 @@ def ring_buffer_sdpa(
       prefill split path instead of runtime BMMs + `odml.cache_update`, and
       write single-token (decode) ring buffer updates in place. When False the
       traced graph is unchanged from before the fused op existed.
-    runtime_param_tensor: The runtime param signature input, before the
-      in-graph rewrite that produces `param_tensor`. The fused op reads it at
-      runtime; falls back to `param_tensor`.
+    runtime_param_tensor: The runtime param signature input, before the in-graph
+      rewrite that produces `param_tensor`. The fused op reads it at runtime;
+      falls back to `param_tensor`.
     use_sdpa_composite: Whether to wrap non-split (decode) attention in
       odml.sdpa_transposed.
+    s_aux: Optional attention sink logit offset tensor.
   """
   if layer is None and past_key_value is not None and layer_idx is not None:
     layer = past_key_value.layers[layer_idx]
@@ -298,6 +315,8 @@ def ring_buffer_sdpa(
         logits_all,
         torch.tensor(MASK_FILL_VALUE, dtype=logits_all.dtype),
     )
+    if s_aux is not None:
+      padded_logits_all = _append_sink_logits(padded_logits_all, s_aux, g)
 
     attrs = {"axis": -1}
     builder = composite.StableHLOCompositeBuilder(
@@ -306,6 +325,8 @@ def ring_buffer_sdpa(
     padded_logits_all = builder.mark_inputs(padded_logits_all)
     probs_all = F.softmax(padded_logits_all, dim=-1)
     probs_all = builder.mark_outputs(probs_all)
+    if s_aux is not None:
+      probs_all = probs_all[..., :-1]
     probs_all = probs_all.type_as(query)
     probs_past, probs_current = probs_all.split(
         [S_past, probs_all.shape[-1] - S_past], dim=-1
@@ -435,6 +456,8 @@ def ring_buffer_sdpa(
     padded_logits = torch.where(
         mask, logits, torch.tensor(MASK_FILL_VALUE, dtype=logits.dtype)
     )
+    if s_aux is not None:
+      padded_logits = _append_sink_logits(padded_logits, s_aux, g)
     if not use_sdpa_composite:
       attrs = {"axis": -1}
       builder = composite.StableHLOCompositeBuilder(
@@ -446,6 +469,8 @@ def ring_buffer_sdpa(
     probs = F.softmax(padded_logits, dim=-1)
     if builder is not None:
       probs = builder.mark_outputs(probs)
+    if s_aux is not None:
+      probs = probs[..., :-1]
     probs = probs.type_as(query)
     encoded = runtime_batched_matmul.runtime_bmm(
         probs,
@@ -517,6 +542,7 @@ def scaled_dot_product_attention_transposed(
     # rewrite in `core/exportable_module.py`, compute the update length where
     # it is used (`ring_buffer_sdpa`), and remove `runtime_param_tensor`.
     runtime_param_tensor: Optional[torch.Tensor] = None,
+    s_aux: Optional[torch.Tensor] = None,
 ):
   """Scaled dot product attention with transposed key and value.
 
@@ -535,9 +561,9 @@ def scaled_dot_product_attention_transposed(
     is_global (bool): whether the attention is global.
     is_causal (bool): whether `mask` is guaranteed to be purely causal. Emitted
       as an attribute on `odml.sdpa_transposed`; when true the GPU delegate may
-      drop the mask and enforce causality from `param_tensor`. Defaults to
-      False because the mask may encode non-causal patterns (e.g.
-      bidirectional attention over image tokens).
+      drop the mask and enforce causality from `param_tensor`. Defaults to False
+      because the mask may encode non-causal patterns (e.g. bidirectional
+      attention over image tokens).
     use_sdpa_composite (bool): whether to use composite for SDPA.
     enable_ring_buffer (bool): whether to enable ring buffer.
     past_key_value (Any): past key value cache.
@@ -549,6 +575,7 @@ def scaled_dot_product_attention_transposed(
     runtime_param_tensor (torch.Tensor): the runtime param signature input,
       before the in-graph rewrite that produces `param_tensor`; read by the
       fused op.
+    s_aux (torch.Tensor): optional attention sink logit offset tensor.
 
   Returns:
     The output tensor of scaled_dot_product_attention_transposed.
@@ -576,6 +603,9 @@ def scaled_dot_product_attention_transposed(
         else not is_global
     )
 
+  if s_aux is not None:
+    use_sdpa_composite = False
+    use_fused_sdpa_cache_update = False
   b, n, seq_len, h = query.shape
   is_decode_composite = use_sdpa_composite and seq_len == 1
   is_ring_buffer_sdpa = isinstance(key, tuple) or (
@@ -634,6 +664,7 @@ def scaled_dot_product_attention_transposed(
         use_fused_sdpa_cache_update=use_fused_sdpa_cache_update,
         runtime_param_tensor=runtime_param_tensor,
         use_sdpa_composite=is_decode_composite,
+        s_aux=s_aux,
     )
     if is_decode_composite:
       encoded = encoded.reshape(b, 1, n * h)
@@ -720,6 +751,10 @@ def scaled_dot_product_attention_transposed(
     )
   else:
     padded_logits = logits + mask
+  if s_aux is not None:
+    padded_logits = _append_sink_logits(
+        padded_logits, s_aux, g_query_per_kv if pack_inside_composite else g
+    )
 
   if padded_logits.dtype != torch.float32:
     attrs = {"axis": -1}
@@ -732,6 +767,8 @@ def scaled_dot_product_attention_transposed(
   probs = F.softmax(padded_logits, dim=-1)
   if builder is not None:
     probs = builder.mark_outputs(probs)
+  if s_aux is not None:
+    probs = probs[..., :-1]
   probs = probs.type_as(key_past)
   if param_tensor is not None:
     # Do not create nested odml.runtime_bmm composites inside odml.sdpa_transposed.

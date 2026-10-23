@@ -25,4 +25,9 @@ def update_export_config(
     model_config: transformers.PretrainedConfig,
 ) -> exportable_module.ExportableModuleConfig:
   """Updates export config."""
+  if getattr(model_config, "model_type", None) == "flint":
+    if export_config.moe_exports_implementation is None:
+      export_config.moe_exports_implementation = (
+          "litert_moe_sequential" if export_config.split_cache else "litert_moe"
+      )
   return export_config

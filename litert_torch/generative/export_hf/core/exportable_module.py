@@ -34,6 +34,7 @@ embed_tokens_on_cpu = weights_loader.embed_tokens_on_cpu
 # TODO(b/552147487): Gate this via model-specific export configs/extensions
 # rather than an explicit model key allowlist.
 _CAUSAL_TEXT_MODEL_KEYS = frozenset({
+    "flint",
     "gemma2",
     "gemma3_text",
     "gemma4",
