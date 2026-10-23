@@ -16,29 +16,37 @@
 
 from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module
-from litert_torch.generative.export_hf.model_ext.gemma3 import metadata_builder as gemma3_metadata_builder
-from litert_torch.generative.export_hf.model_ext.gemma4 import metadata_builder as gemma4_metadata_builder
+from litert_torch.generative.export_hf.model_ext import builtin_extensions as _  # Registers built-in extensions.
+from litert_torch.generative.export_hf.model_ext import extension as extension_lib
 import transformers
 
 
 def get_metadata_builder(
     model_config: transformers.PretrainedConfig,
+    export_config: exportable_module.ExportableModuleConfig | None = None,
 ):
   """Gets metadata builder."""
-  if model_config.model_type == 'gemma3':
-    return gemma3_metadata_builder.build_llm_metadata
-  elif model_config.model_type == 'gemma3n':
-    return gemma3_metadata_builder.build_llm_metadata
-  elif (
-      model_config.model_type == 'gemma4'
+  ext = extension_lib.resolve_model_extension(model_config, export_config)
+
+  def _combined_builder(
+      source_model_artifacts,
+      cfg,
+      exported_model_artifacts,
+      llm_metadata,
   ):
-    return gemma4_metadata_builder.build_llm_metadata
-  elif model_config.model_type == 'gemma4_unified':
-    return gemma4_metadata_builder.build_llm_metadata
-  else:
-    return (
-        lambda source_model_artifacts, export_config, exported_model_artifacts, llm_metadata: llm_metadata
+    resolved_ext = ext or extension_lib.resolve_model_extension(
+        model_config, cfg
     )
+    if resolved_ext is not None:
+      llm_metadata = resolved_ext.build_llm_metadata(
+          source_model_artifacts,
+          cfg,
+          exported_model_artifacts,
+          llm_metadata,
+      )
+    return llm_metadata
+
+  return _combined_builder
 
 
 try:
@@ -98,6 +106,7 @@ try:
             'apply_gpu_composites', False
         )
     )
+    del apply_gpu_composites
     enable_ring_buffer = (
         getattr(export_config, 'sliding_window_ring_buffer_size', None)
         is not None
@@ -177,7 +186,10 @@ try:
 
     if sliding_window_size is not None and enable_ring_buffer:
       local_mask_type = executor_metadata_pb2.ATTENTION_MASK_TYPE_CAUSAL
-      if getattr(source_model_artifacts.model_config, 'vision_config', None) is not None:
+      if (
+          getattr(source_model_artifacts.model_config, 'vision_config', None)
+          is not None
+      ):
         local_mask_type = (
             executor_metadata_pb2.ATTENTION_MASK_TYPE_VISION_BIDIRECTIONAL
         )
@@ -200,7 +212,12 @@ except ImportError:
 
 def get_executor_metadata_builder(
     model_config: transformers.PretrainedConfig,
+    export_config: exportable_module.ExportableModuleConfig | None = None,
 ):
   """Gets executor metadata builder."""
-  del model_config
+  ext = extension_lib.resolve_model_extension(model_config, export_config)
+  if ext is not None:
+    ext_builder = ext.get_executor_metadata_builder(model_config)
+    if ext_builder is not None:
+      return ext_builder
   return build_executor_metadata

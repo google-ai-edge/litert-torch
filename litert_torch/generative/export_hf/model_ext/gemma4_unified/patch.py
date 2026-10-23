@@ -69,7 +69,7 @@ def gemma4_litert_patch():
   from transformers.models.gemma4_unified import modeling_gemma4_unified  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
 
   original_norm = modeling_gemma4_unified.Gemma4UnifiedRMSNorm
-  modeling_gemma4_unified.Gemma4UnifiedRMSNorm = Gemma4UnifiedRMSNorm
+  modeling_gemma4_unified.Gemma4UnifiedRMSNorm = Gemma4UnifiedRMSNorm  # pyrefly: ignore[bad-assignment]
 
   try:
     yield

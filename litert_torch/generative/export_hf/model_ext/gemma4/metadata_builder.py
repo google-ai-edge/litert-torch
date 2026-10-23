@@ -14,7 +14,8 @@
 # ==============================================================================
 """Metadata builder for Gemma4."""
 
-from litert_torch.generative.export_hf.core import export_lib
+from typing import Any
+
 from litert_torch.generative.export_hf.core import exportable_module
 
 from litert_lm_builder.runtime.proto import llm_metadata_pb2
@@ -22,9 +23,9 @@ from litert_lm_builder.runtime.proto import llm_model_type_pb2
 
 
 def build_llm_metadata(
-    source_model_artifacts: export_lib.SourceModelArtifacts,
+    source_model_artifacts: Any,
     export_config: exportable_module.ExportableModuleConfig,
-    exported_model_artifacts: export_lib.ExportedModelArtifacts,
+    exported_model_artifacts: Any,
     llm_metadata: llm_metadata_pb2.LlmMetadata,
 ) -> llm_metadata_pb2.LlmMetadata:
   """Builds LLM metadata."""

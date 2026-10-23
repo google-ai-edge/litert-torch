@@ -145,6 +145,8 @@ def export(
     model_dtype: str | None = None,
     use_v2: bool = False,
     delete_in_memory_params: bool = False,
+    model_extension: Any = None,
+    extension_modules: list[str] | str | None = None,
     # pylint: enable=unused-argument
     **kwargs,
 ):

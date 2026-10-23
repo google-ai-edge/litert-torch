@@ -224,6 +224,10 @@ class ExportableModuleConfig:
   use_v2: bool = False
   delete_in_memory_params: bool = False
 
+  # Pluggable model extension settings
+  model_extension: Any = None
+  extension_modules: list[str] | tuple[str, ...] | str | None = None
+
   extra_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
 
   # Internal configs
@@ -361,6 +365,13 @@ class ExportableModuleConfig:
     if not self.cache_lengths:
       self.cache_lengths = [self.cache_length]
 
+    if isinstance(self.extension_modules, str):
+      self.extension_modules = [
+          x.strip() for x in self.extension_modules.split(",") if x.strip()
+      ]
+    elif isinstance(self.extension_modules, tuple):
+      self.extension_modules = list(self.extension_modules)
+
     if self.enable_dynamic_shape and len(self.cache_lengths) > 1:
       raise ValueError(
           "Dynamic shape is not supported with multiple cache lengths."
@@ -497,7 +508,10 @@ class ExportableModuleConfig:
   def __repr__(self):
     """Returns a pretty-printed string representation of the config."""
 
-    data = dataclasses.asdict(self)
+    data = {
+        field.name: getattr(self, field.name)
+        for field in dataclasses.fields(self)
+    }
     lines = [f"{' Export Configuration ':=^50}"]
     for key, value in sorted(data.items()):
       val_str = pprint.pformat(value, width=60, compact=True)
