@@ -293,8 +293,14 @@ class LoRA:
           block_config.attn_config.num_heads
           // block_config.attn_config.num_query_groups
       )
-      q_out_dim = q_per_kv * block_config.attn_config.head_dim
-      k_out_dim = v_out_dim = block_config.attn_config.head_dim
+      q_out_dim = (
+          block_config.attn_config.num_heads
+          * block_config.attn_config.head_dim
+      )
+      k_out_dim = v_out_dim = (
+          block_config.attn_config.num_query_groups
+          * block_config.attn_config.head_dim
+      )
       attention_lora = AttentionLoRA(
           query=LoRAWeight(
               a_prime=tensor_generator((config.embedding_dim, rank), dtype),
