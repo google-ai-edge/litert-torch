@@ -268,7 +268,9 @@ def pre_flatten_model_experts(model: nn.Module) -> nn.Module:
 
 
 def _load_tts_config(
-    model_path: str, trust_remote_code: bool
+    model_path: str,
+    trust_remote_code: bool,
+    export_config: exportable_module.ExportableModuleConfig | None = None,
 ) -> transformers.PretrainedConfig:
   """Loads the config of a text-to-speech model.
 
@@ -279,6 +281,7 @@ def _load_tts_config(
   Args:
     model_path: HF repo id or local checkpoint directory.
     trust_remote_code: Whether to trust remote code.
+    export_config: Optional export config carrying extension registrations.
 
   Returns:
     The model config, with `model_type` set.
@@ -299,12 +302,17 @@ def _load_tts_config(
         model_path, trust_remote_code=trust_remote_code
     )
   except OSError:
-    if model_ext_exportables.infer_tts_model_type({}, model_path) is None:
+    if (
+        model_ext_exportables.infer_tts_model_type(
+            {}, model_path, export_config
+        )
+        is None
+    ):
       raise
     config_dict = {}
   if 'model_type' not in config_dict:
     inferred = model_ext_exportables.infer_tts_model_type(
-        config_dict, model_path
+        config_dict, model_path, export_config
     )
     if inferred is not None:
       config_dict['model_type'] = inferred
@@ -320,6 +328,8 @@ def load_model(
     task: ExportTask | str = ExportTask.TEXT_GENERATION,
 ) -> SourceModelArtifacts:
   """Loads model from checkpoint."""
+  if getattr(export_config, 'extension_modules', None):
+    model_ext_extension.load_extension_modules(export_config.extension_modules)
   # Handle TEXT_TO_IMAGE before transformers.AutoConfig.from_pretrained()
   # because Diffusers multi-component pipeline directories (e.g. FLUX.2) use a
   # top-level model_index.json with component subdirectories rather than a
@@ -334,20 +344,35 @@ def load_model(
     if not model_type:
       model_index_path = os.path.join(local_model_dir, 'model_index.json')
       config_path = os.path.join(local_model_dir, 'config.json')
-      # prism-ml/bonsai-image-ternary-4B-unpacked also sets
-      # "_class_name": "Flux2KleinPipeline" in its model_index.json, so check
-      # for "bonsai" in model_path before reading model_index.json.
-      if 'bonsai' in model_path.lower():
-        model_type = 'bonsai_flux2'
-      elif os.path.exists(model_index_path):
+      raw_cfg = None
+      if os.path.exists(model_index_path):
         with open(model_index_path, 'r') as f:
-          model_type = json.load(f).get('_class_name', 'bonsai_flux2')
+          raw_cfg = json.load(f)
       elif os.path.exists(config_path):
         with open(config_path, 'r') as f:
-          model_type = json.load(f).get('model_type', 'bonsai_flux2')
+          raw_cfg = json.load(f)
+      inferred = model_ext_exportables.infer_model_type(
+          model_path=model_path,
+          task=task,
+          config_dict=raw_cfg,
+          export_config=export_config,
+      )
+      if inferred:
+        model_type = inferred
+      elif 'bonsai' in model_path.lower():
+        model_type = 'bonsai_flux2'
+      elif raw_cfg and '_class_name' in raw_cfg:
+        model_type = raw_cfg.get('_class_name', 'bonsai_flux2')
+      elif raw_cfg and 'model_type' in raw_cfg:
+        model_type = raw_cfg.get('model_type', 'bonsai_flux2')
       else:
         model_type = 'bonsai_flux2'
-    model_cls = model_ext_exportables.get_image_gen_model_cls(model_type)
+    if getattr(export_config, 'model_extension', None) is not None:
+      model_cls = model_ext_exportables.get_image_gen_model_cls(
+          model_type, export_config
+      )
+    else:
+      model_cls = model_ext_exportables.get_image_gen_model_cls(model_type)
     model = model_cls(local_model_dir, export_config=export_config)
     tok_dir = os.path.join(model.model_dir, 'tokenizer')
     if not os.path.exists(tok_dir):
@@ -372,12 +397,28 @@ def load_model(
     model_type = export_config.litert_lm_model_type_override
     if not model_type:
       config_path = os.path.join(local_model_dir, 'config.json')
+      raw_cfg = None
       if os.path.exists(config_path):
         with open(config_path, 'r') as f:
-          model_type = json.load(f).get('model_type', 'minicpmo')
+          raw_cfg = json.load(f)
+      inferred = model_ext_exportables.infer_model_type(
+          model_path=model_path,
+          task=task,
+          config_dict=raw_cfg,
+          export_config=export_config,
+      )
+      if inferred:
+        model_type = inferred
+      elif raw_cfg and 'model_type' in raw_cfg:
+        model_type = raw_cfg.get('model_type', 'minicpmo')
       else:
         model_type = 'minicpmo'
-    model_cls = model_ext_exportables.get_any2any_model_cls(model_type)
+    if getattr(export_config, 'model_extension', None) is not None:
+      model_cls = model_ext_exportables.get_any2any_model_cls(
+          model_type, export_config
+      )
+    else:
+      model_cls = model_ext_exportables.get_any2any_model_cls(model_type)
     model = model_cls(local_model_dir, export_config=export_config)
     try:
       tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -399,8 +440,10 @@ def load_model(
     )
 
   if task == ExportTask.TEXT_TO_SPEECH:
-    config = _load_tts_config(model_path, trust_remote_code)
-    model_cls = model_ext_exportables.get_tts_model_cls(config.model_type)
+    config = _load_tts_config(model_path, trust_remote_code, export_config)
+    model_cls = model_ext_exportables.get_tts_model_cls(
+        config.model_type, export_config
+    )
     model = model_cls(model_path, export_config=export_config)
     try:
       tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -438,7 +481,9 @@ def load_model(
     config.text_config.allow_global_per_layer_attribute_access = True
 
   if task == ExportTask.AUTOMATIC_SPEECH_RECOGNITION:
-    model_cls = model_ext_exportables.get_speech_model_cls(config.model_type)
+    model_cls = model_ext_exportables.get_speech_model_cls(
+        config.model_type, export_config
+    )
     model = model_cls(model_path, override_transformers=True)
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
     return SourceModelArtifacts(
@@ -473,7 +518,7 @@ def load_model(
 
   weights_loader = None
   model_dtype = export_config.get_torch_dtype()
-  with model_ext_patches.get_patch_context(config.model_type):
+  with model_ext_patches.get_patch_context(config.model_type, export_config):
     if export_config.use_v2 and not export_config.use_random_weights:
       with weights_loader_lib.init_params_on_meta():
         model = auto_model_cls.from_config(
@@ -951,7 +996,7 @@ def export_vision_encoder_models(
 
   model.set_attn_implementation('eager')
   encoder_module_cls, adapter_module_cls, eoi_module_cls = (
-      model_ext_exportables.get_vision_exportables(model_config)
+      model_ext_exportables.get_vision_exportables(model_config, export_config)
   )
   encode_module = encoder_module_cls(model, export_config)
   if adapter_module_cls is not None:
@@ -1053,7 +1098,7 @@ def export_audio_encoder_models_for_llm(
 
   model.set_attn_implementation('eager')
   encoder_module_cls, adapter_module_cls, eoa_module_cls = (
-      model_ext_exportables.get_audio_exportables(model_config)
+      model_ext_exportables.get_audio_exportables(model_config, export_config)
   )
   encode_module = encoder_module_cls(model, export_config)
   adapter_module = (
@@ -1150,7 +1195,9 @@ def export_audio_encoder_models(
         asr_model_obj, export_config
     )
   else:
-    exportables = model_ext_exportables.get_speech_exportables(model_config)
+    exportables = model_ext_exportables.get_speech_exportables(
+        model_config, export_config
+    )
     encode_module_cls = exportables[0]
     encode_module = encode_module_cls(asr_model_obj, export_config)
 
@@ -1213,7 +1260,9 @@ def export_asr_models(
   quantization_recipe = export_config.quantization_recipe
   work_dir = export_config.work_dir
 
-  exportables = model_ext_exportables.get_speech_exportables(model_config)
+  exportables = model_ext_exportables.get_speech_exportables(
+      model_config, export_config
+  )
   encode_module_cls = exportables[0]
   decode_module_cls: Any = exportables[1] if len(exportables) > 1 else None
 
@@ -1443,7 +1492,7 @@ def export_additional_models(
 ) -> ExportedModelArtifacts:
   """Exports embedder."""
   exportable_model_cls_dict = model_ext_exportables.get_additional_exportables(
-      source_model_artifacts.model_config
+      source_model_artifacts.model_config, export_config
   )
   for name, exportable_module_cls in exportable_model_cls_dict.items():
     with progress.task(f'Export {name} model'):

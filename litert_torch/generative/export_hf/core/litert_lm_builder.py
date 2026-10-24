@@ -22,6 +22,7 @@ from litert_torch import progress
 from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.experimental.minijinja_transpile import transpile as transpile_lib
+from litert_torch.generative.export_hf.model_ext import extension as extension_lib
 from litert_torch.generative.export_hf.model_ext import metadata_builder as metadata_builder_lib
 
 import litert_lm_builder as litertlm_builder
@@ -349,47 +350,66 @@ def build_llm_metadata(
       or getattr(text_cfg, 'model_type', getattr(model_cfg, 'model_type', ''))
   )
 
-  match (model_type):
-    case 'qwen3' | 'qwen3_text' | 'qwen3_asr' | 'qwen3_5' | 'qwen3_5_text':
-      llm_metadata.llm_model_type.CopyFrom(
-          llm_model_type_pb2.LlmModelType(qwen3=llm_model_type_pb2.Qwen3())
-      )
-    case 'qwen2' | 'qwen2p5':
-      llm_metadata.llm_model_type.CopyFrom(
-          llm_model_type_pb2.LlmModelType(qwen2p5=llm_model_type_pb2.Qwen2p5())
-      )
-    case 'lfm2' | 'lfm2_vl':
-      llm_metadata.llm_model_type.CopyFrom(
-          llm_model_type_pb2.LlmModelType(lfm2=llm_model_type_pb2.Lfm2())
-      )
-    case 'gemma3' | 'gemma3_text':
-      llm_metadata.llm_model_type.CopyFrom(
-          llm_model_type_pb2.LlmModelType(gemma3=llm_model_type_pb2.Gemma3())
-      )
-    case 'function_gemma':
-      llm_metadata.llm_model_type.CopyFrom(
-          llm_model_type_pb2.LlmModelType(
-              function_gemma=llm_model_type_pb2.FunctionGemma()
-          )
-      )
-    case 'gemma3n':
-      llm_metadata.llm_model_type.CopyFrom(
-          llm_model_type_pb2.LlmModelType(gemma3n=llm_model_type_pb2.Gemma3N())
-      )
-    case 'gemma4' | 'gemma4_text':
-      llm_metadata.llm_model_type.CopyFrom(
-          llm_model_type_pb2.LlmModelType(gemma4=llm_model_type_pb2.Gemma4())
-      )
-    case _:
-      llm_metadata.llm_model_type.CopyFrom(
-          llm_model_type_pb2.LlmModelType(
-              generic_model=llm_model_type_pb2.GenericModel()
-          )
-      )
+  ext = (
+      extension_lib.resolve_model_extension(model_cfg, export_config)
+      if not litert_lm_model_type_override
+      else None
+  )
+  ext_model_type_proto = (
+      ext.get_llm_model_type_proto(model_cfg, export_config)
+      if ext is not None
+      else None
+  )
+  if ext_model_type_proto is not None:
+    llm_metadata.llm_model_type.CopyFrom(ext_model_type_proto)
+  else:
+    match (model_type):
+      case 'qwen3' | 'qwen3_text' | 'qwen3_asr' | 'qwen3_5' | 'qwen3_5_text':
+        llm_metadata.llm_model_type.CopyFrom(
+            llm_model_type_pb2.LlmModelType(qwen3=llm_model_type_pb2.Qwen3())
+        )
+      case 'qwen2' | 'qwen2p5':
+        llm_metadata.llm_model_type.CopyFrom(
+            llm_model_type_pb2.LlmModelType(
+                qwen2p5=llm_model_type_pb2.Qwen2p5()
+            )
+        )
+      case 'lfm2' | 'lfm2_vl':
+        llm_metadata.llm_model_type.CopyFrom(
+            llm_model_type_pb2.LlmModelType(lfm2=llm_model_type_pb2.Lfm2())
+        )
+      case 'gemma3' | 'gemma3_text':
+        llm_metadata.llm_model_type.CopyFrom(
+            llm_model_type_pb2.LlmModelType(gemma3=llm_model_type_pb2.Gemma3())
+        )
+      case 'function_gemma':
+        llm_metadata.llm_model_type.CopyFrom(
+            llm_model_type_pb2.LlmModelType(
+                function_gemma=llm_model_type_pb2.FunctionGemma()
+            )
+        )
+      case 'gemma3n':
+        llm_metadata.llm_model_type.CopyFrom(
+            llm_model_type_pb2.LlmModelType(
+                gemma3n=llm_model_type_pb2.Gemma3N()
+            )
+        )
+      case 'gemma4' | 'gemma4_text':
+        llm_metadata.llm_model_type.CopyFrom(
+            llm_model_type_pb2.LlmModelType(gemma4=llm_model_type_pb2.Gemma4())
+        )
+      case _:
+        llm_metadata.llm_model_type.CopyFrom(
+            llm_model_type_pb2.LlmModelType(
+                generic_model=llm_model_type_pb2.GenericModel()
+            )
+        )
 
   # Model specific metadata builders.
   if not litert_lm_model_type_override:
-    metadata_builder = metadata_builder_lib.get_metadata_builder(model.config)  # pyrefly: ignore[bad-argument-type]
+    metadata_builder = metadata_builder_lib.get_metadata_builder(
+        model_cfg, export_config  # pyrefly: ignore[bad-argument-type]
+    )
     llm_metadata = metadata_builder(
         source_model_artifacts,
         export_config,
@@ -460,15 +480,22 @@ def package_image_gen_model(
     else:
       builder.add_sentencepiece_tokenizer(tokenizer_model_path)
 
+  ext = extension_lib.resolve_model_extension(
+      source_model_artifacts.model_config, export_config
+  )
+  section_types = dict(_IMAGE_GEN_TFLITE_MODEL_TYPES)
+  if ext is not None:
+    section_types.update(ext.get_litert_lm_section_types())
+
   if exported_model_artifacts.additional_model_paths:
     for (
         name,
         submodel_path,
     ) in exported_model_artifacts.additional_model_paths.items():
-      if name in _IMAGE_GEN_TFLITE_MODEL_TYPES:
+      if name in section_types:
         builder.add_tflite_model(
             submodel_path,
-            _IMAGE_GEN_TFLITE_MODEL_TYPES[name],
+            section_types[name],
         )
       elif submodel_path.endswith('.bin'):
         builder.add_generic_binary_data(
@@ -538,15 +565,22 @@ def package_any2any_model(
     else:
       builder.add_sentencepiece_tokenizer(tokenizer_model_path)
 
+  ext = extension_lib.resolve_model_extension(
+      source_model_artifacts.model_config, export_config
+  )
+  section_types = dict(_ANY2ANY_TFLITE_MODEL_TYPES)
+  if ext is not None:
+    section_types.update(ext.get_litert_lm_section_types())
+
   if exported_model_artifacts.additional_model_paths:
     for (
         name,
         submodel_path,
     ) in exported_model_artifacts.additional_model_paths.items():
-      if name in _ANY2ANY_TFLITE_MODEL_TYPES:
+      if name in section_types:
         builder.add_tflite_model(
             submodel_path,
-            _ANY2ANY_TFLITE_MODEL_TYPES[name],
+            section_types[name],
         )
       elif submodel_path.endswith('.bin'):
         builder.add_generic_binary_data(
@@ -648,7 +682,7 @@ def package_model(
   )
   executor_metadata_builder = (
       metadata_builder_lib.get_executor_metadata_builder(
-          model_cfg
+          model_cfg, export_config
       )
   )
   if executor_metadata_builder:
