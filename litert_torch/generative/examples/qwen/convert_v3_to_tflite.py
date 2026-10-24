@@ -19,7 +19,9 @@ from absl import app
 from litert_torch.generative.examples.qwen import qwen3
 from litert_torch.generative.utilities import converter
 
-flags = converter.define_conversion_flags('qwen')
+flags = converter.define_conversion_flags(
+    'qwen', default_transpose_kv_cache=True
+)
 
 _MODEL_SIZE = flags.DEFINE_enum(
     'model_size',
