@@ -24,6 +24,7 @@ compose built-in extensions directly (e.g.
 """
 
 from litert_torch.generative.export_hf.model_ext.bonsai_flux2 import extension as bonsai_flux2_ext
+from litert_torch.generative.export_hf.model_ext.falcon_h1 import extension as falcon_h1_ext
 from litert_torch.generative.export_hf.model_ext.flux2_klein import extension as flux2_klein_ext
 from litert_torch.generative.export_hf.model_ext.gemma3 import extension as gemma3_ext
 from litert_torch.generative.export_hf.model_ext.gemma3n import extension as gemma3n_ext
@@ -42,8 +43,10 @@ from litert_torch.generative.export_hf.model_ext.qwen3_5 import extension as qwe
 from litert_torch.generative.export_hf.model_ext.qwen3_tts import extension as qwen3_tts_ext
 from litert_torch.generative.export_hf.model_ext.qwen_omni import extension as qwen_omni_ext
 from litert_torch.generative.export_hf.model_ext.whisper import extension as whisper_ext
+from litert_torch.generative.export_hf.model_ext.zamba2 import extension as zamba2_ext
 
 BonsaiFlux2Extension = bonsai_flux2_ext.BonsaiFlux2Extension
+FalconH1Extension = falcon_h1_ext.FalconH1Extension
 Flux2KleinExtension = flux2_klein_ext.Flux2KleinExtension
 Gemma3Extension = gemma3_ext.Gemma3Extension
 Gemma3nExtension = gemma3n_ext.Gemma3nExtension
@@ -66,3 +69,4 @@ Qwen3TtsExtension = qwen3_tts_ext.Qwen3TtsExtension
 Qwen3_5Extension = qwen3_5_ext.Qwen3_5Extension
 QwenOmniExtension = qwen_omni_ext.QwenOmniExtension
 WhisperExtension = whisper_ext.WhisperExtension
+Zamba2Extension = zamba2_ext.Zamba2Extension
