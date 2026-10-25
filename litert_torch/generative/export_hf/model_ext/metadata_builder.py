@@ -14,6 +14,7 @@
 # ==============================================================================
 """Exportable modules for extended modules."""
 
+from litert_torch.generative.export_hf.core import cache as cache_lib
 from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.model_ext.gemma3 import metadata_builder as gemma3_metadata_builder
@@ -162,6 +163,9 @@ try:
             maximum_sequence_length=local_cache_length,
             minimum_sequence_length=sliding_window_size,
         )
+      elif layer_type in cache_lib.STATELESS_LAYER_TYPES:
+        # Keeps no state, e.g. NemotronH MLP and MoE blocks.
+        continue
       else:
         raise ValueError(f'Unsupported layer type: {layer_type}')
 

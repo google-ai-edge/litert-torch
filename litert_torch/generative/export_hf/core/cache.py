@@ -470,6 +470,50 @@ class LiteRTLMCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
     return self
 
 
+def _mamba2_state_shapes(
+    model_config, batch_size: int
+) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
+  """Returns the (conv, recurrent) state shapes of a Mamba2 mixer layer.
+
+  transformers types Mamba2 mixer layers as "linear_attention", like the Qwen3.5
+  gated delta net, but sizes them from the Mamba2 config fields.
+  GraniteMoeHybrid spells them `mamba_n_heads` / `mamba_d_head` /
+  `mamba_d_state` / `mamba_n_groups` / `mamba_d_conv`, NemotronH
+  `mamba_num_heads` / `mamba_head_dim` / `ssm_state_size` / `n_groups` /
+  `conv_kernel`.
+
+  Args:
+    model_config: The (text) model config.
+    batch_size: The batch size of the cache.
+
+  Returns:
+    The conv state shape `(B, conv_dim, conv_kernel - 1)` and the recurrent
+    state shape `(B, num_heads, head_dim, state_size)`, or None if the config
+    has no Mamba2 fields.
+  """
+  if getattr(model_config, "linear_key_head_dim", None) is not None:
+    return None
+  if hasattr(model_config, "mamba_n_heads"):
+    num_heads = model_config.mamba_n_heads
+    head_dim = model_config.mamba_d_head
+    state_size = model_config.mamba_d_state
+    n_groups = model_config.mamba_n_groups
+    conv_kernel = model_config.mamba_d_conv
+  elif hasattr(model_config, "mamba_num_heads"):
+    num_heads = model_config.mamba_num_heads
+    head_dim = model_config.mamba_head_dim
+    state_size = model_config.ssm_state_size
+    n_groups = model_config.n_groups
+    conv_kernel = model_config.conv_kernel
+  else:
+    return None
+  conv_dim = num_heads * head_dim + 2 * n_groups * state_size
+  return (
+      (batch_size, conv_dim, conv_kernel - 1),
+      (batch_size, num_heads, head_dim, state_size),
+  )
+
+
 class LiteRTLMConvCacheLayer(
     cache_base_lib.LiteRTLMCacheLayerMixin,
     cache_utils.LinearAttentionCacheLayerMixin,
@@ -621,25 +665,31 @@ class LiteRTLMConvCacheLayer(
           **kwargs,
       )
     else:
-      key_dim = (
-          model_config.linear_key_head_dim * model_config.linear_num_key_heads
-      )
-      value_dim = (
-          model_config.linear_value_head_dim
-          * model_config.linear_num_value_heads
-      )
-      conv_dim = key_dim * 2 + value_dim
-      conv_cache_len = model_config.linear_conv_kernel_dim - 1
-      c_state_shape = (batch_size, conv_dim, conv_cache_len)
-      r_state_shape = (
-          batch_size,
-          model_config.linear_num_value_heads,
-          model_config.linear_key_head_dim,
-          model_config.linear_value_head_dim,
-      )
+      mamba2_shapes = _mamba2_state_shapes(model_config, batch_size)
+      if mamba2_shapes is not None:
+        c_state_shape, r_state_shape = mamba2_shapes
+      else:
+        key_dim = (
+            model_config.linear_key_head_dim
+            * model_config.linear_num_key_heads
+        )
+        value_dim = (
+            model_config.linear_value_head_dim
+            * model_config.linear_num_value_heads
+        )
+        conv_dim = key_dim * 2 + value_dim
+        conv_cache_len = model_config.linear_conv_kernel_dim - 1
+        c_state_shape = (batch_size, conv_dim, conv_cache_len)
+        r_state_shape = (
+            batch_size,
+            model_config.linear_num_value_heads,
+            model_config.linear_key_head_dim,
+            model_config.linear_value_head_dim,
+        )
       c_state = torch.zeros(c_state_shape, dtype=cache_dtype)
-      # The recurrent state is always float32: the gated delta update
-      # accumulates across the whole sequence and is computed in float32.
+      # The recurrent state is always float32: the gated delta update and the
+      # Mamba2 selective scan accumulate across the whole sequence and are
+      # computed in float32.
       r_state = torch.zeros(r_state_shape, dtype=torch.float32)
       return cls(
           conv_states=c_state,
@@ -671,11 +721,84 @@ class LiteRTLMConvCacheLayer(
     return self
 
 
+# Layer types that keep no state across steps (NemotronH MLP and MoE blocks).
+STATELESS_LAYER_TYPES = ("mlp", "moe")
+
+
+class LiteRTLMStatelessCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
+  """Cache layer for a layer type that keeps no state, e.g. NemotronH `mlp`.
+
+  It keeps `LiteRTLMCache.layers` indexed by absolute layer index, which the
+  attention and Mamba2 layers use to address their own cache entries, and it
+  flattens to no tensors: no signature inputs or outputs, no state buffers.
+  """
+
+  is_compileable = True
+  is_sliding = False
+
+  def __init__(self, layer_type: str, batch_size: int = 1, **kwargs):
+    super().__init__()
+    assert layer_type in STATELESS_LAYER_TYPES
+    self.layer_type = layer_type
+    self.batch_size = batch_size
+    self.is_initialized = True
+
+  def get_batch_size(self) -> int:
+    return self.batch_size
+
+  def get_k_ts_idx(self) -> int:
+    # Not used.
+    return 2
+
+  def get_v_ts_idx(self) -> int:
+    # Not used.
+    return 3
+
+  def lazy_initialization(self, *args, **kwargs):
+    raise NotImplementedError("Lazy initialization is not supported.")
+
+  def update(self, key_states, value_states, *args, **kwargs):
+    raise ValueError(
+        f"Cannot call update on a stateless `{self.layer_type}` cache layer."
+    )
+
+  def get_mask_sizes(self, cache_position: torch.Tensor):
+    return 0, 0
+
+  def get_seq_length(self) -> int:
+    return 0
+
+  def get_max_cache_shape(self) -> int:
+    return 0
+
+  def get_max_length(self) -> int:
+    return -1
+
+  @classmethod
+  def create_from_config(
+      cls,
+      model_config,
+      layer_index,
+      export_config: ExportableModuleConfig,
+      **kwargs,
+  ) -> "LiteRTLMStatelessCacheLayer":
+    batch_size = kwargs.pop("batch_size", export_config.batch_size)
+    return cls(
+        layer_type=model_config.layer_types[layer_index],
+        batch_size=batch_size,
+    )
+
+  def to(self, *args, **kwargs) -> "LiteRTLMStatelessCacheLayer":
+    return self
+
+
 LAYER_TYPE_TO_CLASS = {
     "full_attention": LiteRTLMCacheLayer,
     "sliding_attention": LiteRTLMCacheLayer,
     "conv": LiteRTLMConvCacheLayer,
     "linear_attention": LiteRTLMConvCacheLayer,
+    "mlp": LiteRTLMStatelessCacheLayer,
+    "moe": LiteRTLMStatelessCacheLayer,
 }
 
 
@@ -774,6 +897,9 @@ def _flatten_kvc_t(
       flat_names.append(f"k_{i}")
       flattened.append(layer.values)
       flat_names.append(f"v_{i}")
+    elif layer_types[i] in STATELESS_LAYER_TYPES:
+      # Keeps the layer index; owns no tensors.
+      pass
     else:
       raise ValueError(f"Unsupported layer type: {type(layer)}")
   return flattened, (
@@ -823,6 +949,12 @@ def _unflatten_kvc_t(
               k_ts_idx=k_ts_idx,
               v_ts_idx=v_ts_idx,
               layer_type=layer_types[i],
+          )
+      )
+    elif layer_type in STATELESS_LAYER_TYPES:
+      layers.append(
+          LiteRTLMStatelessCacheLayer(
+              layer_type=layer_type, batch_size=batch_size
           )
       )
     else:

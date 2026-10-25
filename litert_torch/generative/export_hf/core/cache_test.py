@@ -339,6 +339,90 @@ class CacheTest(googletest.TestCase):
         )
     )
 
+  def test_mamba2_and_stateless_cache_layers(self):
+    class MockGraniteMoeHybridConfig:
+
+      def __init__(self):
+        self.num_hidden_layers = 2
+        self.layer_types = ["linear_attention", "full_attention"]
+        self.hidden_size = 64
+        self.num_attention_heads = 4
+        self.num_key_value_heads = 2
+        self.head_dim = 16
+        self.mamba_n_heads = 8
+        self.mamba_d_head = 16
+        self.mamba_d_state = 32
+        self.mamba_n_groups = 2
+        self.mamba_d_conv = 4
+
+    class MockNemotronHConfig:
+
+      def __init__(self):
+        self.num_hidden_layers = 4
+        self.layer_types = [
+            "linear_attention",
+            "mlp",
+            "full_attention",
+            "moe",
+        ]
+        self.hidden_size = 64
+        self.num_attention_heads = 4
+        self.num_key_value_heads = 2
+        self.head_dim = 16
+        self.mamba_num_heads = 8
+        self.mamba_head_dim = 16
+        self.ssm_state_size = 32
+        self.n_groups = 2
+        self.conv_kernel = 4
+
+    class MockExportConfig:
+
+      def __init__(self):
+        self.batch_size = 1
+        self.cache_length = 128
+        self.k_ts_idx = 2
+        self.v_ts_idx = 3
+
+      def get_cache_dtype(self):
+        return torch.float32
+
+    export_config = MockExportConfig()
+    for model_config, expected_names in (
+        (MockGraniteMoeHybridConfig(), ["c_0", "r_0", "k_1", "v_1"]),
+        (MockNemotronHConfig(), ["c_0", "r_0", "k_2", "v_2"]),
+    ):
+      kv_cache = cache_lib.LiteRTLMCache.create_from_config(
+          model_config, export_config
+      )
+      self.assertLen(kv_cache.layers, model_config.num_hidden_layers)
+      conv_layer = kv_cache.layers[0]
+      self.assertIsInstance(conv_layer, cache_lib.LiteRTLMConvCacheLayer)
+      # conv_dim = heads * head_dim + 2 * groups * state_size, width kernel - 1.
+      self.assertEqual(
+          conv_layer.conv_states.shape, (1, 8 * 16 + 2 * 2 * 32, 3)
+      )
+      self.assertEqual(conv_layer.recurrent_states.shape, (1, 8, 16, 32))
+      self.assertEqual(conv_layer.recurrent_states.dtype, torch.float32)
+
+      flattened, context = cache_lib._flatten_kvc_t(kv_cache)
+      self.assertEqual(context[0], expected_names)
+      self.assertLen(flattened, 4)
+      unflattened = cache_lib._unflatten_kvc_t(flattened, context)
+      self.assertEqual(
+          [type(layer) for layer in unflattened.layers],
+          [type(layer) for layer in kv_cache.layers],
+      )
+
+    stateless_layer = kv_cache.layers[1]
+    self.assertIsInstance(
+        stateless_layer, cache_lib.LiteRTLMStatelessCacheLayer
+    )
+    self.assertEqual(stateless_layer.layer_type, "mlp")
+    self.assertEqual(unflattened.layers[3].layer_type, "moe")
+    with self.assertRaises(ValueError):
+      stateless_layer.update(torch.zeros(1), torch.zeros(1))
+    self.assertEqual(kv_cache.max_cache_len, 128)
+
 
 if __name__ == "__main__":
   googletest.main()
