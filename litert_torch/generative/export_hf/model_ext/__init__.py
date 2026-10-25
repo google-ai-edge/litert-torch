@@ -14,18 +14,22 @@
 # ==============================================================================
 """Export HF model extensions."""
 
+from litert_torch.generative.export_hf.model_ext.falcon_h1 import patch as _
 from litert_torch.generative.export_hf.model_ext.gemma3 import patch as _
 from litert_torch.generative.export_hf.model_ext.gemma3n import patch as _
 from litert_torch.generative.export_hf.model_ext.gemma4 import patch as _
 from litert_torch.generative.export_hf.model_ext.gemma4_unified import patch as _
+from litert_torch.generative.export_hf.model_ext.granitemoehybrid import patch as _
 from litert_torch.generative.export_hf.model_ext.lfm2 import patch as _
 from litert_torch.generative.export_hf.model_ext.lfm2_vl import patch as _
 from litert_torch.generative.export_hf.model_ext.moonshine import patch as _
+from litert_torch.generative.export_hf.model_ext.nemotron_h import patch as _
 from litert_torch.generative.export_hf.model_ext.parakeet import patch as _
 from litert_torch.generative.export_hf.model_ext.qwen3 import patch as _
 from litert_torch.generative.export_hf.model_ext.qwen3_5 import patch as _
 from litert_torch.generative.export_hf.model_ext.qwen3_tts import patch as _
 from litert_torch.generative.export_hf.model_ext.whisper import patch as _
+from litert_torch.generative.export_hf.model_ext.zamba2 import patch as _
 from litert_torch.generative.layers import moe
 
 try:

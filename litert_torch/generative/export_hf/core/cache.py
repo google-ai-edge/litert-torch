@@ -470,6 +470,57 @@ class LiteRTLMCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
     return self
 
 
+def _mamba2_state_shapes(
+    model_config, batch_size: int
+) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
+  """Returns the (conv, recurrent) state shapes of a Mamba2 mixer layer.
+
+  transformers types Mamba2 mixer layers as "linear_attention", like the Qwen3.5
+  gated delta net, but sizes them from the Mamba2 config fields.
+  GraniteMoeHybrid and FalconH1 spell them `mamba_n_heads` / `mamba_d_head` /
+  `mamba_d_state` / `mamba_n_groups` / `mamba_d_conv`, NemotronH
+  `mamba_num_heads` / `mamba_head_dim` / `ssm_state_size` / `n_groups` /
+  `conv_kernel`, Zamba2 `n_mamba_heads` / `mamba_headdim` / `mamba_d_state` /
+  `mamba_ngroups` / `mamba_d_conv`.
+
+  Args:
+    model_config: The (text) model config.
+    batch_size: The batch size of the cache.
+
+  Returns:
+    The conv state shape `(B, conv_dim, conv_kernel - 1)` and the recurrent
+    state shape `(B, num_heads, head_dim, state_size)`, or None if the config
+    has no Mamba2 fields.
+  """
+  if getattr(model_config, "linear_key_head_dim", None) is not None:
+    return None
+  if hasattr(model_config, "mamba_n_heads"):
+    num_heads = model_config.mamba_n_heads
+    head_dim = model_config.mamba_d_head
+    state_size = model_config.mamba_d_state
+    n_groups = model_config.mamba_n_groups
+    conv_kernel = model_config.mamba_d_conv
+  elif hasattr(model_config, "mamba_num_heads"):
+    num_heads = model_config.mamba_num_heads
+    head_dim = model_config.mamba_head_dim
+    state_size = model_config.ssm_state_size
+    n_groups = model_config.n_groups
+    conv_kernel = model_config.conv_kernel
+  elif hasattr(model_config, "n_mamba_heads"):
+    num_heads = model_config.n_mamba_heads
+    head_dim = model_config.mamba_headdim
+    state_size = model_config.mamba_d_state
+    n_groups = model_config.mamba_ngroups
+    conv_kernel = model_config.mamba_d_conv
+  else:
+    return None
+  conv_dim = num_heads * head_dim + 2 * n_groups * state_size
+  return (
+      (batch_size, conv_dim, conv_kernel - 1),
+      (batch_size, num_heads, head_dim, state_size),
+  )
+
+
 class LiteRTLMConvCacheLayer(
     cache_base_lib.LiteRTLMCacheLayerMixin,
     cache_utils.LinearAttentionCacheLayerMixin,
@@ -621,25 +672,31 @@ class LiteRTLMConvCacheLayer(
           **kwargs,
       )
     else:
-      key_dim = (
-          model_config.linear_key_head_dim * model_config.linear_num_key_heads
-      )
-      value_dim = (
-          model_config.linear_value_head_dim
-          * model_config.linear_num_value_heads
-      )
-      conv_dim = key_dim * 2 + value_dim
-      conv_cache_len = model_config.linear_conv_kernel_dim - 1
-      c_state_shape = (batch_size, conv_dim, conv_cache_len)
-      r_state_shape = (
-          batch_size,
-          model_config.linear_num_value_heads,
-          model_config.linear_key_head_dim,
-          model_config.linear_value_head_dim,
-      )
+      mamba2_shapes = _mamba2_state_shapes(model_config, batch_size)
+      if mamba2_shapes is not None:
+        c_state_shape, r_state_shape = mamba2_shapes
+      else:
+        key_dim = (
+            model_config.linear_key_head_dim
+            * model_config.linear_num_key_heads
+        )
+        value_dim = (
+            model_config.linear_value_head_dim
+            * model_config.linear_num_value_heads
+        )
+        conv_dim = key_dim * 2 + value_dim
+        conv_cache_len = model_config.linear_conv_kernel_dim - 1
+        c_state_shape = (batch_size, conv_dim, conv_cache_len)
+        r_state_shape = (
+            batch_size,
+            model_config.linear_num_value_heads,
+            model_config.linear_key_head_dim,
+            model_config.linear_value_head_dim,
+        )
       c_state = torch.zeros(c_state_shape, dtype=cache_dtype)
-      # The recurrent state is always float32: the gated delta update
-      # accumulates across the whole sequence and is computed in float32.
+      # The recurrent state is always float32: the gated delta update and the
+      # Mamba2 selective scan accumulate across the whole sequence and are
+      # computed in float32.
       r_state = torch.zeros(r_state_shape, dtype=torch.float32)
       return cls(
           conv_states=c_state,
@@ -671,11 +728,168 @@ class LiteRTLMConvCacheLayer(
     return self
 
 
+# Layer types that keep no state across steps (NemotronH MLP and MoE blocks).
+STATELESS_LAYER_TYPES = ("mlp", "moe")
+
+
+class LiteRTLMStatelessCacheLayer(cache_base_lib.LiteRTLMCacheLayerMixin):
+  """Cache layer for a layer type that keeps no state, e.g. NemotronH `mlp`.
+
+  It keeps `LiteRTLMCache.layers` indexed by absolute layer index, which the
+  attention and Mamba2 layers use to address their own cache entries, and it
+  flattens to no tensors: no signature inputs or outputs, no state buffers.
+  """
+
+  is_compileable = True
+  is_sliding = False
+
+  def __init__(self, layer_type: str, batch_size: int = 1, **kwargs):
+    super().__init__()
+    assert layer_type in STATELESS_LAYER_TYPES
+    self.layer_type = layer_type
+    self.batch_size = batch_size
+    self.is_initialized = True
+
+  def get_batch_size(self) -> int:
+    return self.batch_size
+
+  def get_k_ts_idx(self) -> int:
+    # Not used.
+    return 2
+
+  def get_v_ts_idx(self) -> int:
+    # Not used.
+    return 3
+
+  def lazy_initialization(self, *args, **kwargs):
+    raise NotImplementedError("Lazy initialization is not supported.")
+
+  def update(self, key_states, value_states, *args, **kwargs):
+    raise ValueError(
+        f"Cannot call update on a stateless `{self.layer_type}` cache layer."
+    )
+
+  def get_mask_sizes(self, cache_position: torch.Tensor):
+    return 0, 0
+
+  def get_seq_length(self) -> int:
+    return 0
+
+  def get_max_cache_shape(self) -> int:
+    return 0
+
+  def get_max_length(self) -> int:
+    return -1
+
+  @classmethod
+  def create_from_config(
+      cls,
+      model_config,
+      layer_index,
+      export_config: ExportableModuleConfig,
+      **kwargs,
+  ) -> "LiteRTLMStatelessCacheLayer":
+    batch_size = kwargs.pop("batch_size", export_config.batch_size)
+    return cls(
+        layer_type=model_config.layer_types[layer_index],
+        batch_size=batch_size,
+    )
+
+  def to(self, *args, **kwargs) -> "LiteRTLMStatelessCacheLayer":
+    return self
+
+
+class LiteRTLMHybridCacheLayer(LiteRTLMCacheLayer):
+  """Cache layer of a "hybrid" layer: attention and a Mamba2 mixer.
+
+  FalconH1 runs attention and a Mamba2 mixer side by side in every layer, and a
+  Zamba2 "hybrid" layer runs a shared attention block before its Mamba2 mixer.
+  Both address their states with the layer index, so the layer holds the KV
+  cache of `LiteRTLMCacheLayer` and the conv and recurrent states of a Mamba2
+  `LiteRTLMConvCacheLayer`, and flattens to `k_{i}`, `v_{i}`, `c_{i}` and
+  `r_{i}`.
+  """
+
+  def __init__(
+      self,
+      key_cache: KeyCache,
+      value_cache: ValueCache,
+      conv_states: torch.Tensor,
+      recurrent_states: torch.Tensor,
+      batch_size: int = 1,
+      k_ts_idx: int = 2,
+      v_ts_idx: int = 3,
+      **kwargs,
+  ):
+    # The attention part is a full attention KV cache.
+    super().__init__(
+        key_cache,
+        value_cache,
+        layer_type="full_attention",
+        batch_size=batch_size,
+        k_ts_idx=k_ts_idx,
+        v_ts_idx=v_ts_idx,
+        **kwargs,
+    )
+    self.layer_type = "hybrid"
+    self.conv_states = conv_states
+    self.recurrent_states = recurrent_states
+
+  @classmethod
+  def create_from_config(
+      cls,
+      model_config,
+      layer_index,
+      export_config: ExportableModuleConfig,
+      **kwargs,
+  ) -> "LiteRTLMHybridCacheLayer":
+    k_cache_shape, v_cache_shape, _ = cls._infer_cache_shape_from_config(
+        model_config, layer_index, export_config
+    )
+    batch_size = kwargs.pop("batch_size", export_config.batch_size)
+    mamba2_shapes = _mamba2_state_shapes(model_config, batch_size)
+    if mamba2_shapes is None:
+      raise ValueError(
+          "A hybrid layer needs the Mamba2 fields of the model config."
+      )
+    c_state_shape, r_state_shape = mamba2_shapes
+    cache_dtype = export_config.get_cache_dtype()
+    return cls(
+        torch.zeros(k_cache_shape, dtype=cache_dtype),
+        torch.zeros(v_cache_shape, dtype=cache_dtype),
+        torch.zeros(c_state_shape, dtype=cache_dtype),
+        # Float32, as in a Mamba2 `LiteRTLMConvCacheLayer`.
+        torch.zeros(r_state_shape, dtype=torch.float32),
+        batch_size=batch_size,
+        k_ts_idx=export_config.k_ts_idx,  # pyrefly: ignore[bad-argument-type]
+        v_ts_idx=export_config.v_ts_idx,  # pyrefly: ignore[bad-argument-type]
+        **kwargs,
+    )
+
+  def to(self, *args, **kwargs) -> "LiteRTLMHybridCacheLayer":
+    super().to(*args, **kwargs)
+    self.conv_states = self.conv_states.to(*args, **kwargs)
+    # The recurrent state stays float32.
+    device = kwargs.get("device", None)
+    if not device and args and isinstance(args[0], (torch.device, str)):
+      device = args[0]
+    if device is not None:
+      self.recurrent_states = self.recurrent_states.to(
+          device=device, dtype=torch.float32
+      )
+    else:
+      self.recurrent_states = self.recurrent_states.to(dtype=torch.float32)
+    return self
+
+
 LAYER_TYPE_TO_CLASS = {
     "full_attention": LiteRTLMCacheLayer,
     "sliding_attention": LiteRTLMCacheLayer,
     "conv": LiteRTLMConvCacheLayer,
     "linear_attention": LiteRTLMConvCacheLayer,
+    "mlp": LiteRTLMStatelessCacheLayer,
+    "moe": LiteRTLMStatelessCacheLayer,
+    "hybrid": LiteRTLMHybridCacheLayer,
 }
 
 
@@ -774,6 +988,22 @@ def _flatten_kvc_t(
       flat_names.append(f"k_{i}")
       flattened.append(layer.values)
       flat_names.append(f"v_{i}")
+    elif layer_types[i] == "hybrid":
+      assert hasattr(layer, "keys")
+      assert hasattr(layer, "values")
+      assert hasattr(layer, "conv_states")
+      assert hasattr(layer, "recurrent_states")
+      flattened.append(layer.keys)
+      flat_names.append(f"k_{i}")
+      flattened.append(layer.values)
+      flat_names.append(f"v_{i}")
+      flattened.append(layer.conv_states)
+      flat_names.append(f"c_{i}")
+      flattened.append(layer.recurrent_states)
+      flat_names.append(f"r_{i}")
+    elif layer_types[i] in STATELESS_LAYER_TYPES:
+      # Keeps the layer index; owns no tensors.
+      pass
     else:
       raise ValueError(f"Unsupported layer type: {type(layer)}")
   return flattened, (
@@ -823,6 +1053,28 @@ def _unflatten_kvc_t(
               k_ts_idx=k_ts_idx,
               v_ts_idx=v_ts_idx,
               layer_type=layer_types[i],
+          )
+      )
+    elif layer_type == "hybrid":
+      k_cache_idx = flat_names.index(f"k_{i}")
+      v_cache_idx = flat_names.index(f"v_{i}")
+      c_cache_idx = flat_names.index(f"c_{i}")
+      r_cache_idx = flat_names.index(f"r_{i}")
+      layers.append(
+          LiteRTLMHybridCacheLayer(
+              key_cache=values[k_cache_idx],
+              value_cache=values[v_cache_idx],
+              conv_states=values[c_cache_idx],
+              recurrent_states=values[r_cache_idx],
+              batch_size=batch_size,
+              k_ts_idx=k_ts_idx,
+              v_ts_idx=v_ts_idx,
+          )
+      )
+    elif layer_type in STATELESS_LAYER_TYPES:
+      layers.append(
+          LiteRTLMStatelessCacheLayer(
+              layer_type=layer_type, batch_size=batch_size
           )
       )
     else:
