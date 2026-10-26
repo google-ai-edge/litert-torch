@@ -31,6 +31,21 @@ def _open(path: str, mode: str = "r"):
   return open(path, mode)
 
 
+def _rename_allow_float_operations(data: dict[str, Any]) -> dict[str, Any]:
+  """Returns a copy of `data` with `allow_float_operations` renamed.
+
+  `allow_float_operations` is the quant_utils name of the option that
+  quantize() and NpuPipelineConfig call `use_float_input_output_normalizer`.
+  If both keys are set, `use_float_input_output_normalizer` wins.
+  """
+  data = dict(data)
+  if "allow_float_operations" in data:
+    value = data.pop("allow_float_operations")
+    if data.get("use_float_input_output_normalizer") is None:
+      data["use_float_input_output_normalizer"] = value
+  return data
+
+
 @dataclasses.dataclass
 class NpuPipelineConfig:
   """Unified end-to-end pipeline configuration for LiteRT NPU export."""
@@ -56,6 +71,7 @@ class NpuPipelineConfig:
   ema_smoothing_factor: float = 0.1
 
   # Stage 3 Static Range Quantization Defaults
+  a16w8: bool = True
   calibration_range_scale: float = 1.0
 
   @property
@@ -66,6 +82,15 @@ class NpuPipelineConfig:
   @quantization_recipe.setter
   def quantization_recipe(self, value: str) -> None:
     self.weight_quantization_recipe = value
+
+  @property
+  def allow_float_operations(self) -> bool:
+    """Alias of use_float_input_output_normalizer (name used by quant_utils)."""
+    return self.use_float_input_output_normalizer
+
+  @allow_float_operations.setter
+  def allow_float_operations(self, value: bool) -> None:
+    self.use_float_input_output_normalizer = value
 
   def print_summary(self) -> None:
     """Prints a formatted summary table of all resolved configuration fields."""
@@ -105,7 +130,7 @@ class NpuPipelineConfig:
   @classmethod
   def from_dict(cls, data: dict[str, Any]) -> "NpuPipelineConfig":
     """Reconstructs NpuPipelineConfig from a dictionary, attaching extra attributes dynamically."""
-    data = dict(data)
+    data = _rename_allow_float_operations(data)
     if (
         "quantization_recipe" in data
         and "weight_quantization_recipe" not in data
@@ -115,7 +140,7 @@ class NpuPipelineConfig:
     clean_kwargs = {k: v for k, v in data.items() if k in valid_fields}
     cfg = cls(**clean_kwargs)
     for k, v in data.items():
-      if k not in valid_fields and not k.startswith("_") and k != "a16w8":
+      if k not in valid_fields and not k.startswith("_"):
         setattr(cfg, k, v)
     return cfg
 
@@ -181,11 +206,11 @@ def build_pipeline_config(
 
   # 1. Vendor Level
   vendor_def = vendor_configs.VENDOR_CONFIGS.get(clean_vendor, {})
-  merged.update(vendor_def)
+  merged.update(_rename_allow_float_operations(vendor_def))
 
   # 2. Per-SoC Overrides (if present in sparse SOC_CONFIGS map)
   soc_def = vendor_configs.SOC_CONFIGS.get(clean_soc, {})
-  merged.update(soc_def)
+  merged.update(_rename_allow_float_operations(soc_def))
 
   # Explicitly bind validated vendor and SoC
   merged["backend"] = clean_vendor
@@ -198,7 +223,7 @@ def build_pipeline_config(
     merged["cache_length"] = cache_length
   if max_calibration_decode_steps is not None:
     merged["max_calibration_decode_steps"] = max_calibration_decode_steps
-  for k, v in user_overrides.items():
+  for k, v in _rename_allow_float_operations(user_overrides).items():
     if v is not None:
       merged[k] = v
 
@@ -213,6 +238,6 @@ def build_pipeline_config(
 
   cfg = NpuPipelineConfig(**clean_kwargs)
   for k, v in merged.items():
-    if k not in valid_fields and v is not None and k != "a16w8":
+    if k not in valid_fields and v is not None:
       setattr(cfg, k, v)
   return cfg

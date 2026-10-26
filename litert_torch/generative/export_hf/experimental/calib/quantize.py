@@ -106,6 +106,14 @@ _OUTPUT_PATH = _define_flag(
     None,
     'Path to save the quantized TFLite model.',
 )
+_A16W8 = _define_flag(
+    flags.DEFINE_bool,
+    'a16w8',
+    True,
+    'Whether to use 16-bit activations (A16W8). If False, uses 8-bit'
+    ' activations (A8W8). Also sets the bit width of the aux model inputs,'
+    ' outputs and KV cache updates.',
+)
 _USE_FLOAT_INPUT_OUTPUT_NORMALIZER = _define_flag(
     flags.DEFINE_bool,
     'use_float_input_output_normalizer',
@@ -256,6 +264,7 @@ def quantize(
     spm_path: str | None = None,
     transformers_model_path: str | None = None,
     llm_metadata_path: str | None = None,
+    a16w8: bool = True,
     use_float_input_output_normalizer: bool = False,
     skip_mlir_passes: bool = True,
     calibration_range_scale: float = 1.0,
@@ -373,7 +382,7 @@ def quantize(
     q_main = quant_utils.add_main_model_quant_recipe(
         q_main,
         allow_float_operations=use_float_input_output_normalizer,
-        a16w8=True,
+        a16w8=a16w8,
     )
 
   print('--- Running main model quantization...')
@@ -411,7 +420,9 @@ def quantize(
           calibration_func=naive_min_max_quantize.min_max_calibrate,
           materialize_func=quant_utils.get_custom_materialize_input(''),
       )
-      # Quantize graph outputs, KV cache updates, and inputs to 16-bit
+      # Quantize graph outputs, KV cache updates, and inputs with the main
+      # model's activation bit width, so that the KV cache, mask and RoPE
+      # tensors shared with the main model get the same type.
       for op in [
           qtyping.TFLOperationName.OUTPUT,
           qtyping.TFLOperationName.DYNAMIC_UPDATE_SLICE,
@@ -420,7 +431,7 @@ def quantize(
         q_aux.add_static_config(
             regex='.*',
             operation_name=op,
-            activation_num_bits=16,
+            activation_num_bits=16 if a16w8 else 8,
             weight_num_bits=8,
         )
 
@@ -477,6 +488,7 @@ def main(argv: Sequence[str]) -> None:
       spm_path=_SPM_PATH.value,
       transformers_model_path=_TRANSFORMERS_MODEL_PATH.value,
       llm_metadata_path=_LLM_METADATA_PATH.value,
+      a16w8=_A16W8.value,
       use_float_input_output_normalizer=_USE_FLOAT_INPUT_OUTPUT_NORMALIZER.value,
       skip_mlir_passes=_SKIP_MLIR_PASSES.value,
       calibration_range_scale=_CALIBRATION_RANGE_SCALE.value,

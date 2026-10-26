@@ -14,12 +14,16 @@
 # ==============================================================================
 """Unit tests for NPU stage wrappers and dynamic config binding."""
 
+import json
 import os
 from typing import Any
+from unittest import mock
 from absl import flags
 from absl.testing import absltest
+from absl.testing import parameterized
 from litert_torch.generative.export_hf.experimental.npu_export import config_manager
 from litert_torch.generative.export_hf.experimental.npu_export import stages
+from litert_torch.generative.export_hf.experimental.npu_export.configs import vendor_configs
 
 
 def dummy_func(
@@ -157,6 +161,149 @@ class StagesTest(absltest.TestCase):
     self.assertEqual(cfg.soc_model, "SM8750")
     self.assertEqual(cfg.weight_quantization_recipe, "dynamic_wi8_afp32")
     self.assertEqual(cfg.quantization_recipe, "dynamic_wi8_afp32")
+
+
+class QuantizeOptionsTest(parameterized.TestCase):
+  """Checks that the stage 3 options of a config reach quantize()."""
+
+  @parameterized.parameters(*sorted(vendor_configs.VENDOR_CONFIGS))
+  def test_vendor_defaults_reach_quantize(self, vendor):
+    vendor_def = vendor_configs.VENDOR_CONFIGS[vendor]
+    cfg = config_manager.build_pipeline_config(
+        model_id="google/gemma-3-270m-it",
+        target_vendor=vendor,
+        target_soc=vendor_def["default_soc"],
+    )
+    self.assertEqual(cfg.a16w8, vendor_def["a16w8"])
+    self.assertEqual(
+        cfg.use_float_input_output_normalizer,
+        vendor_def["use_float_input_output_normalizer"],
+    )
+    bound_quant = stages._bind_cfg(cfg, stages.quant_func, {})
+    self.assertEqual(bound_quant["a16w8"], vendor_def["a16w8"])
+    self.assertEqual(
+        bound_quant["use_float_input_output_normalizer"],
+        vendor_def["use_float_input_output_normalizer"],
+    )
+
+  def test_mediatek_keeps_normalizer_in_float(self):
+    cfg = config_manager.build_pipeline_config(
+        model_id="google/gemma-3-270m-it",
+        target_vendor="mediatek",
+        target_soc="mt6993",
+    )
+    self.assertTrue(cfg.a16w8)
+    self.assertTrue(cfg.use_float_input_output_normalizer)
+
+  @parameterized.named_parameters(
+      ("field_name", {"use_float_input_output_normalizer": False}, False),
+      ("allow_float_operations", {"allow_float_operations": False}, False),
+      (
+          "field_name_wins",
+          {
+              "use_float_input_output_normalizer": True,
+              "allow_float_operations": False,
+          },
+          True,
+      ),
+  )
+  def test_user_override_wins_over_vendor_default(self, overrides, expected):
+    cfg = config_manager.build_pipeline_config(
+        model_id="google/gemma-3-270m-it",
+        target_vendor="mediatek",
+        target_soc="mt6993",
+        **overrides,
+    )
+    self.assertEqual(cfg.use_float_input_output_normalizer, expected)
+    self.assertNotIn("allow_float_operations", cfg.__dict__)
+
+  def test_a16w8_user_override(self):
+    cfg = config_manager.build_pipeline_config(
+        model_id="google/gemma-3-270m-it",
+        target_vendor="qualcomm",
+        target_soc="SM8850",
+        a16w8=False,
+    )
+    self.assertFalse(cfg.a16w8)
+    self.assertFalse(stages._bind_cfg(cfg, stages.quant_func, {})["a16w8"])
+
+  def test_allow_float_operations_attribute_alias(self):
+    cfg = config_manager.build_pipeline_config(
+        model_id="google/gemma-3-270m-it",
+        target_vendor="qualcomm",
+        target_soc="SM8850",
+    )
+    self.assertFalse(cfg.allow_float_operations)
+    cfg.allow_float_operations = True
+    self.assertTrue(cfg.use_float_input_output_normalizer)
+    bound_quant = stages._bind_cfg(cfg, stages.quant_func, {})
+    self.assertTrue(bound_quant["use_float_input_output_normalizer"])
+
+  def test_json_round_trip_keeps_quantize_options(self):
+    cfg = config_manager.build_pipeline_config(
+        model_id="google/gemma-3-270m-it",
+        target_vendor="mediatek",
+        target_soc="mt6993",
+        a16w8=False,
+    )
+    data = json.loads(cfg.to_json())
+    self.assertFalse(data["a16w8"])
+    self.assertTrue(data["use_float_input_output_normalizer"])
+    self.assertNotIn("allow_float_operations", data)
+    loaded_cfg = config_manager.NpuPipelineConfig.from_json(cfg.to_json())
+    self.assertFalse(loaded_cfg.a16w8)
+    self.assertTrue(loaded_cfg.use_float_input_output_normalizer)
+
+  @parameterized.named_parameters(
+      ("allow_float_operations_only", {"allow_float_operations": True}, True),
+      (
+          "field_name_wins",
+          {
+              "use_float_input_output_normalizer": False,
+              "allow_float_operations": True,
+          },
+          False,
+      ),
+  )
+  def test_from_dict_maps_allow_float_operations(self, extra, expected):
+    cfg = config_manager.NpuPipelineConfig.from_dict({
+        "model_id": "google/gemma-3-270m-it",
+        "backend": "mediatek",
+        "soc_model": "mt6993",
+        **extra,
+    })
+    self.assertEqual(cfg.use_float_input_output_normalizer, expected)
+    self.assertNotIn("allow_float_operations", cfg.__dict__)
+
+  @parameterized.named_parameters(
+      ("qualcomm", "qualcomm", "SM8850", {}, True, False),
+      ("mediatek", "mediatek", "mt6993", {}, True, True),
+      ("mediatek_a8", "mediatek", "mt6993", {"a16w8": False}, False, True),
+  )
+  def test_npu_quantize_passes_options_to_quantize(
+      self, vendor, soc, overrides, expected_a16w8, expected_normalizer
+  ):
+    cfg = config_manager.build_pipeline_config(
+        model_id="google/gemma-3-270m-it",
+        target_vendor=vendor,
+        target_soc=soc,
+        **overrides,
+    )
+    with mock.patch.object(
+        stages, "quant_func", autospec=True
+    ) as mock_quant_func:
+      stages.npu_quantize(
+          cfg=cfg,
+          input_litertlm="/tmp/model.litertlm",
+          output_litertlm="/tmp/model_srq.litertlm",
+          calibration_dir="/tmp/calib",
+      )
+    _, kwargs = mock_quant_func.call_args
+    self.assertEqual(kwargs["a16w8"], expected_a16w8)
+    self.assertEqual(
+        kwargs["use_float_input_output_normalizer"], expected_normalizer
+    )
+    self.assertEqual(kwargs["calibration_dir"], "/tmp/calib")
 
 
 if __name__ == "__main__":
