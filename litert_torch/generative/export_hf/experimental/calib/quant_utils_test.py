@@ -18,7 +18,10 @@ import json
 import os
 from unittest import mock
 
+from absl import flags
 from absl.testing import absltest
+from absl.testing import flagsaver
+from absl.testing import parameterized
 from litert_torch.generative.export_hf.experimental.calib import quant_utils
 from litert_torch.generative.export_hf.experimental.calib import quantize as quantize_lib
 from litert_torch.generative.export_hf.experimental.calib import tokenizer as tokenizer_lib
@@ -301,6 +304,116 @@ class QuantUtilsChatTemplateTest(absltest.TestCase):
         operation_name=qtyping.TFLOperationName.ADD,
         activation_num_bits=16,
         weight_num_bits=8,
+    )
+
+
+class QuantizeOptionsTest(parameterized.TestCase):
+  """Checks how quantize() and its CLI pass the recipe options on."""
+
+  def setUp(self):
+    super().setUp()
+    if not flags.FLAGS.is_parsed():
+      flags.FLAGS.mark_as_parsed()
+
+  def _run_quantize(self, **kwargs):
+    """Runs quantize() on a main and an aux model with a mocked quantizer."""
+    tmp_dir = self.create_tempdir().full_path
+    main_q = mock.MagicMock(name="main_quantizer")
+    aux_q = mock.MagicMock(name="aux_quantizer")
+
+    def _load_calibration_results(unused_path):
+      return {"x": {"min": np.zeros(1), "max": np.ones(1)}}, {}
+
+    with mock.patch.object(
+        quantize_lib.algorithm_manager, "register_quantized_op"
+    ), mock.patch.object(
+        quantize_lib.calibration_utils,
+        "load_calibration_results",
+        side_effect=_load_calibration_results,
+    ), mock.patch.object(
+        quantize_lib.quant_utils, "align_kv_cache_params"
+    ), mock.patch.object(
+        quantize_lib.quantizer, "Quantizer", side_effect=[main_q, aux_q]
+    ), mock.patch.object(
+        quantize_lib.quant_utils,
+        "add_main_model_quant_recipe",
+        side_effect=lambda q, **unused_kwargs: q,
+    ) as mock_main_recipe:
+      quantize_lib.quantize(
+          model_path=os.path.join(tmp_dir, "model.tflite"),
+          calibration_path=os.path.join(tmp_dir, "model.tflite.json"),
+          output_path=os.path.join(tmp_dir, "out", "model.tflite"),
+          aux_model_path=os.path.join(tmp_dir, "aux.tflite"),
+          aux_calibration_path=os.path.join(tmp_dir, "aux.tflite.json"),
+          aux_output_path=os.path.join(tmp_dir, "out", "aux.tflite"),
+          **kwargs,
+      )
+    return main_q, aux_q, mock_main_recipe
+
+  @parameterized.named_parameters(
+      ("default", {}, True, False, 16),
+      (
+          "a16w8_float_normalizer",
+          {"a16w8": True, "use_float_input_output_normalizer": True},
+          True,
+          True,
+          16,
+      ),
+      ("a8w8", {"a16w8": False}, False, False, 8),
+  )
+  def test_quantize_recipe_options(
+      self,
+      kwargs,
+      expected_a16w8,
+      expected_allow_float_operations,
+      expected_aux_bits,
+  ):
+    main_q, aux_q, mock_main_recipe = self._run_quantize(**kwargs)
+    mock_main_recipe.assert_called_once_with(
+        main_q,
+        allow_float_operations=expected_allow_float_operations,
+        a16w8=expected_a16w8,
+    )
+    self.assertCountEqual(
+        aux_q.add_static_config.call_args_list,
+        [
+            mock.call(
+                regex=".*",
+                operation_name=op,
+                activation_num_bits=expected_aux_bits,
+                weight_num_bits=8,
+            )
+            for op in (
+                qtyping.TFLOperationName.OUTPUT,
+                qtyping.TFLOperationName.DYNAMIC_UPDATE_SLICE,
+                qtyping.TFLOperationName.INPUT,
+            )
+        ],
+    )
+
+  @parameterized.named_parameters(
+      ("defaults", {}, True, True),
+      ("a8w8", {"a16w8": False}, False, True),
+      (
+          "int_normalizer",
+          {"use_float_input_output_normalizer": False},
+          True,
+          False,
+      ),
+  )
+  def test_main_passes_flags_to_quantize(
+      self, flag_values, expected_a16w8, expected_normalizer
+  ):
+    with flagsaver.flagsaver(
+        model_path="model.tflite",
+        calibration_path="model.tflite.json",
+        **flag_values,
+    ), mock.patch.object(quantize_lib, "quantize") as mock_quantize:
+      quantize_lib.main(["quantize"])
+    _, kwargs = mock_quantize.call_args
+    self.assertEqual(kwargs["a16w8"], expected_a16w8)
+    self.assertEqual(
+        kwargs["use_float_input_output_normalizer"], expected_normalizer
     )
 
 
