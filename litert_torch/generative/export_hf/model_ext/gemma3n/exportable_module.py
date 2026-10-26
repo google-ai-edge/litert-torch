@@ -15,6 +15,7 @@
 """Exportable module for externalized embedding."""
 
 from litert_torch.generative.export_hf.core import exportable_module as base_exportable_module
+from litert_torch.generative.export_hf.model_ext.gemma4 import exportable_module as gemma4_exportable_module
 import torch
 
 
@@ -117,6 +118,9 @@ class LiteRTExportableModuleForDecoderOnlyLMGenerateExternalEmbedder(
     output = self.model.model.language_model(**inputs)
     hidden_states = output.last_hidden_state
     logits = self.model.lm_head(hidden_states)
+    logits = gemma4_exportable_module.apply_final_logit_softcapping(
+        logits, self.model.config.get_text_config()
+    )
     return {"kv_cache": output.past_key_values, "logits": logits}
 
   def _get_input(
