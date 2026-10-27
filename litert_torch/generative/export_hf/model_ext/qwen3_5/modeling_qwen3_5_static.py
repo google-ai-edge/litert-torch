@@ -199,15 +199,19 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
           mixed_qkv.dtype
       )
 
-    if getattr(self, "use_short_conv_composite", True):
-      num_valid_tokens = None
-      if seq_len > 1 and has_valid_mask:
-        assert valid_mask is not None
-        num_valid_tokens = (
-            valid_mask.to(torch.float32)
-            .sum(dim=-1, keepdim=False)
-            .to(torch.int32)
-        )
+    valid_len: Optional[torch.Tensor] = None
+    num_valid_tokens: Optional[torch.Tensor] = None
+    if seq_len > 1 and has_valid_mask:
+      assert valid_mask is not None
+      num_real = valid_mask[0].to(torch.float32).sum().to(torch.int32)
+      num_valid_tokens = num_real.reshape(1)
+      valid_len = (
+          num_real
+          if batch_size == 1
+          else valid_mask.to(torch.float32).sum(dim=-1).to(torch.int32)
+      )
+
+    if batch_size == 1 and getattr(self, "use_short_conv_composite", True):
       conv_out, new_conv_state = short_conv_composite.apply_short_conv_step(
           in_proj_out=mixed_qkv,
           conv_state=conv_state,
@@ -231,10 +235,8 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
       )
       conv_out = F.silu(conv_out[:, :, -seq_len:]).transpose(1, 2)
 
-      if seq_len > 1 and has_valid_mask:
-        assert valid_mask is not None
-        num_real = valid_mask[0].to(torch.float32).sum().to(torch.int32)
-        indices = num_real + torch.arange(
+      if num_valid_tokens is not None:
+        indices = num_valid_tokens + torch.arange(
             state_len, device=full_qkv.device, dtype=torch.int32
         )
         new_conv_state = torch.ops.tfl.gather(full_qkv, indices, 2)
@@ -282,6 +284,7 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
             g,
             recurrent_state,
             valid_mask=valid_mask,
+            valid_len=valid_len,
             use_fused_gdn=getattr(self, "use_fused_gdn", True),
             gdn_mode=self.gdn_mode,
             use_fp32=self.use_fp32,

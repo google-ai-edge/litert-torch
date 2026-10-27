@@ -75,80 +75,6 @@ def _gdn_tril_inv_lower(lctx, attn: ir.Value):
   return op.results[0]
 
 
-@torch.library.custom_op("litert_torch::gated_delta_update", mutates_args=())
-def gated_delta_update(
-    q_t: torch.Tensor,
-    k_t: torch.Tensor,
-    v_t: torch.Tensor,
-    beta_t: torch.Tensor,
-    g_t: torch.Tensor,
-    recurrent_state: torch.Tensor,
-    mode: int = 0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-  """Reference PyTorch implementation of Gated Delta Update."""
-  del mode
-  _, num_v_heads, _, _ = v_t.shape
-  num_k_heads = q_t.shape[1]
-  if num_v_heads != num_k_heads:
-    g_ratio = num_v_heads // num_k_heads
-    q_t = q_t.repeat_interleave(g_ratio, dim=1)
-    k_t = k_t.repeat_interleave(g_ratio, dim=1)
-
-  return recurrent_gated_delta_rule(q_t, k_t, v_t, beta_t, g_t, recurrent_state)
-
-
-@gated_delta_update.register_fake
-def _gated_delta_update_fake(
-    q_t: torch.Tensor,
-    k_t: torch.Tensor,
-    v_t: torch.Tensor,
-    beta_t: torch.Tensor,
-    g_t: torch.Tensor,
-    recurrent_state: torch.Tensor,
-    mode: int = 0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-  """Fake implementation for shape inference."""
-  del k_t, beta_t, g_t, mode
-  batch_size, num_v_heads, seq_len, head_v_dim = v_t.shape
-  out1 = torch.empty(
-      (batch_size, num_v_heads, seq_len, head_v_dim),
-      dtype=q_t.dtype,
-      device=q_t.device,
-  )
-  out2 = torch.empty(
-      recurrent_state.shape,
-      dtype=torch.float32,
-      device=recurrent_state.device,
-  )
-  return out1, out2
-
-
-@lowerings.lower(torch.ops.litert_torch.gated_delta_update)
-def _gated_delta_update_lower(
-    lctx,
-    q_t: ir.Value,
-    k_t: ir.Value,
-    v_t: ir.Value,
-    beta_t: ir.Value,
-    g_t: ir.Value,
-    recurrent_state: ir.Value,
-    mode: int = 0,
-):
-  """Lowers gdn_attention to tfl.custom."""
-  op = ir.Operation.create(
-      "tfl.custom",
-      results=lowering_utils.node_meta_to_ir_types(lctx.node),
-      operands=[q_t, k_t, v_t, beta_t, g_t, recurrent_state],
-      attributes={
-          "custom_code": ir.StringAttr.get("gated_delta_update"),
-          "custom_option": _const_bytes_attr(
-              _gated_delta_update_custom_options(mode=mode)
-          ),
-      },
-  )
-  return tuple(op.results)
-
-
 def _gated_delta_step(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -195,12 +121,13 @@ def recurrent_gated_delta_rule(
     g_t: torch.Tensor,
     recurrent_state: torch.Tensor,
     valid_mask: torch.Tensor | None = None,
+    valid_len: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
   """Recurrent Gated Delta Rule implementation (single-token or unrolled loop)."""
-  seq_len = q_t.shape[2]
+  batch_size, _, seq_len, _ = q_t.shape
   has_valid_mask = valid_mask is not None and valid_mask.numel() > 0
 
-  if seq_len == 1 and not has_valid_mask:
+  if seq_len == 1 and not has_valid_mask and valid_len is None:
     g_step = g_t[:, :, 0].exp().unsqueeze(-1).unsqueeze(-1)
     beta_step = beta_t[:, :, 0].unsqueeze(-1)
     new_recurrent_state = recurrent_state.to(q_t.dtype) * g_step
@@ -223,6 +150,8 @@ def recurrent_gated_delta_rule(
     if has_valid_mask:
       assert valid_mask is not None
       step_mask = valid_mask[:, t]
+    elif valid_len is not None:
+      step_mask = t < valid_len.reshape(batch_size)
 
     y_step, new_recurrent_state = _gated_delta_step(
         q_t[:, :, t],
@@ -329,6 +258,88 @@ def chunk_gated_delta_rule(
   return core_attn_out, new_recurrent_state
 
 
+@torch.library.custom_op("litert_torch::gated_delta_update", mutates_args=())
+def gated_delta_update(
+    q_t: torch.Tensor,
+    k_t: torch.Tensor,
+    v_t: torch.Tensor,
+    beta_t: torch.Tensor,
+    g_t: torch.Tensor,
+    recurrent_state: torch.Tensor,
+    valid_len: torch.Tensor | None = None,
+    mode: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+  """Reference PyTorch implementation of Gated Delta Update."""
+  del mode
+  _, num_v_heads, _, _ = v_t.shape
+  num_k_heads = q_t.shape[1]
+  if num_v_heads != num_k_heads:
+    g_ratio = num_v_heads // num_k_heads
+    q_t = q_t.repeat_interleave(g_ratio, dim=1)
+    k_t = k_t.repeat_interleave(g_ratio, dim=1)
+
+  return recurrent_gated_delta_rule(
+      q_t, k_t, v_t, beta_t, g_t, recurrent_state, valid_len=valid_len
+  )
+
+
+@gated_delta_update.register_fake
+def _gated_delta_update_fake(
+    q_t: torch.Tensor,
+    k_t: torch.Tensor,
+    v_t: torch.Tensor,
+    beta_t: torch.Tensor,
+    g_t: torch.Tensor,
+    recurrent_state: torch.Tensor,
+    valid_len: torch.Tensor | None = None,
+    mode: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+  """Fake implementation for shape inference."""
+  del k_t, beta_t, g_t, valid_len, mode
+  batch_size, num_v_heads, seq_len, head_v_dim = v_t.shape
+  out1 = torch.empty(
+      (batch_size, num_v_heads, seq_len, head_v_dim),
+      dtype=q_t.dtype,
+      device=q_t.device,
+  )
+  out2 = torch.empty(
+      recurrent_state.shape,
+      dtype=torch.float32,
+      device=recurrent_state.device,
+  )
+  return out1, out2
+
+
+@lowerings.lower(torch.ops.litert_torch.gated_delta_update)
+def _gated_delta_update_lower(
+    lctx,
+    q_t: ir.Value,
+    k_t: ir.Value,
+    v_t: ir.Value,
+    beta_t: ir.Value,
+    g_t: ir.Value,
+    recurrent_state: ir.Value,
+    valid_len: ir.Value | None = None,
+    mode: int = 0,
+):
+  """Lowers gdn_attention to tfl.custom."""
+  operands = [q_t, k_t, v_t, beta_t, g_t, recurrent_state]
+  if valid_len is not None:
+    operands.append(valid_len)
+  op = ir.Operation.create(
+      "tfl.custom",
+      results=lowering_utils.node_meta_to_ir_types(lctx.node),
+      operands=operands,
+      attributes={
+          "custom_code": ir.StringAttr.get("gated_delta_update"),
+          "custom_option": _const_bytes_attr(
+              _gated_delta_update_custom_options(mode=mode)
+          ),
+      },
+  )
+  return tuple(op.results)
+
+
 def apply_gated_delta_rule(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -337,6 +348,7 @@ def apply_gated_delta_rule(
     g: torch.Tensor,
     recurrent_state: torch.Tensor,
     valid_mask: torch.Tensor | None = None,
+    valid_len: torch.Tensor | None = None,
     *,
     use_fused_gdn: bool = True,
     gdn_mode: int = 0,
@@ -357,6 +369,7 @@ def apply_gated_delta_rule(
         beta_t,
         g_t,
         recurrent_state.to(torch.float32),
+        valid_len=valid_len,
         mode=gdn_mode,
     )
 
@@ -385,5 +398,12 @@ def apply_gated_delta_rule(
         q_t, k_t, v_t, beta_t, g_t, recurrent_state, chunk_size=chunk_size
     )
   return recurrent_gated_delta_rule(
-      q_t, k_t, v_t, beta_t, g_t, recurrent_state, valid_mask=valid_mask
+      q_t,
+      k_t,
+      v_t,
+      beta_t,
+      g_t,
+      recurrent_state,
+      valid_mask=valid_mask,
+      valid_len=valid_len,
   )
