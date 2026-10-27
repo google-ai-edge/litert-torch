@@ -243,5 +243,92 @@ class Qwen35ExportableTest(absltest.TestCase):
         torch.equal(export_generated[:, : hf_generated.shape[1]], hf_generated)
     )
 
+  def test_external_embedder_prefill_logits_and_logits_to_keep(self):
+    """Verifies external-embedder prefill_logits and static logits_to_keep."""
+    embeddings = torch.randn(1, 9, self.config.hidden_size, dtype=torch.float32)
+    input_pos = torch.arange(9, dtype=torch.int64)
+    mask = qwen3_5_exportable.create_qwen3_5_attention_mask(9, 64, input_pos)
+
+    with torch.no_grad():
+      hf_logits = self.hf_model(
+          inputs_embeds=embeddings, use_cache=False
+      ).logits
+
+    config_no_logits = exportable_module_config.ExportableModuleConfig(
+        model="qwen3_5_dummy",
+        task=exportable_module_config.ExportTask.TEXT_GENERATION,
+        batch_size=1,
+        cache_length=64,
+        prefill_lengths=[9],
+        externalize_embedder=True,
+        prefill_logits=False,
+    )
+    prefill_no_logits = qwen3_5_exportable.LiteRTExportableModuleForQwen3_5PrefillExternalEmbedder(
+        self.hf_model, config_no_logits
+    )
+    sample_no_logits = prefill_no_logits.get_sample_inputs(self.config)[
+        "prefill_9"
+    ][0]
+    sample_no_logits["embeddings"] = embeddings
+    sample_no_logits["input_pos"] = input_pos
+    sample_no_logits["mask"] = mask
+    with torch.no_grad():
+      out_no_logits = prefill_no_logits(**sample_no_logits)
+    self.assertNotIn("logits", out_no_logits)
+
+    config_with_logits = exportable_module_config.ExportableModuleConfig(
+        model="qwen3_5_dummy",
+        task=exportable_module_config.ExportTask.TEXT_GENERATION,
+        batch_size=1,
+        cache_length=64,
+        prefill_lengths=[9],
+        externalize_embedder=True,
+        prefill_logits=True,
+    )
+    prefill_with_logits = qwen3_5_exportable.LiteRTExportableModuleForQwen3_5PrefillExternalEmbedder(
+        self.hf_model, config_with_logits
+    )
+    sample_with_logits = prefill_with_logits.get_sample_inputs(self.config)[
+        "prefill_9"
+    ][0]
+    sample_with_logits["embeddings"] = embeddings
+    sample_with_logits["input_pos"] = input_pos
+    sample_with_logits["mask"] = mask
+
+    sample_full = prefill_with_logits.get_sample_inputs(self.config)[
+        "prefill_9"
+    ][0]
+    full_inputs = (
+        prefill_with_logits.adapt_inputs(
+            None,
+            embeddings,
+            input_pos,
+            sample_full["kv_cache"],
+            mask,
+        )
+        | prefill_with_logits.attention_kwargs()
+    )
+    with torch.no_grad():
+      out_with_logits = prefill_with_logits(**sample_with_logits)
+      full_out = prefill_with_logits.model(**full_inputs)
+    self.assertIn("logits", out_with_logits)
+    self.assertEqual(
+        tuple(full_out.logits.shape), (1, 9, self.config.vocab_size)
+    )
+    self.assertEqual(
+        tuple(out_with_logits["logits"].shape), (1, 1, self.config.vocab_size)
+    )
+    self.assertEqual(out_with_logits["logits"].dtype, torch.float32)
+    torch.testing.assert_close(
+        out_with_logits["logits"], full_out.logits[:, -1:, :].to(torch.float32)
+    )
+    torch.testing.assert_close(
+        out_with_logits["logits"],
+        hf_logits[:, -1:, :].to(torch.float32),
+        rtol=5e-3,
+        atol=5e-3,
+    )
+
+
 if __name__ == "__main__":
   absltest.main()
