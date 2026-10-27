@@ -126,6 +126,26 @@ class TestReduceViewRankPass(googletest.TestCase):
     self.assertLessEqual(max_rank, 4)
     torch.testing.assert_close(result.graph_module(x), f(x))
 
+  def test_permute_with_second_user_is_not_folded(self):
+    # The permute output forks to a second consumer besides the squeeze, so
+    # the rank-5 chain must stay alive for that branch; the pass backs off.
+    def f(x):  # x: (2, 1, 3, 4)
+      y = torch.unsqueeze(x, 0)  # (1, 2, 1, 3, 4)
+      y = torch.permute(y, [1, 0, 2, 3, 4])  # (2, 1, 1, 3, 4)
+      z = torch.squeeze(y, 1)  # (2, 1, 3, 4)
+      return z, torch.sum(y)  # second user of the permute
+
+    x = torch.randn(2, 1, 3, 4)
+    graph_module = make_fx(f, tracing_mode="fake")(x)
+    targets_before = [n.target for n in graph_module.graph.nodes]
+
+    result = fx_passes.ReduceViewRankPass()(graph_module)
+
+    self.assertFalse(result.modified)
+    targets_after = [n.target for n in result.graph_module.graph.nodes]
+    self.assertEqual(targets_before, targets_after)
+    torch.testing.assert_close(result.graph_module(x), f(x))
+
   def test_provenance_meta_copied_to_new_nodes(self):
     # The folded permute/squeeze nodes must carry the debug provenance of the
     # squeeze node they replace.
