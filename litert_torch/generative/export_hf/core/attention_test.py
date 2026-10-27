@@ -18,6 +18,7 @@ import itertools
 from unittest import mock
 
 from absl.testing import parameterized
+
 # Not directly used but to register the attention implementation.
 import litert_torch.generative.export_hf.core.attention  # pylint: disable=unused-import
 from litert_torch.generative.export_hf.core import attention as attention_lib
@@ -26,6 +27,7 @@ from litert_torch.generative.export_hf.core import exportable_module_config
 import numpy as np
 import torch
 from transformers import modeling_utils
+from transformers.models.gemma2 import modeling_gemma2
 
 from absl.testing import absltest as googletest
 
@@ -40,7 +42,7 @@ def _adapt_inputs(
     b, n, s, h = key.shape
     key = key.reshape(1, b * n, s, h)
     value = value.reshape(1, b * n, s, h).permute(0, 1, 3, 2)
-  elif attention_implementation == 'sdpa':
+  elif attention_implementation in ('sdpa', 'eager'):
     pass
   else:
     raise ValueError(
@@ -64,7 +66,7 @@ class DummyAttentionModule(torch.nn.Module):
 
     Args:
       attention_implementation: The attention implementation to test, either
-        'sdpa' or 'lrt_transposed_attention'.
+        'sdpa', 'eager', or 'lrt_transposed_attention'.
       num_key_value_groups: The number of key value groups.
       scaling: The scaling factor to pass to the attention layer.
       softcap: The softcap factor to pass to the attention layer.
@@ -74,11 +76,18 @@ class DummyAttentionModule(torch.nn.Module):
     self.num_key_value_groups = num_key_value_groups
     self.scaling = scaling
     self.softcap = softcap
+    self.head_dim = None
 
   def forward(self, query, key, value, attention_mask, **kwargs):
-    attention_interface = modeling_utils.ALL_ATTENTION_FUNCTIONS[
-        self.attention_implementation
-    ]
+    self.head_dim = query.shape[-1]
+    if self.attention_implementation == 'eager' or (
+        self.attention_implementation == 'sdpa' and self.softcap is not None
+    ):
+      attention_interface = modeling_gemma2.eager_attention_forward
+    else:
+      attention_interface = modeling_utils.ALL_ATTENTION_FUNCTIONS[
+          self.attention_implementation
+      ]
     key, value = _adapt_inputs(self.attention_implementation, key, value)
     return attention_interface(
         self,
@@ -245,9 +254,11 @@ class TransposedAttentionIsCausalTest(parameterized.TestCase):
         model=model_id,
         task=task,
     )
-    exportable = exportable_module.LiteRTExportableModuleForDecoderOnlyLMPrefill(
-        model=model,
-        export_config=config,
+    exportable = (
+        exportable_module.LiteRTExportableModuleForDecoderOnlyLMPrefill(
+            model=model,
+            export_config=config,
+        )
     )
     self.assertEqual(exportable.attention_kwargs()['sdpa_is_causal'], expected)
 

@@ -25,9 +25,11 @@ import flatbuffers
 from litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler import litert_lm_npu_compiler
 
 from ai_edge_litert.aot.core import aot_types
+from ai_edge_litert.tools import flatbuffer_utils
 import litert_lm_builder as litertlm_builder
 from litert_lm_builder.runtime.proto import llm_metadata_pb2
-from tensorflow.lite.python import schema_py_generated as schema_fb
+
+schema_fb = flatbuffer_utils.schema_fb
 
 
 def build_dummy_tflite_model(signatures_info: list[tuple[str, int]]) -> bytes:
