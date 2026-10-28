@@ -76,7 +76,7 @@ are registered via `model_ext/builtin_extensions.py` with `override=False` so
 explicit user registrations take precedence.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import contextlib
 import hashlib
 import importlib
@@ -167,6 +167,68 @@ class AudioExportablesSpec(NamedTuple):
   encoder_cls: Any
   adapter_cls: Any = None
   eoa_cls: Any = None
+
+
+# Re-exported so extensions can name tasks without depending on `core`.
+ExportTask = exportable_module_config.ExportTask
+
+
+class ExportDefaults(NamedTuple):
+  """Recommended export settings for a checkpoint.
+
+  Returned by `ModelExtension.get_export_defaults` and consumed by
+  `auto_export.resolve` / `auto_export.export` (and through them by tools such
+  as LiteRT CLI), so per-architecture knowledge lives with the extension rather
+  than in every caller. Explicit caller arguments always override these values.
+
+  Attributes:
+    task: Default `ExportTask` for the checkpoint, or `None` to let the caller
+      decide (`text_generation` when nothing else applies).
+    export_kwargs: Recommended `export.export` keyword arguments for the
+      resolved task (e.g. `quantization_recipe`, `input_sec`,
+      `externalize_embedder`).
+    litert_lm_model_family: Directory name under LiteRT-LM `models/` holding the
+      canonical `LlmMetadataProto.pbtext` (chat template, stop tokens, thinking
+      and tool-call config), e.g. `'qwen3'`.
+    litert_lm_chat_template: Path of a canonical Jinja chat template relative to
+      LiteRT-LM `models/`, e.g. `'gemma4/chat_template.jinja'`.
+    runtime_model_name: LiteRT-LM `omni_runner --model_name` value for non-LLM
+      tasks, e.g. `'whisper'` or `'bonsai-flux2'`.
+  """
+
+  task: str | None = None
+  export_kwargs: Mapping[str, Any] = types.MappingProxyType({})
+  litert_lm_model_family: str | None = None
+  litert_lm_chat_template: str | None = None
+  runtime_model_name: str | None = None
+
+
+class Speech2TextBundleSpec(NamedTuple):
+  """How an encoder-decoder speech-to-text model is packaged in a `.litertlm`.
+
+  Returned by `ModelExtension.get_speech2text_bundle_spec`. When an extension
+  returns one, `export_hf` exports the speech model as a single TFLite model
+  (`export_asr_models`) and packages it with its `Speech2TextMetadata` and HF
+  tokenizer, the layout LiteRT-LM's `omni_runner` loads.
+
+  Attributes:
+    asr_model_type: `Speech2TextModelType` field name, e.g. `'whisper'`.
+    tflite_model_type: Section model type of the exported TFLite model:
+      `'encoder_decoder'` (encoder and decoder signatures in one model) or
+      `'audio_encoder'` (CTC models).
+    mel_frames_per_second: Log-mel frames per second of audio for models that
+      take a log-mel spectrogram (100 for a 10 ms hop), or `None` for models
+      that take raw PCM.
+  """
+
+  asr_model_type: str
+  tflite_model_type: str
+  mel_frames_per_second: int | None = None
+
+
+def text_config_dict(config_dict: Mapping[str, Any]) -> Mapping[str, Any]:
+  """Returns `config_dict['text_config']` if present, else `config_dict`."""
+  return config_dict.get('text_config') or config_dict
 
 
 class ModelExtension:
@@ -576,6 +638,52 @@ class ModelExtension:
     del model_type
     return None
 
+  def get_export_defaults(
+      self,
+      config_dict: Mapping[str, Any],
+      task: str | None = None,
+  ) -> ExportDefaults | None:
+    """Returns recommended export settings for a checkpoint.
+
+    Invoked by `auto_export.resolve` before export, using only the raw
+    `config.json` (or Diffusers `model_index.json`) so no model is loaded.
+    Override it to declare the default task and the export arguments known to
+    work for the architecture; callers merge them under their own explicit
+    arguments.
+
+    Args:
+      config_dict: Parsed `config.json` (or `model_index.json`) contents, or an
+        empty dict if the checkpoint has none.
+      task: Task requested by the caller, or `None` when the task is detected
+        automatically. Return arguments that suit this task (for example, drop
+        vision-encoder arguments when a VLM is exported as `text_generation`).
+
+    Returns:
+      An `ExportDefaults`, or `None` if the extension has no recommendation.
+    """
+    del config_dict, task
+    return None
+
+  def get_speech2text_bundle_spec(
+      self, model_config: transformers.PretrainedConfig
+  ) -> Speech2TextBundleSpec | None:
+    """Returns how to package an encoder-decoder speech-to-text model.
+
+    Invoked for `automatic_speech_recognition` exports with
+    `bundle_litert_lm=True`. Return a spec for models exported as one TFLite
+    model by `export_asr_models` (Whisper, Moonshine, Parakeet); return `None`
+    (the default) for audio-encoder + LLM models such as Qwen3-ASR, which use
+    the LLM packaging path.
+
+    Args:
+      model_config: Loaded model configuration.
+
+    Returns:
+      A `Speech2TextBundleSpec`, or `None`.
+    """
+    del model_config
+    return None
+
   def get_litert_lm_section_types(self) -> dict[str, Any]:
     """Maps auxiliary submodel names to `.litertlm` container section types.
 
@@ -956,6 +1064,28 @@ class CompositeModelExtension(ModelExtension):
     """See base class."""
     for ext in reversed(self._extensions):
       res = ext.get_any2any_model_cls(model_type)
+      if res is not None:
+        return res
+    return None
+
+  def get_export_defaults(
+      self,
+      config_dict: Mapping[str, Any],
+      task: str | None = None,
+  ) -> ExportDefaults | None:
+    """See base class."""
+    for ext in reversed(self._extensions):
+      res = ext.get_export_defaults(config_dict, task)
+      if res is not None:
+        return res
+    return None
+
+  def get_speech2text_bundle_spec(
+      self, model_config: transformers.PretrainedConfig
+  ) -> Speech2TextBundleSpec | None:
+    """See base class."""
+    for ext in reversed(self._extensions):
+      res = ext.get_speech2text_bundle_spec(model_config)
       if res is not None:
         return res
     return None

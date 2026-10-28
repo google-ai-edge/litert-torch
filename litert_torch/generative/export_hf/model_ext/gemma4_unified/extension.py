@@ -34,6 +34,15 @@ class Gemma4UnifiedExtension(extension_lib.ModelExtension):
   model_types = ('gemma4_unified',)
   extra_kwargs_keys = ('gemma4_vision_max_soft_tokens',)
 
+  def get_export_defaults(self, config_dict, task=None):
+    """See base class."""
+    del config_dict
+    vlm = task in (None, extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT)
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT,
+        export_kwargs={'export_vision_encoder': vlm},
+    )
+
   def get_vision_exportables(self, model_config, export_config=None):
     """See base class."""
     del model_config, export_config

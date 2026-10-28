@@ -36,6 +36,25 @@ class Gemma3Extension(extension_lib.ModelExtension):
 
   model_types = ('gemma3', 'gemma3_text')
 
+  def get_export_defaults(self, config_dict, task=None):
+    """See base class."""
+    if (
+        config_dict.get('model_type') == 'gemma3_text'
+        or task == extension_lib.ExportTask.TEXT_GENERATION
+    ):
+      return extension_lib.ExportDefaults(
+          task=extension_lib.ExportTask.TEXT_GENERATION,
+          export_kwargs={'export_vision_encoder': False},
+      )
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT,
+        export_kwargs={
+            'export_vision_encoder': True,
+            'externalize_embedder': True,
+            'vision_encoder_quantization_recipe': 'weight_only_wi8_afp32',
+        },
+    )
+
   def get_vision_exportables(self, model_config, export_config=None):
     """See base class."""
     del model_config, export_config

@@ -108,6 +108,33 @@ def _build_llm_metadata(tokenizer, chat_templates=_EMPTY_CHAT_TEMPLATES):
   )
 
 
+class Speech2TextMetadataTest(absltest.TestCase):
+
+  def test_mel_model_writes_window_and_frames(self):
+    spec = litert_lm_builder.extension_lib.Speech2TextBundleSpec(
+        asr_model_type="whisper",
+        tflite_model_type="encoder_decoder",
+        mel_frames_per_second=100,
+    )
+
+    self.assertEqual(
+        litert_lm_builder.speech2text_metadata_pbtext(spec, 10.0),
+        "asr_model_type {\n  whisper {\n  }\n}\n"
+        "input_milliseconds: 10000\n"
+        "log_mel_spectrogram_config {\n  n_frames: 1000\n}\n",
+    )
+
+  def test_raw_pcm_model_writes_window_only(self):
+    spec = litert_lm_builder.extension_lib.Speech2TextBundleSpec(
+        asr_model_type="moonshine", tflite_model_type="encoder_decoder"
+    )
+
+    self.assertEqual(
+        litert_lm_builder.speech2text_metadata_pbtext(spec, 5.0),
+        "asr_model_type {\n  moonshine {\n  }\n}\ninput_milliseconds: 5000\n",
+    )
+
+
 class TokenizerPrependsBosTest(parameterized.TestCase):
 
   def test_true_when_bos_is_prepended(self):

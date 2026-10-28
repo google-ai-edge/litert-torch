@@ -31,6 +31,26 @@ class WhisperExtension(extension_lib.ModelExtension):
 
   model_types = ('whisper',)
 
+  def get_export_defaults(self, config_dict, task=None):
+    """See base class."""
+    del config_dict, task
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.AUTOMATIC_SPEECH_RECOGNITION,
+        export_kwargs={
+            'input_sec': 30.0,
+        },
+        runtime_model_name='whisper',
+    )
+
+  def get_speech2text_bundle_spec(self, model_config):
+    """See base class."""
+    del model_config
+    return extension_lib.Speech2TextBundleSpec(
+        asr_model_type='whisper',
+        tflite_model_type='encoder_decoder',
+        mel_frames_per_second=100,
+    )
+
   def get_speech_model_cls(self, model_type):
     """See base class."""
     del model_type
