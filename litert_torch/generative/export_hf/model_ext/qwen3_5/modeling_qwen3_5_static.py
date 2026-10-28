@@ -618,7 +618,13 @@ class Qwen3_5StaticForCausalLM(nn.Module):
         inputs_embeds=inputs_embeds,
         **kwargs,
     )
-    logits = self.lm_head(hidden_states)
+    logits_to_keep = kwargs.get("logits_to_keep", 0)
+    slice_indices = (
+        slice(-logits_to_keep, None)
+        if isinstance(logits_to_keep, int) and logits_to_keep > 0
+        else slice(None)
+    )
+    logits = self.lm_head(hidden_states[:, slice_indices, :])
     return logits, past_key_values
 
 
