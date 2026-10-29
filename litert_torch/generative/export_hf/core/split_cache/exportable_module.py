@@ -17,6 +17,7 @@
 import copy
 from litert_torch.generative.export_hf.core import cache as base_cache_lib
 from litert_torch.generative.export_hf.core import exportable_module as base_exportable_module
+from litert_torch.generative.export_hf.core import lora as lora_lib
 from litert_torch.generative.export_hf.core import utils
 from litert_torch.generative.export_hf.core.split_cache import attention_mask
 from litert_torch.generative.export_hf.core.split_cache import cache as kv_cache_lib
@@ -35,6 +36,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
       pos_emb,
       mask,
       kv_cache,
+      **kwargs,
   ):
     mask_global = mask['global']
     if 'local' in mask:
@@ -121,6 +123,7 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
       }
       language_model.rotary_emb.data = rope_data  # pyrefly: ignore[missing-attribute]
 
+    lora_lib.set_lora_weights(self.model, kwargs.get('lora'))
     return ret
 
   def post_process_kv_cache(self, output_cache):
@@ -252,15 +255,18 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLMPrefill(
       pos_emb,
       mask,
       kv_cache,
+      **kwargs,
   ):
     inputs = self.adapt_inputs(
         embeddings,
         pos_emb,
         mask,
         kv_cache,
+        **kwargs,
     )
     inputs |= self.attention_kwargs()
-    output = self.model(**inputs)
+    with lora_lib.bind_lora_weights(self.model, kwargs.get('lora')):
+      output = self.model(**inputs)
     output_cache = output.past_key_values
     return self.post_process_kv_cache(output_cache)
 
@@ -297,15 +303,18 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLMGenerate(
       pos_emb,
       mask,
       kv_cache,
+      **kwargs,
   ):
     inputs = self.adapt_inputs(
         embeddings,
         pos_emb,
         mask,
         kv_cache,
+        **kwargs,
     )
     inputs |= self.attention_kwargs()
-    output = self.model(**inputs)
+    with lora_lib.bind_lora_weights(self.model, kwargs.get('lora')):
+      output = self.model(**inputs)
     output_cache = output.past_key_values
     ret = self.post_process_kv_cache(output_cache)
     # Logits are always emitted in fp32: the runtime samplers expect fp32.
