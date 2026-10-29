@@ -256,6 +256,21 @@ class ExportNpuCompilationPipelineTest(absltest.TestCase):
       mock_model_cls.assert_called_once_with(tmp_dir, export_config=config)
 
   @mock.patch("litert_torch.generative.export_hf.export.run_export_tasks")
+  def test_bundled_speech_to_text_dispatches_after_model_load(
+      self, mock_run_export
+  ):
+    mock_run_export.return_value = mock.MagicMock(
+        litert_lm_model_path="/tmp/fake_whisper_output/model.litertlm"
+    )
+    export.export(
+        model="openai/whisper-tiny",
+        output_dir="/tmp/fake_whisper_output",
+        task="automatic_speech_recognition",
+    )
+    passed_tasks = mock_run_export.call_args[0][0]
+    self.assertEqual(passed_tasks, [export.export_and_package_speech_to_text])
+
+  @mock.patch("litert_torch.generative.export_hf.export.run_export_tasks")
   def test_text_to_speech_kokoro_export_orchestration(self, mock_run_export):
     mock_run_export.return_value = mock.MagicMock(
         litert_lm_model_path=None,

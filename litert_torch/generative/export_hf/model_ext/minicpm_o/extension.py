@@ -37,6 +37,13 @@ class MiniCpmOExtension(extension_lib.ModelExtension):
       'MiniCPMO',
   )
 
+  def get_export_defaults(self, config_dict, task=None):
+    """See base class."""
+    del config_dict, task
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.ANY_TO_ANY,
+    )
+
   def get_any2any_model_cls(self, model_type: str):
     """See base class."""
     del model_type

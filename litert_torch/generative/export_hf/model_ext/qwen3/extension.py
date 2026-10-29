@@ -36,6 +36,24 @@ class Qwen3Extension(extension_lib.ModelExtension):
 
   model_types = ('qwen3', 'qwen3_text')
 
+  def get_export_defaults(self, config_dict, task=None):
+    """See base class."""
+    del task
+    # LiteRT-LM export guide: int4 block-32 keeps quality for Qwen3-0.6B and
+    # 4B+ on GPU and CPU; Qwen3-1.7B (hidden_size 2048) keeps int8 weights.
+    hidden_size = extension_lib.text_config_dict(config_dict).get('hidden_size')
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.TEXT_GENERATION,
+        export_kwargs={
+            'quantization_recipe': (
+                'dynamic_wi8_afp32'
+                if hidden_size == 2048
+                else 'dynamic_wi4b32_afp32'
+            ),
+        },
+        litert_lm_model_family='qwen3',
+    )
+
   def get_tts_model_cls(self, model_type):
     """See base class."""
     del model_type
@@ -47,6 +65,17 @@ class Qwen3AsrExtension(extension_lib.ModelExtension):
   """Built-in extension for Qwen3 ASR (`qwen3_asr`)."""
 
   model_types = ('qwen3_asr',)
+
+  def get_export_defaults(self, config_dict, task=None):
+    """See base class."""
+    del config_dict, task
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.AUTOMATIC_SPEECH_RECOGNITION,
+        export_kwargs={
+            'input_sec': 5.0,
+        },
+        runtime_model_name='qwen3-asr',
+    )
 
   def get_speech_model_cls(self, model_type):
     """See base class."""

@@ -14,6 +14,7 @@
 # ==============================================================================
 """Export functions for HuggingFace Transformers models."""
 
+import copy
 import dataclasses
 import gc
 import os
@@ -56,13 +57,9 @@ def _build_export_tasks(
 
   if task == ExportTask.AUTOMATIC_SPEECH_RECOGNITION:
     if export_config.bundle_litert_lm:
-      export_tasks.append(export_lib.export_text_prefill_decode_model)
-      if export_config.externalize_embedder:
-        export_tasks.append(export_lib.export_embedder_model)
-      if export_config.export_audio_encoder:
-        export_tasks.append(export_lib.export_audio_encoder_models)
-      export_tasks.append(export_lib.export_tokenizer)
-      export_tasks.append(litert_lm_builder.package_model)
+      # The packaging layout depends on the model (encoder-decoder vs. audio
+      # encoder + LLM), which is only known once the model is loaded.
+      export_tasks.append(export_and_package_speech_to_text)
     else:
       export_tasks.append(export_lib.export_asr_models)
       if export_config.aot_backend is not None:
@@ -107,6 +104,64 @@ def _build_export_tasks(
       export_tasks.append(litert_lm_builder.package_model)
 
   return export_tasks, legacy_compile_triggered
+
+
+def export_and_package_speech_to_text(
+    source_model_artifacts: export_lib.SourceModelArtifacts,
+    export_config: exportable_module.ExportableModuleConfig,
+    exported_model_artifacts: export_lib.ExportedModelArtifacts,
+) -> export_lib.ExportedModelArtifacts:
+  """Exports and packages an `automatic_speech_recognition` model.
+
+  Encoder-decoder models whose extension returns a `Speech2TextBundleSpec`
+  (Whisper, Moonshine, Parakeet) are exported as one TFLite model and packaged
+  with `Speech2TextMetadata`; other models (audio encoder + LLM, e.g.
+  Qwen3-ASR) use the LLM export and packaging path.
+
+  Args:
+    source_model_artifacts: Loaded model, config and tokenizer.
+    export_config: Export configuration.
+    exported_model_artifacts: Artifacts exported so far.
+
+  Returns:
+    The updated artifacts, including `litert_lm_model_path`.
+  """
+  ext = model_ext_extension.resolve_model_extension(
+      source_model_artifacts.model_config, export_config
+  )
+  spec = (
+      ext.get_speech2text_bundle_spec(source_model_artifacts.model_config)
+      if ext is not None
+      else None
+  )
+  if spec is None:
+    tasks = [export_lib.export_text_prefill_decode_model]
+    if export_config.externalize_embedder:
+      tasks.append(export_lib.export_embedder_model)
+    if export_config.export_audio_encoder:
+      tasks.append(export_lib.export_audio_encoder_models)
+    tasks += [export_lib.export_tokenizer, litert_lm_builder.package_model]
+    for export_task in tasks:
+      exported_model_artifacts = export_task(
+          source_model_artifacts, export_config, exported_model_artifacts
+      )
+    return exported_model_artifacts
+
+  # The LLM-only flags that `bundle_litert_lm` turns on for ASR do not apply
+  # to the standalone speech model.
+  speech_config = copy.copy(export_config)
+  speech_config.externalize_embedder = False
+  speech_config.export_audio_encoder = False
+  speech_config.single_token_embedder = False
+  exported_model_artifacts = export_lib.export_asr_models(
+      source_model_artifacts, speech_config, exported_model_artifacts
+  )
+  exported_model_artifacts = export_lib.export_tokenizer(
+      source_model_artifacts, export_config, exported_model_artifacts
+  )
+  return litert_lm_builder.package_speech2text_model(
+      source_model_artifacts, export_config, exported_model_artifacts, spec
+  )
 
 
 def _should_run_compilation_pipeline(
