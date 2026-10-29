@@ -14,6 +14,7 @@
 # ==============================================================================
 """Exportable modules for Gemma4 vision encoder and adapter."""
 
+from litert_torch.generative.export_hf.core import attention as attention_lib
 from litert_torch.generative.export_hf.core import exportable_module as exportable_module_base
 import torch
 
@@ -26,6 +27,14 @@ class LiteRTExportableModuleForGemma4VisionEncoder(
   def __init__(self, model: torch.nn.Module, export_config):
     super().__init__(export_config)
     self.model = model
+    if export_config.use_sdpa_composite_for_vision:
+      # The vision encoder attention is bidirectional over all patches and has
+      # no KV cache, so it can use the fused SDPA composite. Only the vision
+      # tower is switched; `LiteRTGemma4VisionEncoder` then calls attention
+      # without a mask.
+      model.model.vision_tower.set_attn_implementation(
+          attention_lib.BIDIRECTIONAL_SDPA_ATTENTION
+      )
 
   def forward(
       self,

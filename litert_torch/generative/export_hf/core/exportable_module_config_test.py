@@ -83,6 +83,22 @@ class SdpaCompositeTest(parameterized.TestCase):
     self.assertTrue(config.use_qkv_norm_rope_composite)
     self.assertTrue(config.use_swiglu_composite)
 
+  def test_sdpa_composite_for_vision_follows_apply_gpu_composites(self):
+    self.assertFalse(_config().use_sdpa_composite_for_vision)
+    self.assertTrue(
+        _config(apply_gpu_composites=True).use_sdpa_composite_for_vision
+    )
+    self.assertFalse(
+        _config(
+            apply_gpu_composites=True, use_sdpa_composite_for_vision=False
+        ).use_sdpa_composite_for_vision
+    )
+    # Enabling it alone does not turn on the other GPU optimizations.
+    config = _config(use_sdpa_composite_for_vision=True)
+    self.assertTrue(config.use_sdpa_composite_for_vision)
+    self.assertFalse(config.apply_gpu_composites)
+    self.assertFalse(config.use_sdpa_composite)
+
   def test_apply_gpu_composites_respects_fusion_and_dynamic_shape_flags(self):
     config = _config(
         apply_gpu_composites=True,

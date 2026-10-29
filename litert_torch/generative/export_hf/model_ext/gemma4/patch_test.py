@@ -16,13 +16,16 @@
 
 import copy
 import types
+from unittest import mock
 
 from absl.testing import parameterized
+from litert_torch.generative.export_hf.core import attention as attention_lib
 from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module_config
 from litert_torch.generative.export_hf.core import weights_loader
 import litert_torch.generative.export_hf.model_ext as _
 from litert_torch.generative.export_hf.model_ext.gemma4 import patch
+from litert_torch.generative.export_hf.model_ext.gemma4 import vision_exportable
 from litert_torch.generative.layers import moe
 import torch
 import transformers
@@ -835,6 +838,98 @@ class PatchTest(parameterized.TestCase):
           pixel_values, pixel_position_ids, padding_positions
       )
     torch.testing.assert_close(patched_out, ref_out, rtol=1e-5, atol=1e-5)
+
+  def _vision_encoder_inputs(self, vision_config, seq_len=16):
+    torch.manual_seed(1)
+    inputs_embeds = torch.randn(1, seq_len, vision_config.hidden_size)
+    attention_mask = torch.ones((1, seq_len), dtype=torch.bool)
+    pixel_position_ids = torch.stack(
+        [torch.arange(seq_len) % 4, torch.arange(seq_len) // 4], dim=-1
+    ).unsqueeze(0)
+    return inputs_embeds, attention_mask, pixel_position_ids
+
+  def _vision_config(self):
+    vision_config = modeling_gemma4.Gemma4VisionConfig(
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        head_dim=16,
+    )
+    vision_config._attn_implementation = "eager"
+    return vision_config
+
+  def test_vision_encoder_bidirectional_sdpa_composite(self):
+    vision_config = self._vision_config()
+    torch.manual_seed(0)
+    ref_encoder = modeling_gemma4.Gemma4VisionEncoder(vision_config).eval()
+
+    composite_config = copy.deepcopy(vision_config)
+    composite_config._attn_implementation = (
+        attention_lib.BIDIRECTIONAL_SDPA_ATTENTION
+    )
+    with patch.gemma4_litert_patch():
+      encoder = modeling_gemma4.Gemma4VisionEncoder(composite_config).eval()
+    encoder.load_state_dict(ref_encoder.state_dict())
+
+    inputs = self._vision_encoder_inputs(vision_config)
+    with torch.no_grad():
+      expected = ref_encoder(
+          inputs_embeds=inputs[0],
+          attention_mask=inputs[1],
+          pixel_position_ids=inputs[2],
+      ).last_hidden_state
+      actual = encoder(
+          inputs_embeds=inputs[0],
+          attention_mask=inputs[1],
+          pixel_position_ids=inputs[2],
+      ).last_hidden_state
+    torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
+
+    class Wrapper(torch.nn.Module):
+
+      def __init__(self, enc):
+        super().__init__()
+        self.enc = enc
+
+      def forward(self, embeds, mask, pos_ids):
+        return self.enc(
+            inputs_embeds=embeds,
+            attention_mask=mask,
+            pixel_position_ids=pos_ids,
+        ).last_hidden_state
+
+    exported = torch.export.export(Wrapper(encoder), inputs)
+    marks = [
+        node
+        for node in exported.graph.nodes
+        if node.op == "call_function"
+        and "mark_tensor" in str(node.target)
+        and "odml.scaled_dot_product_attention" in (
+            str(node.args) + str(node.kwargs)
+        )
+    ]
+    # 2 layers * (Q, K, V + output); no mask input.
+    self.assertLen(marks, 8)
+
+  def test_vision_exportable_enables_sdpa_composite_for_vision(self):
+    for enabled in (True, False):
+      with self.subTest(enabled=enabled):
+        model = mock.MagicMock()
+        export_config = exportable_module_config.ExportableModuleConfig(
+            model="dummy", use_sdpa_composite_for_vision=enabled
+        )
+        vision_exportable.LiteRTExportableModuleForGemma4VisionEncoder(
+            model, export_config
+        )
+        set_attn = model.model.vision_tower.set_attn_implementation
+        if enabled:
+          set_attn.assert_called_once_with(
+              attention_lib.BIDIRECTIONAL_SDPA_ATTENTION
+          )
+        else:
+          set_attn.assert_not_called()
 
 
 if __name__ == "__main__":

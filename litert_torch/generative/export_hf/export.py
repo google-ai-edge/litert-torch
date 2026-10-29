@@ -226,6 +226,7 @@ def export(
     use_qkv_norm_rope_composite: bool | None = None,
     use_short_conv_composite: bool | None = None,
     use_sdpa_composite: bool | None = None,
+    use_sdpa_composite_for_vision: bool | None = None,
     apply_gpu_composites: bool | None = None,
     use_bool_mask: bool | None = None,
     use_fused_sdpa_cache_update: bool | None = None,
@@ -314,6 +315,9 @@ def export(
     use_qkv_norm_rope_composite: Whether to enable the QKV norm rope composite.
     use_sdpa_composite: Whether to enable the fused transposed SDPA composite in
       both prefill and decode signatures.
+    use_sdpa_composite_for_vision: Whether the vision encoder (currently Gemma 4
+      only) emits the `odml.scaled_dot_product_attention` composite for fused
+      (flash) attention on GPU. Defaults to `apply_gpu_composites`.
     apply_gpu_composites: Master switch for GPU composite emission. Implied by
       use_sdpa_composite.
     use_bool_mask: Whether to use a boolean attention mask instead of

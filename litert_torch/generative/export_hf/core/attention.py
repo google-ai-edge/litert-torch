@@ -17,12 +17,13 @@
 import math
 from typing import Any, Optional
 import jaxtyping as jt
+from litert_torch.backend import composite
 from litert_torch.generative.custom_ops import bmm_4d as bmm_lib
+from litert_torch.generative.export_hf.experimental.composites import bidirectional_sdpa as bidirectional_sdpa_lib
 from litert_torch.generative.export_hf.experimental.composites import sdpa as gpu_sdpa
 import torch
 import torch.nn.functional as F
 import transformers
-from litert_torch.backend import composite
 
 
 def scaled_dot_product_attention_transposed(
@@ -260,4 +261,90 @@ def transposed_attention(
 
 transformers.AttentionInterface.register(
     "lrt_transposed_attention", transposed_attention
+)
+
+
+# Name of the `transformers` attention implementation that emits the
+# `odml.scaled_dot_product_attention` composite for non-autoregressive,
+# bidirectional attention (e.g. vision encoders).
+BIDIRECTIONAL_SDPA_ATTENTION = "lrt_bidirectional_sdpa"
+
+
+def bidirectional_sdpa_attention(
+    module: torch.nn.Module,
+    query: jt.Float[torch.Tensor, "b n t h"],
+    key: jt.Shaped[torch.Tensor, "b k s h"],
+    value: jt.Shaped[torch.Tensor, "b k s h"],
+    attention_mask: torch.Tensor | None,
+    dropout: float = 0.0,
+    scaling: float | None = None,
+    softcap: float | None = None,
+    is_causal: bool | None = None,
+    **kwargs,
+) -> tuple[torch.Tensor, None]:
+  """`transformers` attention interface for bidirectional SDPA composites.
+
+  Emits `odml.scaled_dot_product_attention` (see
+  `experimental/composites/bidirectional_sdpa.py` for the full contract), so
+  GPU runtimes can use a fused (flash) attention kernel instead of
+  materializing the `[B, N, T, S]` attention logits.
+
+  Only valid for non-autoregressive, bidirectional (full, unmasked) attention,
+  e.g. vision encoders. To use it, a model opts in explicitly with
+  `set_attn_implementation(BIDIRECTIONAL_SDPA_ATTENTION)` on the relevant
+  sub-model, and must call attention with `attention_mask=None`; a mask, a
+  causal module, dropout or a logits soft-cap is rejected instead of being
+  silently dropped.
+
+  Args:
+    module: The attention layer module.
+    query: Query tensor, `[B, N, T, H]`.
+    key: Key tensor, `[B, K, S, H]` (no KV cache).
+    value: Value tensor, `[B, K, S, H]` (no KV cache).
+    attention_mask: Must be `None`.
+    dropout: Must be 0.
+    scaling: Scale applied to the query before the QK^T product. Defaults to
+      `1/sqrt(H)`, like `torch.nn.functional.scaled_dot_product_attention`.
+    softcap: Must be `None`.
+    is_causal: Must be falsy.
+    **kwargs: Ignored.
+
+  Returns:
+    The attention output, `[B, T, N, H]` (as expected from `transformers`
+    attention interfaces), and `None` for the attention weights.
+  """
+  del kwargs
+  if attention_mask is not None:
+    raise ValueError(
+        f"{BIDIRECTIONAL_SDPA_ATTENTION} only supports full bidirectional"
+        " attention; call it with attention_mask=None."
+    )
+  if is_causal or getattr(module, "is_causal", False):
+    raise ValueError(
+        f"{BIDIRECTIONAL_SDPA_ATTENTION} does not support causal attention."
+    )
+  if dropout:
+    raise ValueError(
+        f"{BIDIRECTIONAL_SDPA_ATTENTION} does not support dropout, got"
+        f" {dropout=}."
+    )
+  if softcap is not None:
+    raise ValueError(
+        f"{BIDIRECTIONAL_SDPA_ATTENTION} does not support a logits soft-cap."
+    )
+  if scaling is None:
+    scaling = 1.0 / math.sqrt(query.shape[-1])
+  # BNTH -> BTNH. These transposes usually cancel out with the model's own
+  # BTNH -> BNTH transposes right after the Q/K/V projections.
+  out = bidirectional_sdpa_lib.bidirectional_sdpa(
+      query.transpose(1, 2),
+      key.transpose(1, 2),
+      value.transpose(1, 2),
+      scale=scaling,
+  )
+  return out, None
+
+
+transformers.AttentionInterface.register(
+    BIDIRECTIONAL_SDPA_ATTENTION, bidirectional_sdpa_attention
 )

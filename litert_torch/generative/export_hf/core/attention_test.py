@@ -351,5 +351,70 @@ class TransposedAttentionIsCausalTest(parameterized.TestCase):
     self.assertFalse(override_prefill.attention_kwargs()['sdpa_is_causal'])
 
 
+class _BidirectionalAttentionModule(torch.nn.Module):
+  """Minimal stand-in for a `transformers` vision attention layer."""
+
+  def __init__(self, num_heads: int, num_kv_heads: int, is_causal=False):
+    super().__init__()
+    self.num_key_value_groups = num_heads // num_kv_heads
+    self.is_causal = is_causal
+    self.training = False
+
+
+class BidirectionalSdpaAttentionTest(parameterized.TestCase):
+
+  def _inputs(self, num_heads=4, num_kv_heads=2, seq_len=12, head_dim=16):
+    torch.manual_seed(0)
+    query = torch.randn(1, num_heads, seq_len, head_dim)
+    key = torch.randn(1, num_kv_heads, seq_len, head_dim)
+    value = torch.randn(1, num_kv_heads, seq_len, head_dim)
+    return query, key, value
+
+  def test_is_registered(self):
+    self.assertIs(
+        modeling_utils.ALL_ATTENTION_FUNCTIONS[
+            attention_lib.BIDIRECTIONAL_SDPA_ATTENTION
+        ],
+        attention_lib.bidirectional_sdpa_attention,
+    )
+
+  @parameterized.named_parameters(
+      dict(testcase_name='mha', num_kv_heads=4, scaling=1.0),
+      dict(testcase_name='gqa', num_kv_heads=2, scaling=1.0),
+      dict(testcase_name='default_scaling', num_kv_heads=2, scaling=None),
+  )
+  def test_matches_eager_attention(self, num_kv_heads, scaling):
+    module = _BidirectionalAttentionModule(4, num_kv_heads)
+    query, key, value = self._inputs(num_kv_heads=num_kv_heads)
+    eager_scaling = scaling if scaling is not None else 16**-0.5
+    expected, _ = modeling_utils.ALL_ATTENTION_FUNCTIONS['sdpa'](
+        module, query, key, value, None, scaling=eager_scaling
+    )
+    actual, weights = attention_lib.bidirectional_sdpa_attention(
+        module, query, key, value, None, scaling=scaling
+    )
+    self.assertIsNone(weights)
+    self.assertEqual(actual.shape, (1, 12, 4, 16))  # B, T, N, H
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+  @parameterized.named_parameters(
+      dict(testcase_name='mask', kwargs={}, use_mask=True),
+      dict(testcase_name='causal_module', kwargs={}, module_is_causal=True),
+      dict(testcase_name='causal_kwarg', kwargs={'is_causal': True}),
+      dict(testcase_name='dropout', kwargs={'dropout': 0.1}),
+      dict(testcase_name='softcap', kwargs={'softcap': 30.0}),
+  )
+  def test_rejects_unsupported(
+      self, kwargs, use_mask=False, module_is_causal=False
+  ):
+    module = _BidirectionalAttentionModule(4, 2, is_causal=module_is_causal)
+    query, key, value = self._inputs()
+    mask = torch.zeros(1, 1, 12, 12) if use_mask else None
+    with self.assertRaises(ValueError):
+      attention_lib.bidirectional_sdpa_attention(
+          module, query, key, value, mask, scaling=1.0, **kwargs
+      )
+
+
 if __name__ == '__main__':
   googletest.main()
