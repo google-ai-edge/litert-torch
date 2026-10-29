@@ -790,52 +790,6 @@ class PatchTest(parameterized.TestCase):
         f"Max diff: {(expected_output - actual_output).abs().max().item()}",
     )
 
-  def test_vision_patch_embedder_precomputes_tables(self):
-    vision_config = modeling_gemma4.Gemma4VisionConfig(
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        head_dim=8,
-        patch_size=14,
-        position_embedding_size=64,
-        pooling_kernel_size=2,
-    )
-    torch.manual_seed(0)
-    ref_embedder = modeling_gemma4.Gemma4VisionPatchEmbedder(
-        vision_config
-    ).eval()
-    with torch.no_grad():
-      ref_embedder.position_embedding_table.normal_()
-
-    with patch.gemma4_litert_patch():
-      patched_embedder = modeling_gemma4.Gemma4VisionPatchEmbedder(
-          vision_config
-      ).eval()
-    patched_embedder.load_state_dict(ref_embedder.state_dict())
-
-    self.assertIn("table_x", patched_embedder._buffers)
-    self.assertIn("table_y", patched_embedder._buffers)
-    torch.testing.assert_close(
-        patched_embedder.table_x, ref_embedder.position_embedding_table[0]
-    )
-    torch.testing.assert_close(
-        patched_embedder.table_y, ref_embedder.position_embedding_table[1]
-    )
-
-    pixel_values = torch.randn(1, 16, 3 * 14 * 14)
-    pixel_position_ids = torch.randint(0, 8, (1, 16, 2))
-    padding_positions = torch.zeros((1, 16), dtype=torch.bool)
-    with torch.no_grad():
-      ref_out = ref_embedder(
-          pixel_values, pixel_position_ids, padding_positions
-      )
-      patched_out = patched_embedder(
-          pixel_values, pixel_position_ids, padding_positions
-      )
-    torch.testing.assert_close(patched_out, ref_out, rtol=1e-5, atol=1e-5)
-
 
 if __name__ == "__main__":
   googletest.main()

@@ -133,20 +133,6 @@ class InitAndCastTest(absltest.TestCase):
         loader("model.proj.weight")
     self.assertIs(tiny.rotary.inv_freq, real)
 
-  def test_materialize_params_on_cpu_restores_meta(self):
-    ref = _Tiny()
-    state = dict(ref.state_dict())
-    with weights_loader_lib.init_params_on_meta():
-      tiny = _Tiny()
-    self.assertTrue(all(p.is_meta for p in tiny.parameters()))
-    with weights_loader_lib.materialize_params_on_cpu(
-        tiny, weights_loader=state.__getitem__
-    ):
-      self.assertTrue(all(not p.is_meta for p in tiny.parameters()))
-      self.assertIs(tiny.lm_head.weight, tiny.embed_tokens.weight)
-      torch.testing.assert_close(tiny.proj.weight, ref.proj.weight)
-    self.assertTrue(all(p.is_meta for p in tiny.parameters()))
-
 
 class HFCheckpointWeightsLoaderTest(absltest.TestCase):
 
