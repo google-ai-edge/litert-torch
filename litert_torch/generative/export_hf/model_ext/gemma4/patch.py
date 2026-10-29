@@ -15,7 +15,6 @@
 """Patches for Gemma4 model for on-device deployment."""
 
 import contextlib
-import weakref
 from litert_torch.backend import optimization_barrier as optimization_barrier_lib
 from litert_torch.backend.torch_tfl import _ops as _  # Registers torch.ops.tfl.*
 from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope
@@ -724,46 +723,8 @@ except ImportError:
     yield
 
 
-# TODO(b/576081319): Clean up once Converter V2 folds SliceOp and elementwise
-# ops on DenseResourceElementsAttr constants.
-_PATCHED_MODULES: list[weakref.ReferenceType[torch.nn.Module]] = []
-
-
 class LiteRTGemma4VisionPatchEmbedder(Gemma4VisionPatchEmbedder):
   """LiteRT Gemma4 Vision Patch Embedder."""
-
-  def __init__(self, config):
-    super().__init__(config)
-    # TODO(b/576081319): Clean up once Converter V2 folds SliceOp on
-    # DenseResourceElementsAttr constants.
-    table = self.position_embedding_table
-    del self._parameters["position_embedding_table"]
-    self.register_buffer(
-        "position_embedding_table",
-        torch.ones(table.shape, dtype=table.dtype, device="cpu"),
-        persistent=True,
-    )
-    self.precompute_buffers()
-    _PATCHED_MODULES.append(weakref.ref(self))
-
-  def precompute_buffers(self):
-    if self.position_embedding_table.is_meta:
-      return
-    with torch.no_grad():
-      self.register_buffer(
-          "table_x",
-          self.position_embedding_table[0].detach().cpu().clone(),
-          persistent=False,
-      )
-      self.register_buffer(
-          "table_y",
-          self.position_embedding_table[1].detach().cpu().clone(),
-          persistent=False,
-      )
-
-  def _load_from_state_dict(self, *args, **kwargs):
-    super()._load_from_state_dict(*args, **kwargs)
-    self.precompute_buffers()
 
   def _position_embeddings(
       self, pixel_position_ids: torch.Tensor, padding_positions: torch.Tensor
@@ -781,13 +742,8 @@ class LiteRTGemma4VisionPatchEmbedder(Gemma4VisionPatchEmbedder):
     one_hot_y = clamped_positions_y.unsqueeze(-1) == classes
 
     # AI Edge Quantizer crashes on BMM weight quant.
-    # TODO(b/576081319): Clean up once Converter V2 folds SliceOp on
-    # DenseResourceElementsAttr constants.
-    table_x = getattr(self, "table_x", None)
-    table_y = getattr(self, "table_y", None)
-    if table_x is None or table_y is None:
-      table_x = self.position_embedding_table[0]
-      table_y = self.position_embedding_table[1]
+    table_x = self.position_embedding_table[0]
+    table_y = self.position_embedding_table[1]
     one_hot_x = one_hot_x.to(table_x.dtype)
     one_hot_y = one_hot_y.to(table_y.dtype)
     x_embeddings = one_hot_x @ table_x
@@ -1259,11 +1215,6 @@ def gemma4_litert_patch():
         setattr(gemma4_pkg, name, cls)
       if name in transformers.__dict__:
         setattr(transformers, name, cls)
-    for ref in list(_PATCHED_MODULES):
-      m = ref()
-      if m is not None:
-        m.precompute_buffers()
-    _PATCHED_MODULES.clear()
 
 
 # pytype: enable=import-error

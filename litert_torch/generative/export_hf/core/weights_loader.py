@@ -265,57 +265,6 @@ def buffers_on_meta(
       module._buffers[name] = buf  # pylint: disable=protected-access
 
 
-@contextlib.contextmanager
-def materialize_params_on_cpu(
-    *roots: nn.Module,
-    weights_loader: WeightsLoader,
-) -> Iterator[None]:
-  """Temporarily loads meta parameters of `roots` onto CPU from `weights_loader`.
-
-  Used when exporting a submodule with Converter V1 while the parent model's
-  parameters live on the meta device (Converter V2). Shared parameters are
-  materialized once, and all parameters are restored to meta on exit so CPU
-  memory is released immediately after conversion.
-
-  Args:
-    *roots: The modules whose meta parameters should be materialized on CPU.
-    weights_loader: Loader resolving parameter FQNs relative to each root.
-
-  Yields:
-    None.
-  """
-  materialized: dict[int, nn.Parameter] = {}
-  originals: list[tuple[nn.Module, str, nn.Parameter]] = []
-  with torch.no_grad():
-    for root in roots:
-      for prefix, module in root.named_modules(remove_duplicate=False):
-        for name, param in list(module._parameters.items()):  # pylint: disable=protected-access
-          if param is None or not param.is_meta:
-            continue
-          if id(param) not in materialized:
-            fqn = f"{prefix}.{name}" if prefix else name
-            value = None
-            for candidate in (fqn, f"model.{fqn}", f"model.model.{fqn}"):
-              try:
-                value = weights_loader(candidate)
-                break
-              except KeyError:
-                continue
-            if value is None:
-              value = weights_loader(fqn)
-            materialized[id(param)] = nn.Parameter(
-                value.to(dtype=param.dtype, device="cpu"),
-                requires_grad=param.requires_grad,
-            )
-          originals.append((module, name, param))
-          module._parameters[name] = materialized[id(param)]  # pylint: disable=protected-access
-  try:
-    yield
-  finally:
-    for module, name, param in originals:
-      module._parameters[name] = param  # pylint: disable=protected-access
-
-
 def with_tensors(
     weights_loader: WeightsLoader | None, tensors: dict[str, torch.Tensor]
 ) -> WeightsLoader | None:

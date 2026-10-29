@@ -1151,19 +1151,11 @@ def _convert_and_export_module(
     model_path: str,
     export_config: exportable_module.ExportableModuleConfig,
     weights_loader: weights_loader_lib.WeightsLoader | None,
-    use_v2: bool | None = None,
 ) -> None:
   """Converts and exports a single exportable module (V1 or V2)."""
-  if use_v2 is None:
-    use_v2 = export_config.use_v2
+  use_v2 = export_config.use_v2
   with contextlib.ExitStack() as stack:
     if not use_v2:
-      if weights_loader is not None:
-        stack.enter_context(
-            weights_loader_lib.materialize_params_on_cpu(
-                module, weights_loader=weights_loader
-            )
-        )
       v2_kwargs = {}
       trace_on_meta = False
     else:
@@ -1341,15 +1333,12 @@ def export_audio_encoder_models_for_llm(
       **export_config.extra_kwargs,
   )
   audio_encoder_path = os.path.join(work_dir, 'audio_encoder.tflite')  # pyrefly: ignore[no-matching-overload]
-  # TODO(b/576081319): Switch audio encoder back to Converter V2 once constant
-  # folding on DenseResourceElementsAttr is supported.
   _convert_and_export_module(
       encode_module,
       sample_inputs,
       audio_encoder_path,
       export_config,
       weights_loader,
-      use_v2=False,
   )
   quantization_recipe_list = (
       quantization_recipe.split(',') if quantization_recipe else [None]
