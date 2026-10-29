@@ -33,6 +33,19 @@ class Lfm2VlExtension(extension_lib.ModelExtension):
 
   model_types = ('lfm2_vl',)
 
+  def get_export_defaults(self, config_dict, task=None):
+    """See base class."""
+    del config_dict
+    vlm = task in (None, extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT)
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT,
+        export_kwargs={
+            'quantization_recipe': 'dynamic_wi4b32_afp32',
+            'export_vision_encoder': vlm,
+        },
+        litert_lm_model_family=None if vlm else 'lfm2',
+    )
+
   def get_vision_exportables(self, model_config, export_config=None):
     """See base class."""
     del model_config, export_config
