@@ -176,6 +176,32 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
     self.in_proj_z = nn.Linear(hidden_size, self.value_dim, bias=False)
     self.in_proj_b = nn.Linear(hidden_size, num_v_heads, bias=False)
     self.in_proj_a = nn.Linear(hidden_size, num_v_heads, bias=False)
+    # Optional fused [z | b | a] projection, see `fuse_zba_projections`.
+    self.in_proj_zba: Optional[nn.Linear] = None
+
+  def fuse_zba_projections(self) -> None:
+    """Fuses `in_proj_z`, `in_proj_b` and `in_proj_a` into `in_proj_zba`.
+
+    On GPU, one matmul over the stacked weights followed by a split decodes
+    faster than three separate matmuls, two of which have only `num_v_heads`
+    rows. `in_proj_qkv` stays separate: splitting its rows off a fused output
+    copies the largest activation, which slows down prefill. Call after the
+    weights are loaded.
+    """
+    weight = torch.cat(
+        [self.in_proj_z.weight, self.in_proj_b.weight, self.in_proj_a.weight],
+        dim=0,
+    )
+    fused = nn.Linear(
+        self.hidden_size,
+        weight.shape[0],
+        bias=False,
+        device=weight.device,
+        dtype=weight.dtype,
+    )
+    with torch.no_grad():
+      fused.weight.copy_(weight)
+    self.in_proj_zba = fused
 
   def _forward_from_projections(
       self,
@@ -339,12 +365,24 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
           device=hidden_states.device,
       )
 
+    mixed_qkv = self.in_proj_qkv(hidden_states)
+    if self.in_proj_zba is not None:
+      z, b, a = torch.split(
+          self.in_proj_zba(hidden_states),
+          [self.value_dim, self.num_v_heads, self.num_v_heads],
+          dim=-1,
+      )
+    else:
+      z = self.in_proj_z(hidden_states)
+      b = self.in_proj_b(hidden_states)
+      a = self.in_proj_a(hidden_states)
+
     core_attn_out, new_conv_state, new_recurrent_state = (
         self._forward_from_projections(
-            self.in_proj_qkv(hidden_states),
-            self.in_proj_z(hidden_states),
-            self.in_proj_b(hidden_states),
-            self.in_proj_a(hidden_states),
+            mixed_qkv,
+            z,
+            b,
+            a,
             conv_state,
             recurrent_state,
             valid_mask=valid_mask,
