@@ -18,6 +18,7 @@ import contextlib
 import weakref
 from litert_torch.backend import optimization_barrier as optimization_barrier_lib
 from litert_torch.backend.torch_tfl import _ops as _  # Registers torch.ops.tfl.*
+from litert_torch.generative.export_hf.core import attention as attention_lib
 from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope
 from litert_torch.generative.export_hf.experimental.composites import rope as rope_composite
 from litert_torch.generative.export_hf.experimental.composites import swiglu as swiglu_composite
@@ -889,12 +890,21 @@ class LiteRTGemma4VisionEncoder(Gemma4VisionEncoder):
       pixel_position_ids: torch.LongTensor | None = None,
       **kwargs,
   ) -> transformers.modeling_outputs.BaseModelOutputWithPast:
-    num_seq = attention_mask.shape[1]
-    attention_mask = torch.zeros(
-        (1, 1, num_seq, num_seq),
-        dtype=torch.float32,
-        device=inputs_embeds.device,
-    )
+    # The attention is bidirectional over all patches; padded patches are
+    # masked out later by the pooler.
+    if (
+        self.config._attn_implementation  # pylint: disable=protected-access
+        == attention_lib.BIDIRECTIONAL_SDPA_ATTENTION
+    ):
+      # The bidirectional SDPA composite requires `attention_mask=None`.
+      attention_mask = None
+    else:
+      num_seq = attention_mask.shape[1]
+      attention_mask = torch.zeros(
+          (1, 1, num_seq, num_seq),
+          dtype=torch.float32,
+          device=inputs_embeds.device,
+      )
 
     # embed positions
     hidden_states = inputs_embeds
