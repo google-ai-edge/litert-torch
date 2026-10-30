@@ -30,10 +30,20 @@ import transformers
 class Gemma4RMSNorm(torch.nn.Module):
   """RMSNorm Layer."""
 
-  def __init__(self, dim: int, eps: float = 1e-6, with_scale: bool = True):
+  def __init__(
+      self,
+      dim: int,
+      eps: float = 1e-6,
+      with_scale: bool = True,
+      elide_final_scale: bool = False,
+  ):
     """RMSNorm Layer."""
     super().__init__()
     self.with_scale = with_scale
+    # Set post-construction by `patch_gemma4_model` from
+    # `export_config.elide_rmsnorm_final_scale`; defaults to the original
+    # always-emit-final_scale behavior so other callers are unaffected.
+    self.elide_final_scale = elide_final_scale
 
     if self.with_scale:
       self.weight = torch.nn.Parameter(torch.ones(dim), requires_grad=True)
@@ -48,21 +58,29 @@ class Gemma4RMSNorm(torch.nn.Module):
     # are no-ops when the model computes in fp32.
     original_dtype = hidden_states.dtype
     hidden_states = hidden_states.to(torch.float32)
-    return normalization.rms_norm_with_hlfb(
-        hidden_states,
+    w = (
         self.weight
         if self.with_scale
         else torch.ones(
             (self.hidden_size,),
             dtype=torch.float32,
             device=hidden_states.device,
-        ),
-        self.variance_epsilon,
-        torch.ones(
+        )
+    )
+    final_scale = (
+        None
+        if self.elide_final_scale
+        else torch.ones(
             (self.hidden_size,),
             dtype=torch.float32,
             device=hidden_states.device,
-        ),
+        )
+    )
+    return normalization.rms_norm_with_hlfb(
+        hidden_states,
+        w,
+        self.variance_epsilon,
+        final_scale,
     ).to(original_dtype)
 
   def extra_repr(self):
@@ -676,15 +694,37 @@ try:
     use_rope = export_config.use_rope_composite
     use_qkv_norm_rope = export_config.use_qkv_norm_rope_composite
     use_swiglu = getattr(export_config, "use_swiglu_composite", False)
+    # RMSNorm's `final_scale` multiply is a no-op (all-ones) unless the norm
+    # has a learned `scale` parameter. Tracing that redundant multiply
+    # produces an identical constant at every norm call site, which some NPU
+    # backends end up merging into a single multi-consumer constant. This
+    # flag skips tracing the multiply instead of emitting the all-ones
+    # constant. Gemma4-only, so it's read from `extra_kwargs` rather than
+    # being a first-class `ExportableModuleConfig` field.
+    elide_final_scale = export_config.extra_kwargs.get(
+        "elide_rmsnorm_final_scale", False
+    )
     print(
         "Gemma4 model patch applied. "
         f"fuse_gate_up={fuse_gate_up}, fuse_qkv={fuse_qkv}, "
         f"use_rope_composite={use_rope}, "
         f"use_qkv_norm_rope_composite={use_qkv_norm_rope}, "
-        f"use_swiglu_composite={use_swiglu}"
+        f"use_swiglu_composite={use_swiglu}, "
+        f"elide_rmsnorm_final_scale={elide_final_scale}"
     )
 
     replaced_modules = []
+    # `model.modules()` is used here (instead of folding this into
+    # `replace_modules` below) because that walk stops recursing once it
+    # replaces a Gemma4TextAttention with a FusedGemma4TextAttention, which
+    # reuses (not copies) the original's q_norm/k_norm/v_norm Gemma4RMSNorm
+    # instances — a traversal gated on that same recursion would miss them.
+    patched_norms = []
+    if elide_final_scale:
+      for norm in model.modules():
+        if isinstance(norm, Gemma4RMSNorm):
+          patched_norms.append((norm, norm.elide_final_scale))
+          norm.elide_final_scale = True
 
     def replace_modules(module):
       for child_name, child in module.named_children():
@@ -724,6 +764,8 @@ try:
     finally:
       for module, name, original in reversed(replaced_modules):
         setattr(module, name, original)
+      for norm, original_elide in patched_norms:
+        norm.elide_final_scale = original_elide
 
 
 except ImportError:

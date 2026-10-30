@@ -397,6 +397,67 @@ class PatchTest(parameterized.TestCase):
       self.assertIsInstance(layer.self_attn, patch.FusedGemma4TextAttention)
       self.assertTrue(layer.self_attn.qkv_proj.weight.is_meta)
 
+  def _build_container_with_gemma4_decoder_layer(self, config):
+    """Builds a minimal container holding a patched `Gemma4TextDecoderLayer`.
+
+    `patch_gemma4_model` only needs `model.modules()`/`named_children` to
+    find a `Gemma4TextDecoderLayer`; it doesn't require a full
+    `Gemma4ForCausalLM`, so this sidesteps constructing the full causal LM
+    (which isn't exercised under `gemma4_litert_patch` elsewhere and hits an
+    unrelated MoE-dispatch incompatibility in this transformers version).
+    """
+    with patch.gemma4_litert_patch():
+      layer = modeling_gemma4.Gemma4TextDecoderLayer(config, layer_idx=0)
+    container = torch.nn.Module()
+    container.layers = torch.nn.ModuleList([layer])
+    return container, layer
+
+  def test_patch_gemma4_model_elides_rmsnorm_final_scale(self):
+    config = _get_dummy_gemma4_text_config()
+    model, layer = self._build_container_with_gemma4_decoder_layer(config)
+
+    self.assertIsInstance(layer.self_attn.q_norm, patch.Gemma4RMSNorm)
+    self.assertFalse(layer.self_attn.q_norm.elide_final_scale)
+    self.assertFalse(layer.input_layernorm.elide_final_scale)
+
+    export_config = exportable_module_config.ExportableModuleConfig(
+        model="dummy",
+        output_dir=None,
+        fuse_qkv=True,
+        extra_kwargs={"elide_rmsnorm_final_scale": True},
+    )
+
+    with patch.patch_gemma4_model(model, export_config):
+      fused_attn = model.layers[0].self_attn
+      self.assertIsInstance(fused_attn, patch.FusedGemma4TextAttention)
+      # `q_norm`/`k_norm` are reused by reference (not copied) from the
+      # original attention module when it's fused; this regresses a bug
+      # where flagging `Gemma4RMSNorm` instances inside the same
+      # `named_children` walk used to fuse MLP/Attention meant the fusion
+      # replaced the parent before the walk ever reached these norms.
+      self.assertTrue(fused_attn.q_norm.elide_final_scale)
+      self.assertTrue(fused_attn.k_norm.elide_final_scale)
+      self.assertTrue(model.layers[0].input_layernorm.elide_final_scale)
+
+    # Restored once the trace-time patch context exits.
+    self.assertFalse(layer.self_attn.q_norm.elide_final_scale)
+    self.assertFalse(layer.input_layernorm.elide_final_scale)
+
+  def test_patch_gemma4_model_keeps_final_scale_by_default(self):
+    config = _get_dummy_gemma4_text_config()
+    model, _ = self._build_container_with_gemma4_decoder_layer(config)
+
+    export_config = exportable_module_config.ExportableModuleConfig(
+        model="dummy",
+        output_dir=None,
+        fuse_qkv=True,
+    )
+
+    with patch.patch_gemma4_model(model, export_config):
+      fused_attn = model.layers[0].self_attn
+      self.assertFalse(fused_attn.q_norm.elide_final_scale)
+      self.assertFalse(model.layers[0].input_layernorm.elide_final_scale)
+
   def test_gemma4_router_equivalence(self):
     config = _get_dummy_gemma4_text_config()
     config.num_experts = 128

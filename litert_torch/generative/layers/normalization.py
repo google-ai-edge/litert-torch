@@ -194,7 +194,7 @@ def rms_norm_with_hlfb(
     x: torch.Tensor,
     w: torch.Tensor,
     eps: float,
-    final_scale: torch.Tensor,
+    final_scale: torch.Tensor | None = None,
 ):
   """RMS Normalization with high-level function boundary enabled.
 
@@ -202,7 +202,9 @@ def rms_norm_with_hlfb(
     x (torch.Tensor): Input tensor for RMS Normalization, with BCHW shape.
     w (torch.Tensor): The learned parameter tensor for normalization.
     eps (float): A small float value to ensure numerical stability.
-    final_scale (torch.Tensor): The final scale to apply to the normalization.
+    final_scale (torch.Tensor | None): An optional additional scale to apply
+      to the normalization, on top of `w`. Omit when there's no extra scale
+      to avoid tracing a redundant all-ones multiply into the graph.
 
   Returns:
     The output tensor of RMS Normalization.
@@ -216,7 +218,9 @@ def rms_norm_with_hlfb(
   def _norm(x):
     return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
 
-  output = _norm(x.float()).type_as(x) * final_scale
+  output = _norm(x.float()).type_as(x)
+  if final_scale is not None:
+    output = output * final_scale
   out = output * w
 
   out = builder.mark_outputs(out)
