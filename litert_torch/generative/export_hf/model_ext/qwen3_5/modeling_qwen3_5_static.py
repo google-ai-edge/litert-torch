@@ -140,6 +140,7 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
       gdn_mode: int = 0,
       use_fp32: bool = True,
       use_short_conv_composite: bool = True,
+      use_gdn_composite: bool = True,
   ):
     super().__init__()
     self.layer_idx = layer_idx
@@ -170,12 +171,41 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
     self.gdn_mode = gdn_mode
     self.use_fp32 = use_fp32
     self.use_short_conv_composite = use_short_conv_composite
+    # Prefill and decode run the block after the short conv as one
+    # `odml.gated_delta_net` composite, see `_forward_composite`.
+    self.use_gdn_composite = use_gdn_composite
     self.out_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
     self.in_proj_qkv = nn.Linear(hidden_size, self.conv_dim, bias=False)
     self.in_proj_z = nn.Linear(hidden_size, self.value_dim, bias=False)
     self.in_proj_b = nn.Linear(hidden_size, num_v_heads, bias=False)
     self.in_proj_a = nn.Linear(hidden_size, num_v_heads, bias=False)
+    # Optional fused [z | b | a] projection, see `fuse_zba_projections`.
+    self.in_proj_zba: Optional[nn.Linear] = None
+
+  def fuse_zba_projections(self) -> None:
+    """Fuses `in_proj_z`, `in_proj_b` and `in_proj_a` into `in_proj_zba`.
+
+    On GPU, one matmul over the stacked weights followed by a split decodes
+    faster than three separate matmuls, two of which have only `num_v_heads`
+    rows. `in_proj_qkv` stays separate: splitting its rows off a fused output
+    copies the largest activation, which slows down prefill. Call after the
+    weights are loaded.
+    """
+    weight = torch.cat(
+        [self.in_proj_z.weight, self.in_proj_b.weight, self.in_proj_a.weight],
+        dim=0,
+    )
+    fused = nn.Linear(
+        self.hidden_size,
+        weight.shape[0],
+        bias=False,
+        device=weight.device,
+        dtype=weight.dtype,
+    )
+    with torch.no_grad():
+      fused.weight.copy_(weight)
+    self.in_proj_zba = fused
 
   def _forward_from_projections(
       self,
@@ -304,6 +334,85 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
     )
     return core_attn_out, new_conv_state, new_recurrent_state
 
+  def _use_gdn_composite(self, mixed_qkv: torch.Tensor) -> bool:
+    """Whether to emit the `odml.gated_delta_net` composite."""
+    return (
+        mixed_qkv.shape[0] == 1
+        and self.in_proj_zba is not None
+        and getattr(self, "use_gdn_composite", False)
+        and getattr(self, "use_fused_gdn", True)
+        and getattr(self, "use_short_conv_composite", True)
+    )
+
+  def _forward_composite(
+      self,
+      mixed_qkv: torch.Tensor,
+      zba: torch.Tensor,
+      conv_state: torch.Tensor,
+      recurrent_state: torch.Tensor,
+      valid_mask: Optional[torch.Tensor] = None,
+  ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prefill or decode with the short conv and GatedDeltaNet composites.
+
+    Same math as `_forward_from_projections`. Everything between the short conv
+    and `out_proj` (q/k/v and z/b/a splits, gates, masks, L2 norms, recurrence
+    and gated RMSNorm) is one `odml.gated_delta_net` composite, which GPU
+    delegates run as one kernel for decode and two for prefill.
+
+    Args:
+      mixed_qkv: `in_proj_qkv` output [1, seq_len, conv_dim].
+      zba: `in_proj_zba` output [1, seq_len, value_dim + 2 * num_v_heads].
+      conv_state: [1, conv_dim, conv_kernel_size - 1].
+      recurrent_state: [1, num_v_heads, head_k_dim, head_v_dim], float32.
+      valid_mask: Optional [1, seq_len] mask; prefill pads on the right.
+
+    Returns:
+      The gated, normalized output [1, seq_len, value_dim], the new conv state
+      and the new recurrent state.
+    """
+    batch_size, seq_len, _ = mixed_qkv.shape
+    token_mask: Optional[torch.Tensor] = None
+    num_valid_tokens: Optional[torch.Tensor] = None
+    if valid_mask is not None and valid_mask.numel() > 0:
+      mask = valid_mask.view(batch_size, seq_len).to(mixed_qkv.dtype)
+      token_mask = mask
+      if seq_len > 1:
+        # The short conv takes its new state at the last valid token, and the
+        # composite masks the padded tokens out.
+        num_valid_tokens = (
+            valid_mask[0].to(torch.float32).sum().to(torch.int32).reshape(1)
+        )
+      else:
+        mixed_qkv = mixed_qkv * mask.unsqueeze(-1)
+    conv_out, new_conv_state = short_conv_composite.apply_short_conv_step(
+        in_proj_out=mixed_qkv,
+        conv_state=conv_state,
+        conv_weight=self.conv1d.weight,
+        conv_bias=self.conv1d.bias,
+        num_valid_tokens=num_valid_tokens,
+        conv_L_cache=self.conv_kernel_size,
+        is_gated=False,
+        use_silu=True,
+    )
+    core_attn_out, new_recurrent_state = gated_delta_rule.apply_gated_delta_net(
+        conv_out,
+        zba,
+        recurrent_state,
+        self.A_log,
+        self.dt_bias,
+        self.norm.weight,
+        token_mask,
+        num_k_heads=self.num_k_heads,
+        num_v_heads=self.num_v_heads,
+        head_k_dim=self.head_k_dim,
+        head_v_dim=self.head_v_dim,
+        eps=self.rms_norm_eps,
+        norm_eps=self.norm.variance_epsilon,
+        use_fp32=self.use_fp32,
+        gdn_mode=self.gdn_mode,
+    )
+    return core_attn_out, new_conv_state, new_recurrent_state
+
   def forward(
       self,
       hidden_states: torch.Tensor,
@@ -339,17 +448,41 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
           device=hidden_states.device,
       )
 
-    core_attn_out, new_conv_state, new_recurrent_state = (
-        self._forward_from_projections(
-            self.in_proj_qkv(hidden_states),
-            self.in_proj_z(hidden_states),
-            self.in_proj_b(hidden_states),
-            self.in_proj_a(hidden_states),
-            conv_state,
-            recurrent_state,
-            valid_mask=valid_mask,
+    mixed_qkv = self.in_proj_qkv(hidden_states)
+    if self._use_gdn_composite(mixed_qkv):
+      assert self.in_proj_zba is not None
+      core_attn_out, new_conv_state, new_recurrent_state = (
+          self._forward_composite(
+              mixed_qkv,
+              self.in_proj_zba(hidden_states),
+              conv_state,
+              recurrent_state,
+              valid_mask=valid_mask,
+          )
+      )
+    else:
+      if self.in_proj_zba is not None:
+        z, b, a = torch.split(
+            self.in_proj_zba(hidden_states),
+            [self.value_dim, self.num_v_heads, self.num_v_heads],
+            dim=-1,
         )
-    )
+      else:
+        z = self.in_proj_z(hidden_states)
+        b = self.in_proj_b(hidden_states)
+        a = self.in_proj_a(hidden_states)
+
+      core_attn_out, new_conv_state, new_recurrent_state = (
+          self._forward_from_projections(
+              mixed_qkv,
+              z,
+              b,
+              a,
+              conv_state,
+              recurrent_state,
+              valid_mask=valid_mask,
+          )
+      )
 
     if past_key_values is not None:
       layer_cache = past_key_values.layers[self.layer_idx]
@@ -391,6 +524,7 @@ class Qwen3_5StaticDecoderLayer(nn.Module):
           use_short_conv_composite=getattr(
               config, "use_short_conv_composite", True
           ),
+          use_gdn_composite=getattr(config, "use_gdn_composite", True),
       )
     elif self.block_type == "full_attention":
       self.self_attn = Qwen3_5Attention(config, layer_idx)  # pyrefly: ignore[bad-argument-type]
