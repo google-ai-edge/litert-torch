@@ -462,6 +462,8 @@ def apply_qwen3_5_model_patches(
   )
   if "use_short_conv_composite" in extra_kwargs:
     use_short_conv = bool(extra_kwargs["use_short_conv_composite"])
+  elif getattr(export_config, "use_short_conv_composite", None) is not None:
+    use_short_conv = bool(export_config.use_short_conv_composite)
   else:
     use_short_conv = True
 

@@ -387,16 +387,15 @@ def apply_gated_delta_rule(
   num_v_heads = value.shape[2]
   g_ratio = num_v_heads // num_k_heads
   if g_ratio > 1:
-    query = (
-        query.reshape(batch_size * seq_len, num_k_heads, head_k_dim)
-        .repeat_interleave(g_ratio, dim=1)
-        .reshape(batch_size, seq_len, num_v_heads, head_k_dim)
-    )
-    key = (
-        key.reshape(batch_size * seq_len, num_k_heads, head_k_dim)
-        .repeat_interleave(g_ratio, dim=1)
-        .reshape(batch_size, seq_len, num_v_heads, head_k_dim)
-    )
+    # Concat, not repeat_interleave: the latter lowers to BROADCAST_TO, which the
+    # ML Drift GPU delegate does not support (forces a CPU partition).
+    def _repeat_heads(x):
+      x = x.reshape(batch_size * seq_len, num_k_heads, 1, head_k_dim)
+      x = torch.cat([x] * g_ratio, dim=2)
+      return x.reshape(batch_size, seq_len, num_v_heads, head_k_dim)
+
+    query = _repeat_heads(query)
+    key = _repeat_heads(key)
 
   q_t, k_t, v_t, beta_t, g_t = [
       x.transpose(1, 2).contiguous().to(torch.float32)
