@@ -60,7 +60,7 @@ degradation or loop crashes:
     Transformers tokenizers, verify that the BOS token ID (`2`) is explicitly
     prepended to the start of the token IDs list.
 
-### 2. Precision Protection in Float32 (`allow_float_operations=True`)
+### 2. Precision Protection in Float32 (`use_float_input_output_normalizer=True`)
 
 *   **Gotcha**: Statically quantizing RMS Norm operations, residual layer
     additions, or skip scale multipliers down to Int8/Int16 introduces severe
@@ -76,7 +76,7 @@ degradation or loop crashes:
         multiplication nodes matching the skip connection scaling factors): Keep
         in Float32.
 
-### 3. Key-Value (KV) Cache Parameter Alignment (`align_kv_cache=True`)
+### 3. Key-Value (KV) Cache Parameter Alignment
 
 *   **Gotcha**: Key and Value cache tensors across the main model
     (prefill/decode subgraphs) and auxiliary model must use identical scaling
@@ -84,6 +84,8 @@ degradation or loop crashes:
     dynamically without expensive runtime rescalings.
 *   **Rule**: Always execute `align_kv_cache_params()` to search and align all K
     and V cache layers across the model suite before calling the quantizer.
+    `quantize.py` always does this; `--kv_cache_k_name_pattern` and
+    `--kv_cache_v_name_pattern` select the cache tensors.
 
 ### 4. Keep `embedder.tflite` in Float32 (Never Quantize)
 
@@ -152,8 +154,7 @@ python3 -m litert_torch.generative.export_hf.experimental.calib.quantize \
   --aux_calibration_path={merged_dir}/aux.tflite.json \
   --aux_output_path={quantized_dir}/aux.tflite \
   --a16w8={true_or_false} \
-  --align_kv_cache=True \
-  --allow_float_operations=True \
+  --use_float_input_output_normalizer=True \
   --skip_mlir_passes=True \
   --calibration_range_scale=1.15
 ```

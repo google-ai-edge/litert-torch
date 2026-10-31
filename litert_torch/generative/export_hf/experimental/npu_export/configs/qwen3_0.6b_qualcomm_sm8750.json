@@ -16,5 +16,6 @@
   "calibration_eval_task_names": "ALL",
   "use_profiler_based_calibration": true,
   "enable_min_max_calibration_update": true,
+  "a16w8": true,
   "calibration_range_scale": 1.0
 }

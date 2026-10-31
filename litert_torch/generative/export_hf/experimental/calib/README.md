@@ -65,10 +65,9 @@ python3 -m litert_torch.generative.export_hf.experimental.calib.merge_calibratio
 ```
 
 ### 3. Advanced Quantization (`quantize.py`)
-Statically quantizes both the main and auxiliary models. This script natively supports high-precision configurations:
-*   `--a16w8`: Use `True` for 16-bit activation quantization, `False` for standard 8-bit activations.
-*   `--align_kv_cache`: Align Key-Value cache parameters across main and auxiliary subgraphs.
-*   `--allow_float_operations`: Protects RMS Norm, residual additions, and skip scales in Float32 to maintain generation quality.
+Statically quantizes both the main and auxiliary models. Key-Value cache quantization parameters are always aligned across the main and auxiliary models (tensor names are selected with `--kv_cache_k_name_pattern` and `--kv_cache_v_name_pattern`). This script supports these configurations:
+*   `--a16w8`: Use `True` (default) for 16-bit activation quantization, `False` for standard 8-bit activations. Also sets the bit width of the auxiliary model inputs, outputs and KV cache updates.
+*   `--use_float_input_output_normalizer`: Protects RMS Norm, residual additions, and skip scales in Float32 to maintain generation quality. Defaults to `True` on the command line. The `quantize()` Python argument and the `NpuPipelineConfig` field default to `False`; the NPU export vendor profiles (`npu_export/configs/vendor_configs.py`) set it per vendor.
 *   `--skip_mlir_passes`: Use `True` to skip post-quantization MLIR graph surgery passes (required for some models like Kanana).
 *   `--calibration_range_scale`: Scale factor (e.g. `1.15`) applied to the calibration min/max ranges before quantization to prevent clipping.
 
@@ -81,8 +80,7 @@ python3 -m litert_torch.generative.export_hf.experimental.calib.quantize \
   --aux_calibration_path=/tmp/calibration_merged/aux.tflite.json \
   --aux_output_path=/tmp/quantized_oss/aux.tflite \
   --a16w8=True \
-  --align_kv_cache=True \
-  --allow_float_operations=True \
+  --use_float_input_output_normalizer=True \
   --skip_mlir_passes=True \
   --calibration_range_scale=1.15
 ```

@@ -23,7 +23,7 @@ VENDOR_CONFIGS: dict[str, dict[str, Any]] = {
         "k_ts_idx": 3,
         "v_ts_idx": 2,
         "a16w8": True,
-        "allow_float_operations": False,
+        "use_float_input_output_normalizer": False,
     },
     "mediatek": {
         "backend": "mediatek",
@@ -31,7 +31,7 @@ VENDOR_CONFIGS: dict[str, dict[str, Any]] = {
         "k_ts_idx": 2,
         "v_ts_idx": 3,
         "a16w8": True,
-        "allow_float_operations": True,
+        "use_float_input_output_normalizer": True,
     },
 }
 
