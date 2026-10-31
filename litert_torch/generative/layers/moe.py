@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 from flatbuffers import flexbuffers
 from litert_torch.backend import lowerings
 from litert_torch.backend.lowerings import utils as lowering_utils
@@ -209,6 +211,24 @@ def _moe_custom_options(
           "renormalized_top_weights": True,
       })
   )
+
+
+def is_gelu_tanh(act_fn: Callable[[torch.Tensor], torch.Tensor]) -> bool:
+  """Returns whether `act_fn` is the activation the `moe` custom op computes.
+
+  The op only computes GELU with the tanh approximation. `act_fn` is compared
+  on a fixed input instead of by name, so both plain functions (e.g. `F.silu`)
+  and `ACT2FN` modules are recognized.
+
+  Args:
+    act_fn: The activation of an experts module.
+  """
+  x = torch.linspace(-8.0, 8.0, steps=257, dtype=torch.float32)
+  with torch.no_grad():
+    # Exact GELU differs from the tanh approximation by up to ~5e-4 here.
+    return torch.allclose(
+        act_fn(x), F.gelu(x, approximate="tanh"), rtol=1e-5, atol=1e-5
+    )
 
 
 def _const_bytes_attr(data: bytes) -> ir.Attribute:
@@ -502,6 +522,21 @@ def moe_experts(
   raise ValueError(f"Unsupported MoE expert weight_type: {weight_type}")
 
 
+def _num_active_experts(config) -> int:
+  """Returns the number of experts each token is routed to."""
+  # Gemma 4 names it `top_k_experts`; most other MoE configs in transformers
+  # name it `num_experts_per_tok`.
+  for name in ("top_k_experts", "num_experts_per_tok"):
+    num_active_experts = getattr(config, name, None)
+    if num_active_experts is not None:
+      return num_active_experts
+  raise ValueError(
+      f"{type(config).__name__} sets neither `top_k_experts` nor"
+      " `num_experts_per_tok`, so the number of active experts of the `moe`"
+      " op is unknown."
+  )
+
+
 def litert_moe_experts_forward(self, hidden_states, top_k_index, top_k_weights):
   use_pre_flattened = (
       hasattr(self, "flattened_gate_weight")
@@ -521,16 +556,17 @@ def litert_moe_experts_forward(self, hidden_states, top_k_index, top_k_weights):
     ff1_weight = flatten_expert_weight(ff1_w)
     linear_weight = flatten_expert_weight(self.down_proj)
   per_expert_scale = _per_expert_scale_input(self)
+  num_active_experts = _num_active_experts(self.config)
   output = moe_experts(
       hidden_states.reshape(1, -1, self.hidden_dim),
-      top_k_weights.reshape(1, -1, self.config.top_k_experts),
-      top_k_index.to(torch.int32).reshape(1, -1, self.config.top_k_experts),
+      top_k_weights.reshape(1, -1, num_active_experts),
+      top_k_index.to(torch.int32).reshape(1, -1, num_active_experts),
       gate_weight,
       ff1_weight,
       linear_weight,
       per_expert_scale,
       num_experts=self.num_experts,
-      num_active_experts=self.config.top_k_experts,
+      num_active_experts=num_active_experts,
       model_dim=self.hidden_dim,
       hidden_dim=self.intermediate_dim,
   )

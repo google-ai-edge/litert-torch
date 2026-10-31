@@ -24,7 +24,14 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 
+from litert_torch import backend
 from litert_torch.generative.export_hf.core import export_lib
+from litert_torch.generative.layers import moe
+import torch
+import transformers
+from transformers.models.gemma4 import modeling_gemma4
+from transformers.models.lfm2_moe import modeling_lfm2_moe
+from transformers.models.qwen3_moe import modeling_qwen3_moe
 
 
 class ExportLibTest(parameterized.TestCase):
@@ -401,6 +408,96 @@ class ExportLibTest(parameterized.TestCase):
     self.assertIs(artifacts.model.generation_config, mock_gen_config)
     self.assertEqual(mock_gen_config.cache_implementation, "static")
     self.assertFalse(mock_gen_config.do_sample)
+
+
+def _model_with_experts(experts_cls, config):
+  torch.manual_seed(0)
+  model = torch.nn.Module()
+  model.experts = experts_cls(config)
+  with torch.no_grad():
+    model.experts.gate_up_proj.normal_()
+    model.experts.down_proj.normal_()
+  return model
+
+
+def _qwen3_moe_config(hidden_act):
+  return transformers.Qwen3MoeConfig(
+      hidden_size=16,
+      moe_intermediate_size=8,
+      num_experts=4,
+      num_experts_per_tok=2,
+      hidden_act=hidden_act,
+  )
+
+
+class LitertMoeActivationCheckTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      ("silu_module", "silu", "SiLUActivation"),
+      ("exact_gelu", "gelu", "GELUActivation"),
+  )
+  def test_rejects_non_gelu_tanh_experts(self, hidden_act, act_name):
+    model = _model_with_experts(
+        modeling_qwen3_moe.Qwen3MoeExperts, _qwen3_moe_config(hidden_act)
+    )
+
+    with self.assertRaisesRegex(
+        ValueError, f"`{act_name}` activation.*litert_moe_sequential"
+    ):
+      export_lib._check_litert_moe_activations(model)
+
+  def test_rejects_silu_function_experts(self):
+    # LFM2-MoE experts hold `F.silu` itself rather than an `ACT2FN` module.
+    config = transformers.Lfm2MoeConfig(
+        hidden_size=16, moe_intermediate_size=8, num_experts=4
+    )
+    model = _model_with_experts(modeling_lfm2_moe.Lfm2MoeExperts, config)
+
+    with self.assertRaisesRegex(
+        ValueError, "`silu` activation.*litert_moe_sequential"
+    ):
+      export_lib._check_litert_moe_activations(model)
+
+  def test_accepts_gemma4_experts(self):
+    config = modeling_gemma4.Gemma4TextConfig(
+        hidden_size=16, moe_intermediate_size=8, num_experts=4, top_k_experts=2
+    )
+    model = _model_with_experts(modeling_gemma4.Gemma4TextExperts, config)
+
+    export_lib._check_litert_moe_activations(model)
+
+  @parameterized.named_parameters(
+      ("gelu_pytorch_tanh", "gelu_pytorch_tanh"),
+      ("gelu_new", "gelu_new"),
+  )
+  def test_gelu_tanh_experts_lower_to_moe_op(self, hidden_act):
+    model = _model_with_experts(
+        modeling_qwen3_moe.Qwen3MoeExperts, _qwen3_moe_config(hidden_act)
+    )
+    export_lib._check_litert_moe_activations(model)
+    export_lib.pre_flatten_model_experts(model)
+
+    class _LitertMoeExperts(torch.nn.Module):
+
+      def __init__(self, experts):
+        super().__init__()
+        self.experts = experts
+
+      def forward(self, hidden_states, top_k_index, top_k_weights):
+        return moe.litert_moe_experts_forward(
+            self.experts, hidden_states, top_k_index, top_k_weights
+        )
+
+    hidden_states = torch.randn(3, 16)
+    top_k_weights, top_k_index = torch.topk(
+        torch.randn(3, 4).softmax(dim=-1), 2, dim=-1
+    )
+    ep = torch.export.export(
+        _LitertMoeExperts(model.experts).eval(),
+        (hidden_states, top_k_index, top_k_weights),
+    )
+    ir_text = backend.export.exported_program_to_mlir(ep).get_text()
+    self.assertIn('custom_code = "moe"', ir_text)
 
 
 if __name__ == "__main__":
