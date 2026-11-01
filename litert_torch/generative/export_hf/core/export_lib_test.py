@@ -158,6 +158,83 @@ class ExportLibTest(parameterized.TestCase):
     self.assertFalse(config_legacy.bundle_litert_lm)
     self.assertFalse(config_legacy.export_audio_encoder)
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="positional",
+          encode_inputs=("features",),
+          decode_inputs=("tokens",),
+          expected_encode_call=mock.call("features"),
+          input_kwarg="sample_args",
+      ),
+      dict(
+          testcase_name="named",
+          encode_inputs={"input_features": "features"},
+          decode_inputs={"tokens": "tokens"},
+          expected_encode_call=mock.call(input_features="features"),
+          input_kwarg="sample_kwargs",
+      ),
+  )
+  @mock.patch(
+      "litert_torch.generative.export_hf.core.export_lib.mu_pass_lib"
+      ".update_model"
+  )
+  @mock.patch(
+      "litert_torch.generative.export_hf.core.export_lib.converter_utils"
+      ".Converter"
+  )
+  @mock.patch(
+      "litert_torch.generative.export_hf.core.export_lib.model_ext_exportables"
+      ".get_speech_exportables"
+  )
+  def test_export_asr_models_sample_inputs(
+      self,
+      mock_get_speech_exportables,
+      mock_converter_cls,
+      mock_update_model,
+      encode_inputs,
+      decode_inputs,
+      expected_encode_call,
+      input_kwarg,
+  ):
+    mock_update_model.side_effect = lambda x: x
+    mock_encode_cls = mock.MagicMock()
+    mock_decode_cls = mock.MagicMock()
+    mock_get_speech_exportables.return_value = (
+        mock_encode_cls,
+        mock_decode_cls,
+    )
+    mock_encode = mock_encode_cls.return_value
+    mock_encode.get_sample_inputs.return_value = {"encode": (encode_inputs, {})}
+    mock_encode.return_value = "encoder_output"
+    mock_decode_cls.return_value.get_sample_inputs.return_value = {
+        "decode": (decode_inputs, {})
+    }
+    mock_artifacts = mock.MagicMock()
+    config = export_lib.exportable_module_config.ExportableModuleConfig(
+        model="dummy_asr_model",
+        task=export_lib.exportable_module_config.ExportTask.AUTOMATIC_SPEECH_RECOGNITION,
+        bundle_litert_lm=False,
+        quantization_recipe=None,
+        work_dir=self.test_dir,
+    )
+
+    export_lib.export_asr_models(
+        mock_artifacts, config, export_lib.ExportedModelArtifacts()
+    )
+
+    self.assertEqual(mock_encode.call_args, expected_encode_call)
+    mock_decode_cls.assert_called_once_with(
+        mock_artifacts.model, config, encoder_output="encoder_output"
+    )
+    add_signature = mock_converter_cls.return_value.add_signature
+    self.assertEqual(
+        [(c.args[0], c.kwargs) for c in add_signature.call_args_list],
+        [
+            ("encode", {input_kwarg: encode_inputs}),
+            ("decode", {input_kwarg: decode_inputs}),
+        ],
+    )
+
   def test_exported_model_artifacts_audio_fields(self):
     artifacts = export_lib.ExportedModelArtifacts(
         audio_encoder_model_path="path/to/audio_encoder.tflite",

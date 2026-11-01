@@ -1472,6 +1472,24 @@ def export_audio_encoder_models(
   )
 
 
+def _asr_signature_inputs(sample_inputs: Any) -> dict[str, Any]:
+  """Returns `Converter.add_signature` kwargs for ASR sample inputs.
+
+  Sample inputs are positional (a tuple) or named (a dict). Named inputs keep
+  their names in the converted signature.
+
+  Args:
+    sample_inputs: Tuple or dict of sample inputs from `get_sample_inputs()`.
+
+  Returns:
+    `{'sample_kwargs': sample_inputs}` for a dict, otherwise
+    `{'sample_args': sample_inputs}`.
+  """
+  if isinstance(sample_inputs, dict):
+    return {'sample_kwargs': sample_inputs}
+  return {'sample_args': sample_inputs}
+
+
 @progress.task('Export ASR models')
 def export_asr_models(
     source_model_artifacts: SourceModelArtifacts,
@@ -1497,7 +1515,10 @@ def export_asr_models(
   decode_module = None
   if decode_module_cls is not None:
     with torch.no_grad():
-      encoder_output = encode_module(*encoder_inputs)
+      if isinstance(encoder_inputs, dict):
+        encoder_output = encode_module(**encoder_inputs)
+      else:
+        encoder_output = encode_module(*encoder_inputs)
     decode_module = decode_module_cls(
         asr_model, export_config, encoder_output=encoder_output
     )
@@ -1507,7 +1528,7 @@ def export_asr_models(
   converter.add_signature(
       'encode',
       encode_module.eval(),
-      sample_args=encoder_inputs,
+      **_asr_signature_inputs(encoder_inputs),
   )
 
   if decode_module is not None:
@@ -1516,7 +1537,7 @@ def export_asr_models(
       converter.add_signature(
           signature_name,
           decode_module.eval(),
-          sample_args=sample_args,
+          **_asr_signature_inputs(sample_args),
       )
 
   with patch_builtin_tuple_for_export():
