@@ -135,6 +135,30 @@ class Qwen3_5PatchTest(parameterized.TestCase):
       patch.FusedQwen3_5MLP(orig_mlp, use_swiglu_composite=True)
 
   @parameterized.named_parameters(
+      dict(testcase_name="prefill", seq_len=8),
+      dict(testcase_name="decode", seq_len=1),
+  )
+  def test_fuse_zba_projections_equivalence(self, seq_len: int):
+    torch.manual_seed(0)
+    gdn = modeling_qwen3_5_static.Qwen3_5StaticGatedDeltaNet(
+        hidden_size=64,
+        num_v_heads=4,
+        num_k_heads=2,
+        head_k_dim=16,
+        head_v_dim=16,
+    ).eval()
+    x = torch.randn(1, seq_len, 64)
+    with torch.no_grad():
+      expected = gdn(x)
+      gdn.fuse_zba_projections()
+      actual = gdn(x)
+
+    fused = gdn.in_proj_zba
+    assert fused is not None
+    self.assertEqual(fused.out_features, 4 * 16 + 4 + 4)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+  @parameterized.named_parameters(
       dict(
           testcase_name="fuse_qkv_only",
           fuse_qkv=True,
@@ -383,6 +407,8 @@ class Qwen3_5PatchTest(parameterized.TestCase):
             self.assertIsInstance(
                 layer.self_attn, modeling_qwen3_5.Qwen3_5Attention
             )
+        if hasattr(layer, "linear_attn"):
+          self.assertEqual(layer.linear_attn.in_proj_zba is not None, fuse_qkv)
 
       with torch.no_grad():
         actual_logits, _ = model(input_ids=input_ids, positions=positions)
@@ -404,6 +430,8 @@ class Qwen3_5PatchTest(parameterized.TestCase):
         self.assertIsInstance(
             layer.self_attn, modeling_qwen3_5.Qwen3_5Attention
         )
+      if hasattr(layer, "linear_attn"):
+        self.assertIsNone(layer.linear_attn.in_proj_zba)
 
   def test_patch_qwen3_5_model_with_single_gpu_composites_flag(self):
     torch.manual_seed(0)
@@ -436,6 +464,8 @@ class Qwen3_5PatchTest(parameterized.TestCase):
           self.assertTrue(layer.self_attn.fuse_qkv)
           self.assertTrue(layer.self_attn.use_rope_composite)
           self.assertTrue(layer.self_attn.use_qkv_norm_rope_composite)
+        if hasattr(layer, "linear_attn"):
+          self.assertIsNotNone(layer.linear_attn.in_proj_zba)
 
       with torch.no_grad():
         actual_logits, _ = model(input_ids=input_ids, positions=positions)

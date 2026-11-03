@@ -441,7 +441,7 @@ class FusedQwen3_5Attention(torch.nn.Module):
 
 def apply_qwen3_5_model_patches(
     model: torch.nn.Module, export_config: Any
-) -> list[tuple[torch.nn.Module, str, torch.nn.Module]]:
+) -> list[tuple[torch.nn.Module, str, torch.nn.Module | None]]:
   """Replaces Qwen3.5 submodules in-place with fused / composite equivalents."""
   fuse_gate_up = getattr(export_config, "fuse_gate_up", False)
   fuse_qkv = getattr(export_config, "fuse_qkv", False)
@@ -465,12 +465,18 @@ def apply_qwen3_5_model_patches(
   else:
     use_short_conv = True
 
-  replaced_modules: list[tuple[torch.nn.Module, str, torch.nn.Module]] = []
+  replaced_modules: list[
+      tuple[torch.nn.Module, str, torch.nn.Module | None]
+  ] = []
 
   def replace_modules(module: torch.nn.Module) -> None:
     if hasattr(module, "use_fused_gdn") and hasattr(module, "gdn_mode"):
       module.use_fused_gdn = bool(use_fused_gdn)
       module.gdn_mode = int(gdn_mode)
+    if fuse_qkv and hasattr(module, "fuse_zba_projections"):
+      # GatedDeltaNet: fuse the z/b/a input projections into one matmul.
+      module.fuse_zba_projections()
+      replaced_modules.append((module, "in_proj_zba", None))
     if hasattr(module, "use_fp32"):
       module.use_fp32 = bool(gdn_use_fp32)
     if hasattr(module, "use_short_conv_composite"):
