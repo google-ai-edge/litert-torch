@@ -108,6 +108,7 @@ _GPU_OPTIMIZATION_FLAGS = (
     "use_qkv_norm_rope_composite",
     "use_short_conv_composite",
     "use_sdpa_composite",
+    "use_sdpa_composite_for_vision",
     "use_bool_mask",
     "enable_gpu_dynamic_cache",
 )
@@ -184,6 +185,12 @@ class ExportableModuleConfig:
   # Whether to emit the fused `odml.sdpa_transposed` composite in both prefill
   # and decode signatures.
   use_sdpa_composite: bool | None = None
+  # Whether the vision encoder emits the `odml.scaled_dot_product_attention`
+  # composite for its (non-autoregressive, bidirectional) attention, so GPU
+  # runtimes can use a fused (flash) attention kernel instead of materializing
+  # the [B, N, T, T] attention logits. Vision exportables opt in per model (see
+  # `core/attention.py:BIDIRECTIONAL_SDPA_ATTENTION`).
+  use_sdpa_composite_for_vision: bool | None = None
   # Master switch for GPU composite emission. Implied by use_sdpa_composite.
   apply_gpu_composites: bool = False
   # Use a boolean attention mask instead of materializing fp32 mask constants.

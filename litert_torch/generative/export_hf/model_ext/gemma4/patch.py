@@ -18,6 +18,7 @@ import contextlib
 import weakref
 from litert_torch.backend import optimization_barrier as optimization_barrier_lib
 from litert_torch.backend.torch_tfl import _ops as _  # Registers torch.ops.tfl.*
+from litert_torch.generative.export_hf.experimental.composites import bidirectional_sdpa as bidirectional_sdpa_lib
 from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope
 from litert_torch.generative.export_hf.experimental.composites import rope as rope_composite
 from litert_torch.generative.export_hf.experimental.composites import swiglu as swiglu_composite
@@ -905,7 +906,12 @@ class LiteRTGemma4VisionPooler(Gemma4VisionPooler):
 
 
 class LiteRTGemma4VisionEncoder(Gemma4VisionEncoder):
-  """LiteRT Gemma4 Vision Encoder."""
+  """LiteRT Gemma4 Vision Encoder.
+
+  Masks padded patches (position (-1, -1), which LiteRT-LM writes into the patch
+  slots an image does not fill) out of the attention with an additive float key
+  mask, as `transformers` and the gemax ViT do.
+  """
 
   def forward(
       self,
@@ -914,12 +920,14 @@ class LiteRTGemma4VisionEncoder(Gemma4VisionEncoder):
       pixel_position_ids: torch.LongTensor | None = None,
       **kwargs,
   ) -> transformers.modeling_outputs.BaseModelOutputWithPast:
-    num_seq = attention_mask.shape[1]
-    attention_mask = torch.zeros(
-        (1, 1, num_seq, num_seq),
-        dtype=torch.float32,
-        device=inputs_embeds.device,
-    )
+    # `attention_mask` is the bool `[B, L]` mask of real (non-padded) patches.
+    # Build one additive float key mask `[B, 1, 1, L]` (finite in float16; also
+    # the bidirectional SDPA composite's mask input) for every layer.
+    attention_mask = torch.where(
+        attention_mask[:, None, None, :],
+        0.0,
+        bidirectional_sdpa_lib.PADDING_MASK_VALUE,
+    ).to(torch.float32)
 
     # embed positions
     hidden_states = inputs_embeds
