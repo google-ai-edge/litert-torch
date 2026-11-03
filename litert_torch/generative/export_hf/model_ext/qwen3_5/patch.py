@@ -313,7 +313,10 @@ class FusedQwen3_5Attention(torch.nn.Module):
 
     if getattr(self, "use_qkv_norm_rope_composite", False) and self.fuse_qkv:
       qkvg = self.qkv_proj(hidden_states)
-      qkv, gate = qkvg.split([self.qkv_only_size, self.gate_size], dim=-1)
+      # The composite reads q/k/v from the leading channels of `qkvg`, so only
+      # the gate is sliced out; a separate zero-offset qkv slice would cost an
+      # extra GPU dispatch per layer.
+      gate = qkvg[..., self.qkv_only_size :]
       position_ids = kwargs.get("position_ids", None)
       if position_ids is None:
         seq_len = hidden_states.shape[1]
@@ -337,7 +340,7 @@ class FusedQwen3_5Attention(torch.nn.Module):
       )
       query_states, key_states, value_states = (
           qkv_norm_rope_composite.apply_qkv_norm_rope(
-              qkv,
+              qkvg,
               position_ids,
               self.q_norm.weight,
               self.k_norm.weight,
@@ -473,14 +476,25 @@ def apply_qwen3_5_model_patches(
     if hasattr(module, "use_fused_gdn") and hasattr(module, "gdn_mode"):
       module.use_fused_gdn = bool(use_fused_gdn)
       module.gdn_mode = int(gdn_mode)
-    if fuse_qkv and hasattr(module, "fuse_zba_projections"):
-      # GatedDeltaNet: fuse the z/b/a input projections into one matmul.
-      module.fuse_zba_projections()
-      replaced_modules.append((module, "in_proj_zba", None))
     if hasattr(module, "use_fp32"):
       module.use_fp32 = bool(gdn_use_fp32)
     if hasattr(module, "use_short_conv_composite"):
       module.use_short_conv_composite = bool(use_short_conv)
+    if fuse_qkv and hasattr(module, "fuse_zba_projections"):
+      if (
+          hasattr(module, "fuse_qkvzba_projections")
+          and getattr(module, "use_fused_gdn_block", False)
+          and getattr(module, "use_fused_gdn", True)
+          and getattr(module, "use_short_conv_composite", True)
+      ):
+        # GatedDeltaNet block mode: fuse [qkv | z | b | a] into a single matmul
+        # consumed directly by odml.short_conv_step and gated_delta_update.
+        module.fuse_qkvzba_projections()
+        replaced_modules.append((module, "in_proj_qkvzba", None))
+      else:
+        # Non-block mode: fuse only [z | b | a] to avoid slicing qkv off.
+        module.fuse_zba_projections()
+        replaced_modules.append((module, "in_proj_zba", None))
     for child_name, child in module.named_children():
       if isinstance(
           child,

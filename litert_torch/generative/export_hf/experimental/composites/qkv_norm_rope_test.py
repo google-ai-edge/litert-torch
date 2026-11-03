@@ -14,6 +14,9 @@
 # ==============================================================================
 """Tests for QKV NormRoPE composite op."""
 
+import typing
+from typing import Any
+
 from absl.testing import parameterized
 import litert_torch
 from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope
@@ -80,6 +83,33 @@ class QkvNormRopeTest(parameterized.TestCase):
     module = QkvNormRopeModule(head_dim, num_heads, num_kv_heads).eval()
     edge_model = litert_torch.convert(module, (qkv, position))
     self.assertIsNotNone(edge_model)
+
+  def test_trailing_channels_are_ignored(self):
+    batch_size = 1
+    seq_len = 4
+    num_heads = 4
+    num_kv_heads = 2
+    head_dim = 16
+    extra_channels = num_heads * head_dim  # e.g. a fused output gate
+
+    qkv_dim = (num_heads + 2 * num_kv_heads) * head_dim
+    qkv = torch.randn(batch_size, seq_len, qkv_dim)
+    wide = torch.cat(
+        [qkv, torch.randn(batch_size, seq_len, extra_channels)], -1
+    )
+    position = torch.arange(seq_len).unsqueeze(0)
+
+    module = QkvNormRopeModule(head_dim, num_heads, num_kv_heads).eval()
+    for out, wide_out in zip(module(qkv, position), module(wide, position)):
+      torch.testing.assert_close(wide_out, out, rtol=0, atol=0)
+
+    edge_model = litert_torch.convert(module, (wide, position))
+    self.assertIn(b"odml.qkv_norm_rope", edge_model.model_content())
+    tfl_outs = typing.cast(Any, edge_model(wide, position.to(torch.int32)))
+    for i, out in enumerate(module(wide, position)):
+      torch.testing.assert_close(
+          torch.as_tensor(tfl_outs[i]), out, rtol=1e-5, atol=1e-5
+      )
 
   def test_apply_qkv_norm_rope_with_v_norm_and_proportion(self):
     batch_size = 1

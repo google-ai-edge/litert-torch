@@ -35,7 +35,10 @@ def apply_qkv_norm_rope(
   """Computes fused QKV split, RMSNorm on Q & K (and optionally V), and RoPE on Q & K.
 
   Args:
-    qkv: Fused QKV tensor with shape [B, T, (num_heads + 2 * num_kv_heads) * head_dim].
+    qkv: Fused QKV tensor with shape [B, T, C], C >= (num_heads + 2 *
+      num_kv_heads) * head_dim. q, k and v are read from the leading channels;
+      any trailing channels (e.g. an attention output gate fused into the same
+      projection) are ignored, so callers don't need to slice them off.
     position: 1D or 2D position tensor [B, T] or [T].
     q_weight: Weight gamma tensor for Q RMSNorm.
     k_weight: Weight gamma tensor for K RMSNorm.
@@ -48,8 +51,10 @@ def apply_qkv_norm_rope(
     proportion: Fraction of head_dim to apply RoPE to (default 1.0).
 
   Returns:
-    q_out: Transformed, normed, and roped query states [B, num_heads, T, head_dim].
-    k_out: Transformed, normed, and roped key states [B, num_kv_heads, T, head_dim].
+    q_out: Transformed, normed, and roped query states [B, num_heads, T,
+    head_dim].
+    k_out: Transformed, normed, and roped key states [B, num_kv_heads, T,
+    head_dim].
     v_out: Transformed value states [B, num_kv_heads, T, head_dim].
   """
   attrs = {
@@ -72,7 +77,9 @@ def apply_qkv_norm_rope(
   # Fallback PyTorch execution during export tracing:
   q_size = num_heads * head_dim
   kv_size = num_kv_heads * head_dim
-  q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
+  q = qkv[..., :q_size]
+  k = qkv[..., q_size : q_size + kv_size]
+  v = qkv[..., q_size + kv_size : q_size + 2 * kv_size]
 
   input_shape = q.shape[:-1]
   hidden_shape_q = (*input_shape, num_heads, head_dim)
@@ -180,4 +187,3 @@ def apply_q_norm_rope(
   q_out = rotary_pos_emb.apply_rope(q_normed, cos, sin)
   q_out = builder.mark_outputs(q_out)
   return q_out
-

@@ -16,23 +16,38 @@
 
 from flatbuffers import flexbuffers
 from litert_torch.backend import lowerings
-from litert_torch.backend.torch_tfl import _ops as _
 from litert_torch.backend.lowerings import utils as lowering_utils
+from litert_torch.backend.torch_tfl import _ops as _
 from litert_converter.mlir import ir
 import torch
+import torch.nn.functional as F
 
 
 def _gated_delta_update_custom_options(
     *,
     mode: int,
     state_dtype: str = "float32",
+    num_k_heads: int = 0,
+    num_v_heads: int = 0,
+    head_k_dim: int = 0,
+    head_v_dim: int = 0,
+    eps: float = 1e-6,
+    norm_eps: float = 1e-6,
 ) -> bytes:
-  return bytes(
-      flexbuffers.Dumps({
-          "mode": int(mode),
-          "state_dtype": str(state_dtype),
-      })
-  )
+  opts: dict[str, int | float | str] = {
+      "mode": int(mode),
+      "state_dtype": str(state_dtype),
+  }
+  if num_k_heads > 0:
+    opts.update({
+        "num_k_heads": int(num_k_heads),
+        "num_v_heads": int(num_v_heads),
+        "head_k_dim": int(head_k_dim),
+        "head_v_dim": int(head_v_dim),
+        "eps": float(eps),
+        "norm_eps": float(norm_eps),
+    })
+  return bytes(flexbuffers.Dumps(opts))
 
 
 def _const_bytes_attr(data: bytes) -> ir.Attribute:
@@ -332,7 +347,7 @@ def _gated_delta_update_lower(
     valid_len: ir.Value | None = None,
     mode: int = 0,
 ):
-  """Lowers gdn_attention to tfl.custom."""
+  """Lowers gated_delta_update to tfl.custom."""
   operands = [q_t, k_t, v_t, beta_t, g_t, recurrent_state]
   if valid_len is not None:
     operands.append(valid_len)
@@ -417,3 +432,245 @@ def apply_gated_delta_rule(
       valid_mask=valid_mask,
       valid_len=valid_len,
   )
+
+
+def _l2norm_last_dim(x: torch.Tensor, eps: float, scale: float) -> torch.Tensor:
+  """Returns `x * scale / sqrt(sum(x^2) + eps)` along the last dimension."""
+  head_dim = x.shape[-1]
+  xf = x.float()
+  normed = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps / head_dim)
+  return normed.type_as(x) * (scale / head_dim**0.5)
+
+
+def _rms_norm_last_dim(
+    x: torch.Tensor, weight: torch.Tensor, eps: float
+) -> torch.Tensor:
+  """RMS norm along the last dimension, matching `rms_norm_with_hlfb`."""
+  xf = x.float()
+  normed = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)
+  return normed.type_as(x) * weight
+
+
+@torch.library.custom_op("litert_torch::gated_delta_block", mutates_args=())
+def gated_delta_block(
+    conv_out: torch.Tensor,
+    zba: torch.Tensor,
+    a_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    norm_weight: torch.Tensor,
+    recurrent_state: torch.Tensor,
+    valid_mask: torch.Tensor | None = None,
+    num_k_heads: int = 0,
+    num_v_heads: int = 0,
+    head_k_dim: int = 0,
+    head_v_dim: int = 0,
+    eps: float = 1e-6,
+    norm_eps: float = 1e-6,
+    mode: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+  """Reference PyTorch implementation of fused post-conv GatedDeltaNet block."""
+  batch_size, seq_len, _ = conv_out.shape
+  key_dim = num_k_heads * head_k_dim
+  value_dim = num_v_heads * head_v_dim
+  query, key, value = torch.split(
+      conv_out, [key_dim, key_dim, value_dim], dim=-1
+  )
+  query = query.reshape(batch_size, seq_len, num_k_heads, head_k_dim)
+  key = key.reshape(batch_size, seq_len, num_k_heads, head_k_dim)
+  value = value.reshape(batch_size, seq_len, num_v_heads, head_v_dim)
+  zba_dim = value_dim + 2 * num_v_heads
+  if zba.shape[-1] > zba_dim:
+    zba = zba[..., -zba_dim:]
+  z, b, a = torch.split(zba, [value_dim, num_v_heads, num_v_heads], dim=-1)
+
+  beta = b.float().sigmoid().to(conv_out.dtype)
+  a_val = a.to(torch.float32) + dt_bias.to(torch.float32)
+  g = -a_log.to(torch.float32).exp() * (
+      torch.relu(a_val) + torch.log1p(torch.exp(-a_val.abs()))
+  )
+
+  valid_len: torch.Tensor | None = None
+  if valid_mask is not None:
+    query = query * valid_mask.view(batch_size, seq_len, 1, 1).to(query.dtype)
+    beta = beta * valid_mask.view(batch_size, seq_len, 1).to(beta.dtype)
+    g = g * valid_mask.view(batch_size, seq_len, 1).to(g.dtype)
+    if seq_len > 1:
+      positions = torch.arange(
+          1, seq_len + 1, dtype=torch.float32, device=valid_mask.device
+      )
+      valid_len = ((valid_mask.to(torch.float32) * positions).amax(dim=-1)).to(
+          torch.int32
+      )
+
+  query = _l2norm_last_dim(query, eps, 1.0 / (head_k_dim**0.5))
+  key = _l2norm_last_dim(key, eps, 1.0)
+
+  core_attn_out, new_state = apply_gated_delta_rule(
+      query,
+      key,
+      value,
+      beta,
+      g,
+      recurrent_state,
+      valid_mask=valid_mask,
+      valid_len=valid_len,
+      use_fused_gdn=False,
+      gdn_mode=mode,
+      use_fp32=True,
+  )
+  core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(conv_out.dtype)
+  z = z.reshape(batch_size, seq_len, num_v_heads, head_v_dim)
+  out = _rms_norm_last_dim(core_attn_out, norm_weight, norm_eps) * F.silu(z)
+  if valid_mask is not None:
+    out = out * (valid_mask != 0).view(batch_size, seq_len, 1, 1).to(out.dtype)
+  return out.reshape(batch_size, seq_len, value_dim), new_state.to(
+      torch.float32
+  )
+
+
+@gated_delta_block.register_fake
+def _gated_delta_block_fake(
+    conv_out: torch.Tensor,
+    zba: torch.Tensor,
+    a_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    norm_weight: torch.Tensor,
+    recurrent_state: torch.Tensor,
+    valid_mask: torch.Tensor | None = None,
+    num_k_heads: int = 0,
+    num_v_heads: int = 0,
+    head_k_dim: int = 0,
+    head_v_dim: int = 0,
+    eps: float = 1e-6,
+    norm_eps: float = 1e-6,
+    mode: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+  """Fake implementation for shape inference."""
+  del zba, a_log, dt_bias, norm_weight, valid_mask
+  del num_k_heads, head_k_dim, eps, norm_eps, mode
+  batch_size, seq_len, _ = conv_out.shape
+  value_dim = num_v_heads * head_v_dim
+  out1 = torch.empty(
+      (batch_size, seq_len, value_dim),
+      dtype=conv_out.dtype,
+      device=conv_out.device,
+  )
+  out2 = torch.empty(
+      recurrent_state.shape,
+      dtype=torch.float32,
+      device=recurrent_state.device,
+  )
+  return out1, out2
+
+
+@lowerings.lower(torch.ops.litert_torch.gated_delta_block)
+def _gated_delta_block_lower(
+    lctx,
+    conv_out: ir.Value,
+    zba: ir.Value,
+    a_log: ir.Value,
+    dt_bias: ir.Value,
+    norm_weight: ir.Value,
+    recurrent_state: ir.Value,
+    valid_mask: ir.Value | None = None,
+    num_k_heads: int = 0,
+    num_v_heads: int = 0,
+    head_k_dim: int = 0,
+    head_v_dim: int = 0,
+    eps: float = 1e-6,
+    norm_eps: float = 1e-6,
+    mode: int = 0,
+):
+  """Lowers gated_delta_block to the unified `gated_delta_update` tfl.custom."""
+  operands = [conv_out, zba, a_log, dt_bias, norm_weight, recurrent_state]
+  if valid_mask is not None:
+    operands.append(valid_mask)
+  op = ir.Operation.create(
+      "tfl.custom",
+      results=lowering_utils.node_meta_to_ir_types(lctx.node),
+      operands=operands,
+      attributes={
+          "custom_code": ir.StringAttr.get("gated_delta_update"),
+          "custom_option": _const_bytes_attr(
+              _gated_delta_update_custom_options(
+                  mode=mode,
+                  num_k_heads=num_k_heads,
+                  num_v_heads=num_v_heads,
+                  head_k_dim=head_k_dim,
+                  head_v_dim=head_v_dim,
+                  eps=eps,
+                  norm_eps=norm_eps,
+              )
+          ),
+      },
+  )
+  return tuple(op.results)
+
+
+def apply_gated_delta_block(
+    conv_out: torch.Tensor,
+    zba: torch.Tensor,
+    recurrent_state: torch.Tensor,
+    a_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    norm_weight: torch.Tensor,
+    valid_mask: torch.Tensor | None = None,
+    *,
+    num_k_heads: int,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    eps: float,
+    norm_eps: float,
+    use_fp32: bool = True,
+    gdn_mode: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+  """Emits the post-conv GatedDeltaNet block as `gated_delta_update`.
+
+  Splits q/k/v and z/b/a, computes the beta and g gates, applies token masks,
+  L2-normalizes q (with `1 / sqrt(head_k_dim)` folded in) and k, updates the
+  recurrent state, and applies gated RMSNorm inside `gated_delta_update`.
+
+  Args:
+    conv_out: Short conv output [batch, seq_len, 2 * key_dim + value_dim].
+    zba: Fused projection output [z | b | a], [batch, seq_len, value_dim + 2 *
+      num_v_heads].
+    recurrent_state: [batch, num_v_heads, head_k_dim, head_v_dim], float32.
+    a_log: [num_v_heads].
+    dt_bias: [num_v_heads].
+    norm_weight: Gated RMSNorm weight [head_v_dim].
+    valid_mask: Optional [batch, seq_len] mask in the activation dtype.
+    num_k_heads: Number of key heads.
+    num_v_heads: Number of value heads.
+    head_k_dim: Key head dimension.
+    head_v_dim: Value head dimension.
+    eps: Epsilon of the q/k L2 norm.
+    norm_eps: Epsilon of the gated RMSNorm.
+    use_fp32: Whether activations are cast to float32 at the custom op boundary.
+    gdn_mode: `mode` attribute of the `gated_delta_update` op.
+
+  Returns:
+    The gated, normalized output [batch, seq_len, value_dim] and the new
+    recurrent state.
+  """
+  initial_dtype = conv_out.dtype
+  compute_dtype = torch.float32 if use_fp32 else initial_dtype
+  out, new_state = gated_delta_block(
+      conv_out.to(compute_dtype),
+      zba.to(compute_dtype),
+      a_log.to(torch.float32),
+      dt_bias.to(torch.float32),
+      norm_weight.to(torch.float32),
+      recurrent_state.to(torch.float32),
+      valid_mask=(
+          valid_mask.to(compute_dtype) if valid_mask is not None else None
+      ),
+      num_k_heads=int(num_k_heads),
+      num_v_heads=int(num_v_heads),
+      head_k_dim=int(head_k_dim),
+      head_v_dim=int(head_v_dim),
+      eps=float(eps),
+      norm_eps=float(norm_eps),
+      mode=int(gdn_mode),
+  )
+  return out.to(initial_dtype), new_state

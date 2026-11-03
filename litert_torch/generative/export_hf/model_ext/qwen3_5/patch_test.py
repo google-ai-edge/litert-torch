@@ -40,6 +40,9 @@ from transformers.models.qwen3_5 import configuration_qwen3_5
 from transformers.models.qwen3_5 import modeling_qwen3_5
 from transformers.models.qwen3_5 import modular_qwen3_5
 
+from ai_edge_litert import interpreter as tfl_interpreter  # pylint: disable=g-direct-tensorflow-import
+
+
 
 class Qwen3_5PatchTest(parameterized.TestCase):
 
@@ -156,6 +159,41 @@ class Qwen3_5PatchTest(parameterized.TestCase):
     fused = gdn.in_proj_zba
     assert fused is not None
     self.assertEqual(fused.out_features, 4 * 16 + 4 + 4)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="prefill", seq_len=8, masked=False),
+      dict(testcase_name="decode", seq_len=1, masked=False),
+      dict(testcase_name="decode_masked", seq_len=1, masked=True),
+  )
+  def test_fuse_qkvzba_projections_equivalence(
+      self, seq_len: int, masked: bool
+  ):
+    torch.manual_seed(0)
+    gdn = modeling_qwen3_5_static.Qwen3_5StaticGatedDeltaNet(
+        hidden_size=64,
+        num_v_heads=4,
+        num_k_heads=2,
+        head_k_dim=16,
+        head_v_dim=16,
+    ).eval()
+    x = torch.randn(1, seq_len, 64)
+    valid_mask = (
+        torch.zeros(1, seq_len, dtype=torch.float32)
+        if masked
+        else torch.ones(1, seq_len, dtype=torch.float32)
+    )
+    with torch.no_grad():
+      expected = gdn(x, valid_mask=valid_mask)
+      gdn.fuse_qkvzba_projections()
+      actual = gdn(x, valid_mask=valid_mask)
+
+    fused = gdn.in_proj_qkvzba
+    assert fused is not None
+    self.assertIsNone(gdn.in_proj_zba)
+    conv_dim = 2 * 2 * 16 + 4 * 16
+    zba_dim = 4 * 16 + 4 + 4
+    self.assertEqual(fused.out_features, conv_dim + zba_dim)
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
   @parameterized.named_parameters(
@@ -408,7 +446,10 @@ class Qwen3_5PatchTest(parameterized.TestCase):
                 layer.self_attn, modeling_qwen3_5.Qwen3_5Attention
             )
         if hasattr(layer, "linear_attn"):
-          self.assertEqual(layer.linear_attn.in_proj_zba is not None, fuse_qkv)
+          self.assertEqual(
+              layer.linear_attn.in_proj_qkvzba is not None, fuse_qkv
+          )
+          self.assertIsNone(layer.linear_attn.in_proj_zba)
 
       with torch.no_grad():
         actual_logits, _ = model(input_ids=input_ids, positions=positions)
@@ -431,6 +472,7 @@ class Qwen3_5PatchTest(parameterized.TestCase):
             layer.self_attn, modeling_qwen3_5.Qwen3_5Attention
         )
       if hasattr(layer, "linear_attn"):
+        self.assertIsNone(layer.linear_attn.in_proj_qkvzba)
         self.assertIsNone(layer.linear_attn.in_proj_zba)
 
   def test_patch_qwen3_5_model_with_single_gpu_composites_flag(self):
@@ -465,13 +507,37 @@ class Qwen3_5PatchTest(parameterized.TestCase):
           self.assertTrue(layer.self_attn.use_rope_composite)
           self.assertTrue(layer.self_attn.use_qkv_norm_rope_composite)
         if hasattr(layer, "linear_attn"):
-          self.assertIsNotNone(layer.linear_attn.in_proj_zba)
+          self.assertIsNotNone(layer.linear_attn.in_proj_qkvzba)
+          self.assertIsNone(layer.linear_attn.in_proj_zba)
 
       with torch.no_grad():
         actual_logits, _ = model(input_ids=input_ids, positions=positions)
       torch.testing.assert_close(
           actual_logits, expected_logits, rtol=1e-4, atol=1e-4
       )
+
+  def test_patch_qwen3_5_model_falls_back_to_zba_when_unfused_gdn(self):
+    torch.manual_seed(0)
+    cfg = self._make_config()
+    model = modeling_qwen3_5_static.Qwen3_5StaticForCausalLM(cfg).eval()
+    for layer in model.model.layers:
+      if hasattr(layer, "linear_attn"):
+        setattr(layer.linear_attn, "use_fused_gdn_block", False)
+    export_config = exportable_module_config.ExportableModuleConfig(
+        model="dummy",
+        fuse_qkv=True,
+    )
+
+    with patches_lib.patch_model(model, "qwen3_5", export_config):
+      for layer in model.model.layers:
+        if hasattr(layer, "linear_attn"):
+          self.assertIsNotNone(layer.linear_attn.in_proj_zba)
+          self.assertIsNone(layer.linear_attn.in_proj_qkvzba)
+
+    for layer in model.model.layers:
+      if hasattr(layer, "linear_attn"):
+        self.assertIsNone(layer.linear_attn.in_proj_zba)
+        self.assertIsNone(layer.linear_attn.in_proj_qkvzba)
 
   def test_qkv_norm_rope_composite_lowering(self):
     torch.manual_seed(0)
@@ -507,6 +573,27 @@ class Qwen3_5PatchTest(parameterized.TestCase):
 
     edge_model = litert_torch.convert(wrapper, (x, pos_ids))
     self.assertIn(b"odml.qkv_norm_rope", edge_model.model_content())
+
+    # The composite reads q/k/v straight from the fused projection, so the main
+    # graph only slices out the output gate (no zero-offset qkv slice).
+    interpreter = tfl_interpreter.Interpreter(
+        model_content=edge_model.model_content()
+    )
+    op_names = [
+        op["op_name"]
+        for op in interpreter._get_ops_details()  # pylint: disable=protected-access
+    ]
+    slice_ops = [
+        name
+        for name in op_names
+        if name in ("SLICE", "STRIDED_SLICE", "SPLIT", "SPLIT_V")
+    ]
+    self.assertLen(slice_ops, 1, msg=str(op_names))
+    with torch.no_grad():
+      expected = wrapper(x, pos_ids)
+    torch.testing.assert_close(
+        torch.as_tensor(edge_model(x, pos_ids)), expected, rtol=1e-4, atol=1e-4
+    )
 
 if __name__ == "__main__":
   absltest.main()

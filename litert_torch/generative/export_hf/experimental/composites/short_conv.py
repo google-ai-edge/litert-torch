@@ -121,7 +121,12 @@ def short_conv(
     conv_input = b * x_proj
   else:
     c = None
-    conv_input = in_proj_out
+    hidden_size = conv_state.shape[1]
+    conv_input = (
+        in_proj_out[..., :hidden_size]
+        if in_proj_out.shape[-1] > hidden_size
+        else in_proj_out
+    )
 
   if in_proj_out.shape[1] == 1 and num_valid_tokens is None:
     # Single-token decode: the depthwise conv is a multiply-add over the L
