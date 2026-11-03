@@ -33,10 +33,7 @@ class LiteRTExportableModuleForDecoderOnlyLMPrefillExternalEmbedder(
       local_mask=None,
       **kwargs,
   ):
-    if self.export_config.apply_gpu_composites:
-      kwargs["apply_gpu_composites"] = True
-    if self.export_config.use_sdpa_composite:
-      kwargs["use_sdpa_composite"] = True
+    kwargs.update(self.composite_flags())
     inputs = self.adapt_inputs(
         None,
         embeddings,
@@ -50,8 +47,15 @@ class LiteRTExportableModuleForDecoderOnlyLMPrefillExternalEmbedder(
         **kwargs,
     )
     inputs |= self.attention_kwargs()
+    emit_logits = bool(self.export_config.prefill_logits)
+    if emit_logits:
+      inputs["logits_to_keep"] = 1
+    inputs["prefill_logits"] = emit_logits
     output = self.model(**inputs)
-    return {"kv_cache": output.past_key_values}
+    outputs = {"kv_cache": output.past_key_values}
+    if emit_logits:
+      outputs["logits"] = output.logits.to(torch.float32)
+    return outputs
 
   def _get_input(
       self, batch_size, prefill_length, prefill_length_dim, model_config
@@ -85,10 +89,7 @@ class LiteRTExportableModuleForDecoderOnlyLMGenerateExternalEmbedder(
       local_mask=None,
       **kwargs,
   ):
-    if self.export_config.apply_gpu_composites:
-      kwargs["apply_gpu_composites"] = True
-    if self.export_config.use_sdpa_composite:
-      kwargs["use_sdpa_composite"] = True
+    kwargs.update(self.composite_flags())
     inputs = self.adapt_inputs(
         None,
         embeddings,

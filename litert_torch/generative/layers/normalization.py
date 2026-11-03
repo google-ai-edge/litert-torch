@@ -127,8 +127,8 @@ class GroupNorm(torch.nn.Module):
     self.enable_hlfb = enable_hlfb
     self.group_num = group_num
     self.eps = eps
-    self.weight = torch.nn.Parameter(torch.empty(dim), requires_grad=False)
-    self.bias = torch.nn.Parameter(torch.empty(dim), requires_grad=False)
+    self.weight = torch.nn.Parameter(torch.ones(dim), requires_grad=False)
+    self.bias = torch.nn.Parameter(torch.zeros(dim), requires_grad=False)
 
   def forward(self, x):
     """Running the forward pass of GroupNorm layer.

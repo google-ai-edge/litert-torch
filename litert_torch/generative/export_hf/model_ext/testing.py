@@ -39,6 +39,12 @@ Provides:
      resolved prefill and decode `ExportableModule` classes (and `RoPEEmbedder`
      when `externalize_rope=True` / `split_cache=True`) and runs
      `torch.export.export` across all sample signatures.
+   - `assert_v2_weights_resolvable`: Saves a tiny unpatched model as a
+     safetensors checkpoint, applies `patch_model` with all fusion / composite
+     flags on, and verifies `HFCheckpointWeightsLoader` (Converter V2,
+     `use_v2=True`) resolves every patched parameter with the extension's
+     `checkpoint_key_prefixes`, `fused_weight_specs`, and
+     `resolve_checkpoint_tensor`.
 
 See `model_ext/extension_test.py` and `experimental/users/weiyiw/kanana2_ext`
 for concrete usage examples.
@@ -49,6 +55,8 @@ import contextlib
 import copy
 import dataclasses
 import gc
+import os
+import tempfile
 import types
 from typing import Any, cast
 
@@ -56,6 +64,7 @@ from litert_torch.generative.export_hf.core import attention as _
 from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.core import exportable_module_config
 from litert_torch.generative.export_hf.core import patches as _
+from litert_torch.generative.export_hf.core import weights_loader as weights_loader_lib
 from litert_torch.generative.export_hf.core.external_emb import exportable_module as external_emb_module
 from litert_torch.generative.export_hf.core.external_rope import exportable_module as external_rope_module
 from litert_torch.generative.export_hf.core.external_rope import preprocess_model as external_rope_preprocess_model
@@ -64,6 +73,7 @@ from litert_torch.generative.export_hf.core.split_cache import exportable_module
 from litert_torch.generative.export_hf.model_ext import exportables as model_ext_exportables
 from litert_torch.generative.export_hf.model_ext import extension
 from litert_torch.generative.export_hf.model_ext import patches as model_ext_patches
+import safetensors.torch
 import torch
 import torch.utils._pytree as pytree
 import transformers
@@ -262,6 +272,169 @@ def assert_patch_numerical_parity(
         msg=lambda m, i=idx: f'Tensor output #{i} diverged after patch: {m}',
     )
   return baseline_out, patched_out
+
+
+def _default_v2_weights_export_config(
+    ext: extension.ModelExtension,
+) -> exportable_module_config.ExportableModuleConfig:
+  """Returns a config enabling every fusion / composite patch flag."""
+  return exportable_module_config.ExportableModuleConfig(
+      model='dummy',
+      externalize_embedder=True,
+      apply_gpu_composites=True,
+      fuse_qkv=True,
+      fuse_gate_up=True,
+      use_swiglu_composite=True,
+      use_qkv_norm_rope_composite=True,
+      model_extension=ext,
+  )
+
+
+def _save_checkpoint(model: torch.nn.Module, checkpoint_dir: str) -> None:
+  """Writes the (unpatched) `model` as a HuggingFace safetensors checkpoint."""
+  if isinstance(model, transformers.PreTrainedModel):
+    model.save_pretrained(checkpoint_dir, safe_serialization=True)
+  else:
+    safetensors.torch.save_model(
+        model, os.path.join(checkpoint_dir, 'model.safetensors')
+    )
+
+
+def assert_v2_weights_resolvable(
+    ext: extension.ModelExtension,
+    model: torch.nn.Module,
+    export_config: (
+        exportable_module_config.ExportableModuleConfig | None
+    ) = None,
+    checkpoint_dir: str | None = None,
+    check_values: bool = True,
+) -> list[str]:
+  """Verifies Converter V2 can stream every patched parameter from a checkpoint.
+
+  With `use_v2=True` (and `use_random_weights=False`), `export_lib` traces the
+  model on the `meta` device and serializes each parameter by asking
+  `core.weights_loader.HFCheckpointWeightsLoader` for its name on the *patched*
+  module. Any parameter a patch renames or creates (e.g. a fused
+  `gate_up_proj`) must therefore be an unchanged checkpoint key, a
+  `ModelExtension.fused_weight_specs` entry, or handled by
+  `ModelExtension.resolve_checkpoint_tensor`; otherwise the full export fails
+  late in `Save Params Bin` with `KeyError: Parameter ... not found in
+  weights_loader`. This helper catches such misses in `<2s` on a tiny model and
+  reports all of them at once.
+
+  It saves the unpatched `model` as a safetensors checkpoint (unless
+  `checkpoint_dir` is given), enters the same `get_patch_context` /
+  `patch_model` used by `export_lib`, builds the loader with the resolved
+  extension's `checkpoint_key_prefixes`, `fused_weight_specs`, and
+  `resolve_checkpoint_tensor`, and loads every parameter of the patched model.
+
+  Note: Fused names only exist when the corresponding flags are on, so the
+  default `export_config` enables every fusion / composite flag. Load-time
+  (`patch_context`) class patches that change parameter names only take effect
+  if `model` was constructed inside `patches.get_patch_context`.
+
+  Args:
+    ext: `ModelExtension` instance under test.
+    model: Tiny unpatched model (e.g. a 2-layer `PreTrainedModel`).
+    export_config: Optional `ExportableModuleConfig` passed to `patch_model` and
+      the loader. Defaults to a config with all fusion / composite flags on.
+    checkpoint_dir: Optional existing checkpoint directory to load from instead
+      of saving `model` (e.g. a real checkpoint whose keys differ from module
+      names).
+    check_values: Whether to also compare each loaded tensor with the patched
+      in-memory parameter (patches build fused weights from the originals, so
+      the loader must reproduce them exactly).
+
+  Returns:
+    Sorted list of resolved parameter names (as seen by Converter V2).
+
+  Raises:
+    AssertionError: If any parameter is missing from the checkpoint or loads
+      with a mismatched shape or value.
+  """
+  if export_config is None:
+    export_config = _default_v2_weights_export_config(ext)
+  elif getattr(export_config, 'model_extension', None) is None:
+    export_config = dataclasses.replace(export_config, model_extension=ext)
+  model_config = getattr(model, 'config', None)
+  model_type = getattr(model_config, 'model_type', None) or (
+      ext.model_types[0] if ext.model_types else ''
+  )
+  resolved_ext = extension.resolve_model_extension(
+      model_config if model_config is not None else model_type, export_config
+  )
+
+  with contextlib.ExitStack() as stack:
+    if checkpoint_dir is None:
+      checkpoint_dir = stack.enter_context(tempfile.TemporaryDirectory())
+      _save_checkpoint(model, checkpoint_dir)
+
+    input_emb = getattr(model, 'get_input_embeddings', lambda: None)()
+    output_emb = getattr(model, 'get_output_embeddings', lambda: None)()
+    input_w = getattr(input_emb, 'weight', None)
+    loader = stack.enter_context(
+        weights_loader_lib.HFCheckpointWeightsLoader(
+            checkpoint_dir,
+            tie_word_embeddings=(
+                input_w is not None
+                and getattr(output_emb, 'weight', None) is input_w
+            ),
+            extra_prefixes=(
+                resolved_ext.checkpoint_key_prefixes if resolved_ext else ()
+            ),
+            extra_fused_specs=(
+                resolved_ext.fused_weight_specs if resolved_ext else ()
+            ),
+            tensor_resolver=(
+                resolved_ext.resolve_checkpoint_tensor if resolved_ext else None
+            ),
+            config=model_config,
+            export_config=export_config,
+        )
+    )
+    stack.enter_context(
+        model_ext_patches.get_patch_context(model_type, export_config)
+    )
+    stack.enter_context(
+        model_ext_patches.patch_model(model, model_type, export_config)
+    )
+
+    resolved, failures = [], []
+    for name, param in model.named_parameters(remove_duplicate=False):
+      # Converter V2 names parameters relative to the exportable wrapper, which
+      # holds the model under `model`.
+      v2_name = f'model.{name}'
+      try:
+        tensor = loader(v2_name)
+      except KeyError as e:
+        failures.append(f'{v2_name}: not found ({e})')
+        continue
+      if tuple(tensor.shape) != tuple(param.shape):
+        failures.append(
+            f'{v2_name}: shape {tuple(tensor.shape)} != expected'
+            f' {tuple(param.shape)}'
+        )
+        continue
+      if check_values and not param.is_meta:
+        try:
+          torch.testing.assert_close(
+              tensor.to(param.dtype), param.detach(), atol=0, rtol=0
+          )
+        except AssertionError as e:
+          failures.append(f'{v2_name}: values differ ({e})')
+          continue
+      resolved.append(v2_name)
+
+  if failures:
+    raise AssertionError(
+        f'{len(failures)} parameter(s) of the patched model cannot be streamed'
+        ' by Converter V2. Declare `fused_weight_specs` /'
+        ' `checkpoint_key_prefixes` or implement `resolve_checkpoint_tensor` on'
+        ' the `ModelExtension`, and keep retained submodules under their'
+        ' checkpoint names:\n  '
+        + '\n  '.join(failures)
+    )
+  return sorted(resolved)
 
 
 def _resolve_prefill_decode_cls(
@@ -588,6 +761,24 @@ class ModelExtensionTestMixin:
         model=target_model,
         model_config=target_model_cfg,
         export_config=export_config,
+    )
+
+  def assert_v2_weights_resolvable(
+      self,
+      model: torch.nn.Module | None = None,
+      export_config: (
+          exportable_module_config.ExportableModuleConfig | None
+      ) = None,
+      checkpoint_dir: str | None = None,
+      check_values: bool = True,
+  ) -> list[str]:
+    """Verifies Converter V2 can stream every patched parameter of a tiny model."""
+    return assert_v2_weights_resolvable(
+        ext=self.get_extension(),
+        model=model if model is not None else self.get_sample_model(),
+        export_config=export_config,
+        checkpoint_dir=checkpoint_dir,
+        check_values=check_values,
     )
 
   def test_extension_instance_and_model_types_contract(self):

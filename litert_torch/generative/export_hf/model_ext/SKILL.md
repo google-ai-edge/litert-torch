@@ -63,6 +63,11 @@ tiny model (2–3 layers, `vocab_size=256`, `dtype=torch.float32`) using
 2. **`testing.assert_tiny_prefill_decode_torch_export(ext, tiny_model, ...)`**:
    Verifies `torch.export.export` graph capture across `prefill_*` and `decode`
    (and `RoPEEmbedder` when `split_cache=True`).
+3. **`testing.assert_v2_weights_resolvable(ext, tiny_model, ...)`**: Saves the
+   unpatched tiny model as safetensors, applies `patch_model` with all fusion /
+   composite flags on, and verifies Converter V2's `HFCheckpointWeightsLoader`
+   resolves every patched parameter (shape and value). Run this whenever your
+   patches fuse, rename, or add parameters (see gotcha F).
 
 ### Step 4: Full Export & `litert_lm` Verification
 
@@ -145,9 +150,8 @@ module is registered in `sys.modules` under
   ```
 * Return `mod.MyArchForCausalLM` from `get_hf_model_cls` so Converter V2
   (`use_v2=True` meta-device `from_config`) can instantiate the model directly.
-* If the checkpoint uses custom MLP weight names (e.g., `w1` and `w3` instead of
-  `gate_proj` and `up_proj`), declare `fused_weight_specs` with
-  `extension.FusedWeightSpec('gate_up_proj', ('w1', 'w3'), dim=0)`.
+* For Converter V2 weight names (fused projections such as `w1` / `w3`), see
+  gotcha F; it applies to all models, not only `trust_remote_code` ones.
 
 ### D. `sliding_window_ring_buffer_size` Flag Coupling
 When using `LiteRTLMCache` (`split_cache=False`), setting
@@ -163,3 +167,29 @@ Many `config.json` files specify `"dtype": "bfloat16"`. Calling
 multi-layer rounding differences are `~1e-2` vs. `atol=1e-4`. Always test parity
 in `torch.float32` (`assert_patch_numerical_parity` automatically casts
 `bfloat16`/`float16` models to `float32` when `cast_to_float32=True`).
+
+### F. Converter V2 (`--use_v2`) Weight Streaming: `KeyError ... not found in weights_loader`
+With `--use_v2=True` and real weights, the model is traced on `meta` and every
+parameter of the *patched* model is streamed by name from the checkpoint via
+`HFCheckpointWeightsLoader`. A patch that fuses or renames parameters therefore
+breaks export with `KeyError: Parameter 'model.model.layers.0.<...>.weight' not
+found in weights_loader` during `Save Params Bin`, unless each patched
+parameter is:
+1. an unchanged checkpoint key (keep retained submodules under their checkpoint
+   names, e.g. LFM2's `FusedLfm2MLP` keeps `self.w2`),
+2. covered by `fused_weight_specs` (built-ins only cover `gate_up_proj <-
+   (gate_proj, up_proj)` and `qkv_proj <- (q_proj, k_proj[, v_proj])`; e.g.
+   LFM2 declares `extension.FusedWeightSpec('gate_up_proj', ('w1', 'w3'),
+   dim=0)`; the fused submodule must sit under the same parent as its parts),
+   or
+3. rebuilt by `resolve_checkpoint_tensor`.
+
+Verification traps:
+* `--use_random_weights=True` skips the weights loader entirely, so a passing
+  random-weights V2 export proves nothing about weight mapping.
+* Fused names only exist when their flags are on (`--fuse_qkv`,
+  `--fuse_gate_up`, `--use_swiglu_composite`, `--use_qkv_norm_rope_composite`,
+  or `--apply_gpu_composites`, which implies them). Test V2 with these flags.
+* The full export fails only after tracing and lowering, and reports just the
+  first missing parameter. Prefer `testing.assert_v2_weights_resolvable`, which
+  checks all parameters with all flags on in `<2s`.

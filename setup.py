@@ -106,7 +106,7 @@ setup(
         "fire",
         "sentencepiece",
         "rich",
-        "litert-lm-builder>=0.18.0",
+        "litert-lm-builder>=0.19.0",
         "pillow",
     ],
     entry_points={

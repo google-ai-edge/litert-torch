@@ -268,6 +268,12 @@ try:
       self.use_rope_composite = use_rope_composite
 
       self.q_proj = original_attn.q_proj
+      self.num_heads = self.q_proj.out_features // self.head_dim
+      self.num_key_value_heads = (
+          0
+          if self.is_kv_shared_layer
+          else original_attn.k_proj.out_features // self.head_dim
+      )
 
       if not self.is_kv_shared_layer:
         self.k_norm = original_attn.k_norm
@@ -366,6 +372,26 @@ try:
             return float(layer_params.get("partial_rotary_factor", 1.0))
       return 1.0
 
+    @staticmethod
+    def _resolve_position_ids(
+        kwargs: dict[str, object], seq_len: int, device: torch.device
+    ) -> torch.Tensor:
+      position_ids = kwargs.get("position_ids", None)
+      if position_ids is None:
+        return torch.arange(seq_len, device=device).unsqueeze(0)
+      assert isinstance(position_ids, torch.Tensor)
+      if position_ids.ndim == 1:
+        return position_ids.unsqueeze(0)
+      return position_ids
+
+    @staticmethod
+    def _move_kv_to_device(state, device: torch.device):
+      if isinstance(state, tuple):
+        return tuple(
+            item.to(device) if hasattr(item, "to") else item for item in state
+        )
+      return state.to(device)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -394,18 +420,15 @@ try:
 
       if self.is_kv_shared_layer:
         if getattr(self, "use_qkv_norm_rope_composite", False):
-          position_ids = kwargs.get("position_ids", None)
-          if position_ids is None:
-            seq_len = hidden_states.shape[1]
-            position_ids = torch.arange(
-                seq_len, device=hidden_states.device
-            ).unsqueeze(0)
+          position_ids = self._resolve_position_ids(
+              kwargs, hidden_states.shape[1], hidden_states.device
+          )
           q = self.q_proj(hidden_states)
           query_states = qkv_norm_rope.apply_q_norm_rope(
               q,
               position_ids,
               self.q_norm.weight,
-              num_heads=self.config.num_attention_heads,
+              num_heads=self.num_heads,
               head_dim=self.head_dim,
               base=rope_base,
               eps=norm_eps,
@@ -417,12 +440,9 @@ try:
           if kwargs.get("apply_gpu_composites", False) or getattr(
               self, "use_rope_composite", False
           ):
-            position_ids = kwargs.get("position_ids", None)
-            if position_ids is None:
-              seq_len = query_states.shape[1]
-              position_ids = torch.arange(
-                  seq_len, device=query_states.device
-              ).unsqueeze(0)
+            position_ids = self._resolve_position_ids(
+                kwargs, query_states.shape[1], query_states.device
+            )
 
             query_states = query_states.transpose(1, 2)
             query_states = rope_composite.apply_mldrift_compatible_rope(
@@ -439,34 +459,34 @@ try:
             query_states = query_states.transpose(1, 2)
 
         key_states, value_states = shared_kv_states[self.layer_type]
-        key_states = key_states.to(query_states.device)
-        value_states = value_states.to(query_states.device)
+        key_states = self._move_kv_to_device(key_states, query_states.device)
+        value_states = self._move_kv_to_device(
+            value_states, query_states.device
+        )
       else:
         num_kv_shared = getattr(self.config, "num_kv_shared_layers", 0) or 0
-        # In prefill (seq_len > 1), the last non-KV-shared layer's query_states
-        # only feed into KV-shared layers that do not write to kv_cache, so
-        # MLIR DCE removes query_states when prefill only returns kv_cache.
-        # Keep that single layer unfused in prefill so DCE can eliminate its Q
-        # path and all subsequent KV-shared layers without leaving a partially
-        # live 3-output odml.qkv_norm_rope composite.
-        is_last_kv_donor_in_prefill = (
-            num_kv_shared > 0
+        # When prefill omits logits (`prefill_logits=False`), the final
+        # KV-owning layer's query_states only feed into KV-shared layers (or
+        # `last_hidden_state` when `num_kv_shared == 0`), neither of which
+        # writes to `kv_cache`, so MLIR DCE removes `query_states`. Keep that
+        # single layer unfused in prefill when `prefill_logits` is False so DCE
+        # can eliminate its Q path and any trailing KV-shared layers without
+        # leaving a partially live 3-output `odml.qkv_norm_rope` composite.
+        is_q_dead_in_prefill = (
+            hidden_states.shape[1] > 1
+            and not kwargs.get("prefill_logits", True)
             and self.layer_idx
             == self.config.num_hidden_layers - num_kv_shared - 1
-            and hidden_states.shape[1] > 1
         )
         if (
             getattr(self, "use_qkv_norm_rope_composite", False)
             and self.fuse_qkv
             and self.v_proj is not None
-            and not is_last_kv_donor_in_prefill
+            and not is_q_dead_in_prefill
         ):
-          position_ids = kwargs.get("position_ids", None)
-          if position_ids is None:
-            seq_len = hidden_states.shape[1]
-            position_ids = torch.arange(
-                seq_len, device=hidden_states.device
-            ).unsqueeze(0)
+          position_ids = self._resolve_position_ids(
+              kwargs, hidden_states.shape[1], hidden_states.device
+          )
           qkv = self.qkv_proj(hidden_states)
           query_states, key_states, value_states = (
               qkv_norm_rope.apply_qkv_norm_rope(
@@ -474,8 +494,8 @@ try:
                   position_ids,
                   self.q_norm.weight,
                   self.k_norm.weight,
-                  num_heads=self.config.num_attention_heads,
-                  num_kv_heads=self.config.num_key_value_heads,
+                  num_heads=self.num_heads,
+                  num_kv_heads=self.num_key_value_heads,
                   head_dim=self.head_dim,
                   base=rope_base,
                   eps=norm_eps,
@@ -505,12 +525,9 @@ try:
           key_states = self.k_norm(key_states)
 
           if getattr(self, "use_rope_composite", False):
-            position_ids = kwargs.get("position_ids", None)
-            if position_ids is None:
-              seq_len = query_states.shape[1]
-              position_ids = torch.arange(
-                  seq_len, device=query_states.device
-              ).unsqueeze(0)
+            position_ids = self._resolve_position_ids(
+                kwargs, query_states.shape[1], query_states.device
+            )
 
             query_states = query_states.transpose(1, 2)
             key_states = key_states.transpose(1, 2)
@@ -679,7 +696,12 @@ try:
           setattr(module, child_name, fused)
           replaced_modules.append((module, child_name, child))
         elif isinstance(child, modeling_gemma4.Gemma4TextAttention):
-          if fuse_qkv or use_rope or use_qkv_norm_rope:
+          if (
+              fuse_qkv
+              or use_rope
+              or use_qkv_norm_rope
+              or getattr(export_config, "split_cache", False)
+          ):
             print(
                 f"Replacing Attention: {child_name} "
                 f"(fuse_qkv={fuse_qkv}, use_rope={use_rope}, "
@@ -801,6 +823,9 @@ class LiteRTGemma4VisionPatchEmbedder(Gemma4VisionPatchEmbedder):
 
 class LiteRTGemma4TextModel(Gemma4TextModel):
   """Gemma4 text model."""
+
+  _can_set_attn_implementation_cached_value = True
+  _can_set_experts_implementation_cached_value = True
 
   def project_per_layer_inputs(
       self,

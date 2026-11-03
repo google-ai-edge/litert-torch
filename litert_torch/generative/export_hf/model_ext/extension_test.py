@@ -97,6 +97,69 @@ class _DummyImageGenModel:
   pass
 
 
+class _W13Mlp(torch.nn.Module):
+  """Toy MLP whose checkpoint names gate / up projections `w1` / `w3`."""
+
+  def __init__(self, dim: int = 8, hidden: int = 16):
+    super().__init__()
+    self.w1 = torch.nn.Linear(dim, hidden, bias=False)
+    self.w2 = torch.nn.Linear(hidden, dim, bias=False)
+    self.w3 = torch.nn.Linear(dim, hidden, bias=False)
+
+  def forward(self, x):
+    return self.w2(torch.nn.functional.silu(self.w1(x)) * self.w3(x))
+
+
+class _FusedW13Mlp(torch.nn.Module):
+  """Fuses `_W13Mlp.w1` / `w3` into `gate_up_proj`, keeping `w2`."""
+
+  def __init__(self, mlp: _W13Mlp):
+    super().__init__()
+    self.w2 = mlp.w2
+    self.gate_up_proj = torch.nn.Linear(
+        mlp.w1.in_features, 2 * mlp.w1.out_features, bias=False
+    )
+    self.gate_up_proj.weight = torch.nn.Parameter(
+        torch.cat([mlp.w1.weight.data, mlp.w3.weight.data], dim=0)
+    )
+
+  def forward(self, x):
+    gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
+    return self.w2(torch.nn.functional.silu(gate) * up)
+
+
+class _W13Model(torch.nn.Module):
+
+  def __init__(self):
+    super().__init__()
+    self.layers = torch.nn.ModuleList([_W13Mlp(), _W13Mlp()])
+
+
+class _W13FusingExtension(ModelExtension):
+  """Fuses `w1` / `w3` in `patch_model` without declaring a fused spec."""
+
+  model_types = ('v2_weights_toy_arch',)
+
+  @contextlib.contextmanager
+  def patch_model(self, model, export_config):
+    replaced = []
+    if export_config.fuse_gate_up:
+      for idx, layer in enumerate(model.layers):
+        model.layers[idx] = _FusedW13Mlp(layer)
+        replaced.append((idx, layer))
+    try:
+      yield
+    finally:
+      for idx, layer in replaced:
+        model.layers[idx] = layer
+
+
+class _W13FusingExtensionWithSpec(_W13FusingExtension):
+  fused_weight_specs = (
+      extension.FusedWeightSpec('gate_up_proj', ('w1', 'w3'), dim=0),
+  )
+
+
 class ModelExtensionTest(googletest.TestCase):
 
   def setUp(self):
@@ -815,6 +878,49 @@ class ModelExtensionTest(googletest.TestCase):
         called_steps,
         ['embedder', 'additional', 'prefill_decode', 'tokenizer'],
     )
+
+  def test_assert_v2_weights_resolvable_reports_missing_fused_spec(self):
+    model = _W13Model()
+    with self.assertRaisesRegex(
+        AssertionError,
+        r'2 parameter\(s\)[\s\S]*model\.layers\.0\.gate_up_proj\.weight: not'
+        r' found[\s\S]*model\.layers\.1\.gate_up_proj\.weight: not found',
+    ):
+      ext_testing.assert_v2_weights_resolvable(_W13FusingExtension(), model)
+    # `patch_model` is restored even when the check fails.
+    self.assertIsInstance(model.layers[0], _W13Mlp)
+
+  def test_assert_v2_weights_resolvable_with_fused_spec(self):
+    resolved = ext_testing.assert_v2_weights_resolvable(
+        _W13FusingExtensionWithSpec(), _W13Model()
+    )
+    self.assertEqual(
+        resolved,
+        [
+            'model.layers.0.gate_up_proj.weight',
+            'model.layers.0.w2.weight',
+            'model.layers.1.gate_up_proj.weight',
+            'model.layers.1.w2.weight',
+        ],
+    )
+
+  def test_assert_v2_weights_resolvable_builtin_qwen3_defaults(self):
+    ext = builtin_extensions.Qwen3Extension()
+    qwen3_cfg = transformers.Qwen3Config(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=8,
+        max_position_embeddings=64,
+    )
+    with ext.patch_context():
+      tiny_model = transformers.Qwen3ForCausalLM(qwen3_cfg).eval()
+    resolved = ext_testing.assert_v2_weights_resolvable(ext, tiny_model)
+    self.assertIn('model.model.layers.0.mlp.gate_up_proj.weight', resolved)
+    self.assertIn('model.model.layers.0.self_attn.qkv_proj.weight', resolved)
 
   def test_assert_patch_numerical_parity_and_tiny_prefill_decode_export(self):
     ext = builtin_extensions.Qwen3Extension()

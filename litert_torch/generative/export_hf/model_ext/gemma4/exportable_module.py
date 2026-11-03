@@ -14,8 +14,36 @@
 # ==============================================================================
 """Exportable module for externalized embedding."""
 
+from typing import Any
+
 from litert_torch.generative.export_hf.core import exportable_module as base_exportable_module
 import torch
+
+
+def get_language_model(model: Any) -> torch.nn.Module:
+  """Returns the Gemma 4 text model from either multimodal or causal LM."""
+  inner = model.model
+  return getattr(inner, "language_model", inner)
+
+
+def get_text_config(model: Any) -> Any:
+  """Returns the Gemma 4 text config from either multimodal or causal LM."""
+  config = model.config
+  if hasattr(config, "get_text_config"):
+    return config.get_text_config()
+  return getattr(config, "text_config", config)
+
+
+def apply_final_logit_softcapping(
+    logits: torch.Tensor, text_config: Any
+) -> torch.Tensor:
+  """Applies `final_logit_softcapping` when configured on `text_config`."""
+  softcap = getattr(text_config, "final_logit_softcapping", None)
+  if softcap is not None:
+    logits = logits / softcap
+    logits = torch.tanh(logits)
+    logits = logits * softcap
+  return logits
 
 
 class LiteRTExportableModuleForDecoderOnlyLMPrefillExternalEmbedder(
@@ -36,7 +64,12 @@ class LiteRTExportableModuleForDecoderOnlyLMPrefillExternalEmbedder(
     inputs = super().adapt_inputs(
         tokens, embeddings, input_pos, kv_cache, mask, **kwargs
     )
-    inputs["per_layer_inputs"] = per_layer_embeddings
+    # Match the decoder compute dtype (fp16 with experimental_use_fp16 or bf16
+    # with model_dtype="bfloat16") so per-layer inputs do not promote the
+    # residual stream back to fp32.
+    inputs["per_layer_inputs"] = per_layer_embeddings.to(
+        inputs["inputs_embeds"].dtype
+    )
     return inputs
 
   # pylint: disable=arguments-renamed
@@ -62,15 +95,16 @@ class LiteRTExportableModuleForDecoderOnlyLMPrefillExternalEmbedder(
         ),
         **kwargs,
     )
+    text_config = get_text_config(self.model)
     inputs["past_key_values"] = inputs[
         "past_key_values"
-    ].insert_dummy_cache_layers(self.model.config.text_config)
+    ].insert_dummy_cache_layers(text_config)
     inputs |= self.attention_kwargs()
     # Only the KV cache is returned; see `core/attention.py`.
     inputs["prefill_logits"] = False
-    output = self.model.model.language_model(**inputs)
+    output = get_language_model(self.model)(**inputs)
     kv_cache = output.past_key_values
-    kv_cache = kv_cache.remove_dummy_cache_layers(self.model.config.text_config)
+    kv_cache = kv_cache.remove_dummy_cache_layers(text_config)
     return {"kv_cache": kv_cache}
 
   def _get_input(
@@ -125,7 +159,12 @@ class LiteRTExportableModuleForDecoderOnlyLMGenerateExternalEmbedder(
     inputs = super().adapt_inputs(
         tokens, embeddings, input_pos, kv_cache, mask, **kwargs
     )
-    inputs["per_layer_inputs"] = per_layer_embeddings
+    # Match the decoder compute dtype (fp16 with experimental_use_fp16 or bf16
+    # with model_dtype="bfloat16") so per-layer inputs do not promote the
+    # residual stream back to fp32.
+    inputs["per_layer_inputs"] = per_layer_embeddings.to(
+        inputs["inputs_embeds"].dtype
+    )
     return inputs
 
   # pylint: disable=arguments-renamed
@@ -151,16 +190,26 @@ class LiteRTExportableModuleForDecoderOnlyLMGenerateExternalEmbedder(
         ),
         **kwargs,
     )
+    text_config = get_text_config(self.model)
     inputs["past_key_values"] = inputs[
         "past_key_values"
-    ].insert_dummy_cache_layers(self.model.config.text_config)
+    ].insert_dummy_cache_layers(text_config)
     inputs |= self.attention_kwargs()
-    output = self.model.model.language_model(**inputs)
+    output = get_language_model(self.model)(
+        **inputs, output_hidden_states=self.export_verifier
+    )
     hidden_states = output.last_hidden_state
     logits = self.model.lm_head(hidden_states)
+    logits = apply_final_logit_softcapping(logits, text_config)
+    # Logits are always emitted in fp32: the runtime samplers expect fp32.
+    logits = logits.to(torch.float32)
     kv_cache = output.past_key_values
-    kv_cache = kv_cache.remove_dummy_cache_layers(self.model.config.text_config)
-    return {"kv_cache": kv_cache, "logits": logits}
+    kv_cache = kv_cache.remove_dummy_cache_layers(text_config)
+    if self.export_verifier:
+      extra_outputs = {"activations": output["hidden_states"][-1]}
+    else:
+      extra_outputs = {}
+    return {"kv_cache": kv_cache, "logits": logits, **extra_outputs}
 
   def _get_input(
       self, batch_size, decode_length, decode_length_dim, model_config
@@ -199,18 +248,27 @@ class LiteRTExportableModuleForPerLayerEmbedder(torch.nn.Module):
     super().__init__()
     self.model = model
 
+  @property
+  def device(self) -> torch.device:
+    """Device of the wrapped model's parameters (`meta` for V2 export)."""
+    return next(self.model.parameters(), torch.empty(0)).device
+
   def forward(
       self,
       token_ids,
   ):
-    output = self.model.model.language_model.get_per_layer_inputs(
+    # Keep the zero as a 0-d CPU tensor: it becomes a lifted constant, and a
+    # constant created on `meta` (V2 export) has no recoverable value. Clamping
+    # negative multimodal soft-token placeholder IDs prevents out-of-bounds
+    # table gathers.
+    token_ids = torch.maximum(token_ids, torch.tensor(0, dtype=torch.int32))
+    output = get_language_model(self.model).get_per_layer_inputs(
         token_ids, None
     )
-    return {"embeddings": output}
+    return {"embeddings": output.to(torch.float32)}
 
-  @classmethod
   def get_sample_inputs(
-      cls,
+      self,
       model_config,
       export_config: base_exportable_module.ExportableModuleConfig,
       **kwargs,
@@ -219,8 +277,13 @@ class LiteRTExportableModuleForPerLayerEmbedder(torch.nn.Module):
     del kwargs  # Unused.
     del model_config  # Unused.
     batch_size = export_config.batch_size
+    device = self.device
     prefill_length_dim = export_config.prefill_length_dim
-    tokens = {"token_ids": torch.ones((batch_size, 1), dtype=torch.int32)}
+    tokens = {
+        "token_ids": torch.ones(
+            (batch_size, 1), dtype=torch.int32, device=device
+        )
+    }
     tokens_dynamic_shape = {"token_ids": {1: 1}} if prefill_length_dim else {}
     if export_config.single_token_embedder:
       return {"per_layer_embedder": (tokens, tokens_dynamic_shape)}
@@ -231,7 +294,7 @@ class LiteRTExportableModuleForPerLayerEmbedder(torch.nn.Module):
       for prefill_length in export_config.prefill_lengths:
         tokens = {
             "token_ids": torch.ones(
-                (batch_size, prefill_length), dtype=torch.int32
+                (batch_size, prefill_length), dtype=torch.int32, device=device
             )
         }
         tokens_dynamic_shape = (

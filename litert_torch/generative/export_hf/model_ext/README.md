@@ -362,14 +362,16 @@ class FusedMLP(torch.nn.Module):
 @extension.register_model_extension()
 class MyFusedArchExtension(extension.ModelExtension):
   model_types = ('my_arch',)
-  # Note: `'gate_up_proj'` <- `('gate_proj', 'up_proj')` and `'qkv_proj'` <-
-  # `('q_proj', 'k_proj', 'v_proj')` are built into `HFCheckpointWeightsLoader`.
-  # If your fused attribute uses custom names (e.g. `w13` <- `('w1', 'w3')`),
-  # declare `fused_weight_specs` so Converter V2 (`--use_v2`) streams and
-  # concatenates the checkpoint tensors automatically:
-  fused_weight_specs = (
-      extension.FusedWeightSpec('w13', ('w1', 'w3'), dim=0),
-  )
+  # `FusedMLP` above fuses the standard HF `gate_proj` / `up_proj` names, which
+  # `HFCheckpointWeightsLoader` already maps to `gate_up_proj` (likewise
+  # `qkv_proj` <- `q_proj` / `k_proj` / `v_proj`), so Converter V2 (`--use_v2`)
+  # needs no extra declaration here. If your checkpoint uses other names for the
+  # fused parts (e.g. LFM2's `w1` / `w3`), declare them so Converter V2 can
+  # stream and concatenate the checkpoint tensors (see section 4):
+  #
+  #   fused_weight_specs = (
+  #       extension.FusedWeightSpec('gate_up_proj', ('w1', 'w3'), dim=0),
+  #   )
 
   @contextlib.contextmanager
   def patch_model(self, model, export_config):
@@ -431,24 +433,53 @@ attention (`"full_attention"`) in `config.layer_types`:
 
 ### 4. Converter V2 Weights (`checkpoint_key_prefixes`, `fused_weight_specs` & `resolve_checkpoint_tensor`)
 
-When exporting with Converter V2 and meta-device weight streaming (`--use_v2`
-and `--delete_in_memory_params`), `HFCheckpointWeightsLoader`
-(`core/weights_loader.py`) maps PyTorch parameter names on the traced module to
-tensor names inside the checkpoint's `.safetensors` files.
+When exporting with Converter V2 (`--use_v2=True`) using real weights (i.e.
+without `--use_random_weights`), the model is traced on the `meta` device and
+every parameter is streamed from the checkpoint during serialization:
+`HFCheckpointWeightsLoader` (`core/weights_loader.py`) maps each parameter name
+of the *patched*, traced module to tensor names inside the checkpoint's
+`.safetensors` files.
+
+> [!IMPORTANT]
+> `--use_random_weights=True` bypasses `HFCheckpointWeightsLoader` entirely, so
+> it cannot validate Converter V2 weight mapping. Fused names (such as
+> `gate_up_proj`) also only exist when the flag that enables the fusion
+> (`--fuse_qkv`, `--fuse_gate_up`, `--use_swiglu_composite`,
+> `--use_qkv_norm_rope_composite`, or `--apply_gpu_composites`, which implies
+> them) is on. A mapping miss surfaces late, in `Save Params Bin`, as
+> `KeyError: Parameter '...' not found in weights_loader` and only names the
+> first missing parameter. Run `testing.assert_v2_weights_resolvable` (see
+> *Contract & Fast-Inner-Loop Verification* below) to catch all misses in
+> seconds.
+
+**Naming rule:** every parameter of the patched model must be one of:
+
+1. An unchanged checkpoint key (after prefix matching). Retained submodules in
+   a patched module must keep their checkpoint attribute names (e.g. LFM2's
+   `FusedLfm2MLP` keeps `self.w2`; renaming it to `down_proj` breaks loading).
+2. A `fused_weight_specs` entry. Specs match `*.{fused_name}.{weight|bias}`
+   and concatenate the sibling checkpoint tensors `*.{part}.{weight|bias}`, so
+   the fused submodule must live under the same parent as the parts it
+   replaces.
+3. Reconstructed by `resolve_checkpoint_tensor`.
 
 If your model uses non-standard checkpoint wrapper prefixes or custom fused
 projections, use these three hooks:
 
 * **`checkpoint_key_prefixes: Sequence[str]`** — Additional leading module/key
   prefixes stripped and prepended when `HFCheckpointWeightsLoader` generates
-  candidate safetensors keys (on top of the built-in `'model.'`,
-  `'model.language_model.'`, and `'language_model.'` prefixes).
+  candidate safetensors keys. Built-in handling already strips `model.`,
+  `module.`, `static_model.`, `original_hf_model.`, and `language_model.`, and
+  tries keys under `model.`, `model.language_model.`, `language_model.`, and
+  `transformer.`.
 * **`fused_weight_specs: Sequence[FusedWeightSpec]`** — Declarative specs
   `FusedWeightSpec(fused_name, part_names, dim=0)` telling
   `HFCheckpointWeightsLoader` how to concatenate separate checkpoint tensors
-  into a fused `nn.Linear` parameter (built-in defaults already cover
-  `gate_up_proj <- (gate_proj, up_proj)` and
-  `qkv_proj <- (q_proj, k_proj, v_proj)`).
+  into a fused `nn.Linear` parameter. Built-in defaults only cover the standard
+  HF names `gate_up_proj <- (gate_proj, up_proj)` and
+  `qkv_proj <- (q_proj, k_proj, v_proj)` / `(q_proj, k_proj)`; declare any
+  other naming (e.g. LFM2's `gate_up_proj <- (w1, w3)`) on your extension.
+  Extension specs are tried before the defaults.
 * **`resolve_checkpoint_tensor(self, param_name, try_load) -> Tensor | None`** —
   Called by `HFCheckpointWeightsLoader` when a parameter needs arbitrary custom
   reconstruction (such as interleaving heads, slicing, or transposing).
@@ -640,8 +671,9 @@ inspector`).
 ### 2. Contract & Fast-Inner-Loop Verification (`model_ext/testing.py`)
 
 `model_ext/testing.py` provides both a reusable `unittest.TestCase` mixin and
-standalone fast-inner-loop helpers that verify numerical parity and
-`torch.export.export` graph capture on tiny 2-layer models in `<2s` on CPU:
+standalone fast-inner-loop helpers that verify numerical parity,
+`torch.export.export` graph capture, and Converter V2 weight mapping on tiny
+2-layer models in `<2s` on CPU:
 
 * **`ModelExtensionTestMixin`** — Tests all `ModelExtension` hook contracts
   (`model_types`, `update_export_config`, `patch_context` / `patch_model`
@@ -654,6 +686,16 @@ standalone fast-inner-loop helpers that verify numerical parity and
   2-layer causal LM in the resolved prefill/decode `ExportableModule` classes
   (and `RoPEEmbedder` when `split_cache=True` / `externalize_rope=True`) and
   runs `torch.export.export` across all sample signatures.
+* **`assert_v2_weights_resolvable(ext, model, ...)`** — Saves the tiny
+  *unpatched* model as a safetensors checkpoint, applies `patch_model` with all
+  fusion / composite flags on (by default), builds `HFCheckpointWeightsLoader`
+  with your extension's `checkpoint_key_prefixes`, `fused_weight_specs`, and
+  `resolve_checkpoint_tensor` exactly as `export_lib` does, and checks that
+  every patched parameter loads with the right shape and value. Reports all
+  misses at once instead of the first `KeyError` a full `--use_v2` export would
+  hit after minutes of tracing. If `patch_context` swaps classes in a way that
+  renames parameters, build the tiny model inside
+  `patches.get_patch_context(model_type)`.
 
 ```python
 from absl.testing import absltest
@@ -706,6 +748,9 @@ class MyArchExtensionTest(
     )
     self.assertIn('prefill_8', exported)
     self.assertIn('decode', exported)
+    # 3. Verify Converter V2 (`--use_v2`) can stream every patched parameter
+    # (fused projections included) from a safetensors checkpoint:
+    self.assert_v2_weights_resolvable(tiny_model)
 
 
 if __name__ == '__main__':

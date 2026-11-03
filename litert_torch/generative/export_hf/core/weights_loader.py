@@ -53,8 +53,6 @@ _DEFAULT_FUSED_SPECS: tuple[tuple[str, tuple[str, ...], int], ...] = (
     ("qkv_proj", ("q_proj", "k_proj", "v_proj"), 0),
     ("qkv_proj", ("q_proj", "k_proj"), 0),
     ("gate_up_proj", ("gate_proj", "up_proj"), 0),
-    # LFM2 names its gate / up projections `w1` / `w3`.
-    ("gate_up_proj", ("w1", "w3"), 0),
 )
 
 

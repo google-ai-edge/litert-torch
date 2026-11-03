@@ -29,6 +29,8 @@ Full-featured multimodal extension illustrating:
   layer patches (`gemma4/patch.py`).
 """
 
+import dataclasses
+
 from litert_torch.generative.export_hf.model_ext import extension as extension_lib
 from litert_torch.generative.export_hf.model_ext.gemma4 import audio_exportable as gemma4_audio_exportable
 from litert_torch.generative.export_hf.model_ext.gemma4 import exportable_module as gemma4_exportable
@@ -48,6 +50,24 @@ class Gemma4Extension(extension_lib.ModelExtension):
       'gemma4_text',
   )
   extra_kwargs_keys = ('gemma4_vision_max_soft_tokens',)
+
+  def update_export_config(self, export_config, model_config):
+    """See base class."""
+    text_config = (
+        model_config.get_text_config()
+        if hasattr(model_config, 'get_text_config')
+        else getattr(model_config, 'text_config', model_config)
+    )
+    if (
+        getattr(text_config, 'hidden_size_per_layer_input', 0)
+        and not export_config.externalize_embedder
+    ):
+      export_config = dataclasses.replace(
+          export_config,
+          externalize_embedder=True,
+          single_token_embedder=not export_config.split_cache,
+      )
+    return export_config
 
   def get_prefill_decode_exportables(self, model_config, export_config):
     """See base class."""

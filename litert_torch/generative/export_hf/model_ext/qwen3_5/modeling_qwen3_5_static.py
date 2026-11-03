@@ -75,6 +75,22 @@ def l2norm(
   )
 
 
+def stable_softplus(x: torch.Tensor) -> torch.Tensor:
+  """Computes softplus(x) = log(1 + exp(x)) without overflow.
+
+  log1p(exp(x)) overflows to inf in fp16 once x exceeds ~11.09, and GPU
+  delegates run the exported graph in fp16. relu(x) + log1p(exp(-|x|)) is the
+  same function and stays finite for every input.
+
+  Args:
+    x: Input tensor.
+
+  Returns:
+    softplus(x), with the same dtype as `x`.
+  """
+  return torch.relu(x) + torch.log1p(torch.exp(-x.abs()))
+
+
 class Qwen3_5RMSNormGated(nn.Module):  # pylint: disable=invalid-name
   """Fused gated RMSNorm Layer for Qwen3.5 GatedDeltaNet."""
 
@@ -192,13 +208,6 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
     state_len = self.conv_kernel_size - 1
     has_valid_mask = valid_mask is not None and valid_mask.numel() > 0
 
-    # 1. Causal 1D Conv with static conv_state
-    if has_valid_mask:
-      assert valid_mask is not None
-      mixed_qkv = mixed_qkv * valid_mask.view(batch_size, seq_len, 1).to(
-          mixed_qkv.dtype
-      )
-
     valid_len: Optional[torch.Tensor] = None
     num_valid_tokens: Optional[torch.Tensor] = None
     if seq_len > 1 and has_valid_mask:
@@ -209,6 +218,24 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
           num_valid_tokens
           if batch_size == 1
           else valid_mask.to(torch.float32).sum(dim=-1).to(torch.int32)
+      )
+
+    # Right padding is excluded by `num_valid_tokens` (the conv state is taken
+    # at the last valid token) and by `valid_len` (the recurrence stops there
+    # and zeroes the padded outputs), and nothing reads the padded outputs. So
+    # the padded inputs only need to be zeroed without `valid_len`, or for the
+    # chunked decomposition (`gdn_mode=1` without the fused op), which takes
+    # neither.
+    zero_padded_inputs = has_valid_mask and (
+        valid_len is None
+        or (not getattr(self, "use_fused_gdn", True) and self.gdn_mode == 1)
+    )
+
+    # 1. Causal 1D Conv with static conv_state
+    if zero_padded_inputs:
+      assert valid_mask is not None
+      mixed_qkv = mixed_qkv * valid_mask.view(batch_size, seq_len, 1).to(
+          mixed_qkv.dtype
       )
 
     if batch_size == 1 and getattr(self, "use_short_conv_composite", True):
@@ -252,10 +279,12 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
 
     beta = b.sigmoid()
     act_dtype = torch.float32 if self.use_fp32 else mixed_qkv.dtype
-    a_val = (a.to(act_dtype) + self.dt_bias.to(act_dtype)).clamp(max=50.0)
-    g = -self.A_log.to(act_dtype).exp() * torch.log1p(torch.exp(a_val))
+    a_val = a.to(act_dtype) + self.dt_bias.to(act_dtype)
+    # Qwen3.5-2B/4B reach a_val ~30 in layer 0; log1p(exp(a_val)) would
+    # overflow when a GPU delegate runs this in fp16 and turn g into -inf/NaN.
+    g = -self.A_log.to(act_dtype).exp() * stable_softplus(a_val)
 
-    if has_valid_mask:
+    if zero_padded_inputs:
       assert valid_mask is not None
       vm_4d = valid_mask.view(batch_size, seq_len, 1, 1).to(query.dtype)
       vm_3d = valid_mask.view(batch_size, seq_len, 1).to(query.dtype)
@@ -611,6 +640,7 @@ class Qwen3_5StaticForCausalLM(nn.Module):
       past_key_values: Optional[Any] = None,
       valid_mask: Optional[torch.Tensor] = None,
       inputs_embeds: Optional[torch.Tensor] = None,
+      logits_to_keep: Union[int, torch.Tensor] = 0,
       **kwargs,
   ) -> Tuple[torch.Tensor, Optional[Any]]:
     hidden_states, past_key_values = self.model(
@@ -621,6 +651,14 @@ class Qwen3_5StaticForCausalLM(nn.Module):
         inputs_embeds=inputs_embeds,
         **kwargs,
     )
+    # Same semantics as `logits_to_keep` in HF `*ForCausalLM`: 0 keeps every
+    # position, an int N keeps the last N positions and a 1D tensor selects
+    # positions. Prefill exports pass 1, so the vocabulary-sized `lm_head` runs
+    # on the final position only instead of on every prefill position.
+    if isinstance(logits_to_keep, torch.Tensor):
+      hidden_states = hidden_states[:, logits_to_keep, :]
+    elif logits_to_keep > 0:
+      hidden_states = hidden_states[:, -logits_to_keep:, :]
     logits = self.lm_head(hidden_states)
     return logits, past_key_values
 

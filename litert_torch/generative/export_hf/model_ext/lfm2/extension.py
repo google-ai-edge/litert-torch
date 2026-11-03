@@ -17,7 +17,8 @@
 Minimal patch-only extension example: LFM2 reuses the generic core prefill and
 decode exportables and `model_ext/metadata_builder.py` `conv` state buffers,
 needing only runtime RMSNorm, short-convolution, and QKV/SwiGLU composite
-patches registered in `lfm2/patch.py`.
+patches registered in `lfm2/patch.py`, plus a `fused_weight_specs` entry so
+Converter V2 can stream the fused `gate_up_proj` from the checkpoint.
 """
 
 from litert_torch.generative.export_hf.model_ext import extension as extension_lib
@@ -30,3 +31,8 @@ class Lfm2Extension(extension_lib.ModelExtension):
   """Built-in extension for LFM2 hybrid attention + short-conv LLMs."""
 
   model_types = ('lfm2',)
+  # `lfm2/patch.py` `FusedLfm2MLP` fuses the MLP gate / up projections, which
+  # LFM2 checkpoints name `w1` / `w3`, into `gate_up_proj`.
+  fused_weight_specs = (
+      extension_lib.FusedWeightSpec('gate_up_proj', ('w1', 'w3'), dim=0),
+  )
