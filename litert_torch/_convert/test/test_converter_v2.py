@@ -509,6 +509,28 @@ class TestConverterV2(googletest.TestCase):
         atol=1e-3,
     )
 
+  @googletest.skip(
+      "TODO(b/581828582): Enable when the Converter V2 fix is in the OSS"
+      " release."
+  )
+  def test_preserves_pytorch_module_hierarchy_in_op_scopes(self):
+    """Test that Converter V2 lifts CallSiteLoc caller NameLocs onto Linear ops."""
+    m = SimpleLinearModel().eval()
+    sample_input = (torch.randn(1, 4),)
+    export_dir = self.create_tempdir().full_path
+    out_path = os.path.join(export_dir, "model.tflite")
+
+    litert_torch.convert(
+        m,
+        sample_input,
+        use_v2=True,
+        export_dir=export_dir,
+        output_file_path=out_path,
+    )
+    with open(out_path, "rb") as f:
+      content = f.read()
+    self.assertIn(b"torch.nn.modules.linear.Linear_fc;", content)
+
   def test_is_supported(self):
     self.assertTrue(converter_v2_lib.is_supported())
 
