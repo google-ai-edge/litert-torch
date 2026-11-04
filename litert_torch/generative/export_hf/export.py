@@ -14,14 +14,19 @@
 # ==============================================================================
 """Export functions for HuggingFace Transformers models."""
 
+from collections.abc import Mapping, Sequence
 import dataclasses
 import gc
+import json
 import os
+import pathlib
 import shutil
 import tempfile
+import types
 from typing import Any
 import warnings
 
+import huggingface_hub
 from litert_torch import progress
 from litert_torch.generative.export_hf import export_utils
 from litert_torch.generative.export_hf import model_ext as _
@@ -29,9 +34,488 @@ from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.core import exportable_module_config
 from litert_torch.generative.export_hf.core import litert_lm_builder
+from litert_torch.generative.export_hf.experimental.npu_export.configs import vendor_configs
+from litert_torch.generative.export_hf.model_ext import builtin_extensions as _
 from litert_torch.generative.export_hf.model_ext import extension as model_ext_extension
 
 ExportTask = exportable_module_config.ExportTask
+
+TASK_AUTO = 'auto'
+TARGET_CPU_GPU = 'cpu_gpu'
+TARGET_CPU = 'cpu'
+TARGET_GPU = 'gpu'
+TARGET_NPU = 'npu'
+CPU_GPU_TARGETS = (TARGET_CPU_GPU, TARGET_CPU, TARGET_GPU)
+
+# Where a resolved export argument (or the task) came from.
+SOURCE_USER = 'user'
+SOURCE_MODEL = 'model'
+SOURCE_TARGET = 'target'
+SOURCE_DEFAULT = 'default'
+
+_LLM_TASKS = frozenset({
+    ExportTask.TEXT_GENERATION.value,
+    ExportTask.IMAGE_TEXT_TO_TEXT.value,
+    ExportTask.MULTIMODAL_LM.value,
+})
+
+# Grand fallback settings for LLM/VLM export on CPU/GPU (`cpu_gpu`): GPU
+# composites (CPU runs their reference decompositions) and externalized weights.
+# A short 128-token prefill signature is added next to the 1024-token one
+# because a short prompt padded to 1024 tokens prefills 4-7x slower on CPU. The
+# graph KV cache is exported at 32771 while `LlmMetadata.max_num_tokens` is
+# capped at 4096 by default so CPU/GPU runtimes allocate a 4K context window
+# unless overridden at runtime.
+_CPU_GPU_LLM_KWARGS = types.MappingProxyType({
+    'apply_gpu_composites': True,
+    'externalize_weights': True,
+    'prefill_lengths': (128, 1024),
+    'cache_length': 32771,
+    'llm_metadata_max_num_tokens_override': 4096,
+})
+
+# Generic NPU split-cache export settings for LLMs/VLMs (`npu`, `npu:<vendor>`).
+# TODO(weiyiw): Verify and support context bucketing (multiple cache_lengths)
+# for NPU targets.
+_NPU_LLM_KWARGS = types.MappingProxyType({
+    'split_cache': True,
+    'apply_gpu_composites': False,
+    'externalize_embedder': True,
+    'prefill_lengths': (128,),
+    'cache_length': 1024,
+    'quantization_recipe': 'dynamic_wi8_afp32',
+})
+
+# Architecture suffixes that export_hf's generic text-generation path loads with
+# `AutoModelForCausalLM`.
+_CAUSAL_LM_ARCHITECTURE_SUFFIXES = ('ForCausalLM', 'LMHeadModel')
+
+# Tasks tried, in order, to identify checkpoints without a `model_type`.
+_INFERENCE_TASKS = (
+    None,
+    ExportTask.TEXT_TO_IMAGE.value,
+    ExportTask.TEXT_TO_SPEECH.value,
+    ExportTask.ANY_TO_ANY.value,
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class TargetSpec:
+  """Parsed hardware target specification.
+
+  Attributes:
+    raw: Original target string (or `'cpu_gpu'` when omitted).
+    family: Target family (`'cpu_gpu'` or `'npu'`).
+    vendor: Canonical NPU vendor key in `vendor_configs.VENDOR_CONFIGS` (e.g.
+      `'qualcomm'`, `'mediatek'`, `'intel'`, `'google_tensor'`, `'samsung'`), or
+      `None`.
+    soc: Optional NPU SoC identifier (e.g. `'sm8750'`), or `None`.
+  """
+
+  raw: str
+  family: str
+  vendor: str | None = None
+  soc: str | None = None
+
+  @property
+  def is_npu(self) -> bool:
+    """Returns True if this target is in the `'npu'` family."""
+    return self.family == TARGET_NPU
+
+  @property
+  def canonical(self) -> str:
+    """Returns the canonical normalized target string."""
+    if not self.is_npu:
+      return TARGET_CPU_GPU
+    if self.vendor and self.soc:
+      return f'{TARGET_NPU}:{self.vendor}:{self.soc}'
+    if self.vendor:
+      return f'{TARGET_NPU}:{self.vendor}'
+    return TARGET_NPU
+
+
+def _supported_npu_vendors_help() -> str:
+  vendors = sorted(vendor_configs.VENDOR_CONFIGS.keys())
+  return ', '.join(vendors)
+
+
+def parse_target(target: str | None) -> TargetSpec:
+  """Parses and validates a `target` specification string.
+
+  Accepted forms:
+  - `None`, `''`, `'cpu_gpu'`, `'cpu'`, `'gpu'`: Resolves to the `'cpu_gpu'`
+    family.
+  - `'npu'`: Generic uncompiled NPU split-cache export.
+  - `'npu:<vendor>'`: Vendor-specific uncompiled NPU split-cache export (e.g.
+    `'npu:qualcomm'` / `'npu:qc'`, `'npu:mediatek'` / `'npu:mtk'`,
+    `'npu:intel'`, `'npu:google_tensor'`, `'npu:samsung'` / `'npu:slsi'`).
+  - `'npu:<vendor>:<soc>'`: Vendor + SoC NPU target (e.g.
+    `'npu:qualcomm:sm8750'`).
+
+  Args:
+    target: Raw target string, or `None` for the default `'cpu_gpu'` target.
+
+  Returns:
+    A validated `TargetSpec`.
+
+  Raises:
+    ValueError: If `target` is malformed or names an unknown target or vendor.
+  """
+  if target is None or not target.strip():
+    return TargetSpec(raw=TARGET_CPU_GPU, family=TARGET_CPU_GPU)
+  raw = target.strip()
+  lowered = raw.lower()
+  if lowered in CPU_GPU_TARGETS:
+    return TargetSpec(raw=lowered, family=TARGET_CPU_GPU)
+  if lowered == TARGET_NPU:
+    return TargetSpec(raw=TARGET_NPU, family=TARGET_NPU)
+  if lowered.startswith(f'{TARGET_NPU}:'):
+    parts = [p.strip() for p in raw.split(':')]
+    if len(parts) not in (2, 3) or any(not p for p in parts):
+      raise ValueError(
+          f"Invalid NPU target '{target}'. Expected 'npu', 'npu:<vendor>', or"
+          " 'npu:<vendor>:<soc>' (e.g. 'npu:qualcomm' or"
+          " 'npu:qualcomm:sm8750')."
+      )
+    vendor = vendor_configs.normalize_vendor(parts[1])
+    if vendor not in vendor_configs.VENDOR_CONFIGS:
+      raise ValueError(
+          f"Unknown NPU vendor '{parts[1]}' in target '{target}'. Supported"
+          f' vendors: {_supported_npu_vendors_help()}. If'
+          f" '{parts[1]}' is a chip/SoC name, include the vendor as"
+          f" 'npu:<vendor>:{parts[1]}' (e.g. 'npu:qualcomm:{parts[1]}')."
+      )
+    soc = parts[2] if len(parts) == 3 else None
+    return TargetSpec(raw=raw, family=TARGET_NPU, vendor=vendor, soc=soc)
+
+  vendor_candidate = vendor_configs.normalize_vendor(lowered)
+  if vendor_candidate in vendor_configs.VENDOR_CONFIGS:
+    raise ValueError(
+        f"Invalid target '{target}'. Prefix NPU vendors with 'npu:', e.g."
+        f" 'npu:{vendor_candidate}'."
+    )
+  raise ValueError(
+      f"Unknown target '{target}'. Use one of: {', '.join(CPU_GPU_TARGETS)},"
+      " 'npu', 'npu:<vendor>' (vendors:"
+      f" {_supported_npu_vendors_help()}), or 'npu:<vendor>:<soc>' (e.g."
+      " 'npu:qualcomm:sm8750')."
+  )
+
+
+def _normalize_kwarg_value(value: Any) -> Any:
+  return list(value) if isinstance(value, tuple) else value
+
+
+def _target_llm_kwargs(target_spec: TargetSpec) -> dict[str, Any]:
+  """Returns the target-level LLM/VLM export kwargs for `target_spec`."""
+  base = _NPU_LLM_KWARGS if target_spec.is_npu else _CPU_GPU_LLM_KWARGS
+  kwargs = {k: _normalize_kwarg_value(v) for k, v in base.items()}
+  if target_spec.is_npu and target_spec.vendor:
+    vendor_cfg = vendor_configs.VENDOR_CONFIGS.get(target_spec.vendor, {})
+    for key in ('k_ts_idx', 'v_ts_idx'):
+      if key in vendor_cfg:
+        kwargs[key] = vendor_cfg[key]
+  return kwargs
+
+
+@dataclasses.dataclass(frozen=True)
+class ExportPlan:
+  """Resolved export settings for a checkpoint.
+
+  Attributes:
+    model: Hugging Face repo id or local checkpoint directory.
+    task: Resolved export task.
+    task_source: Where `task` came from (`'user'`, `'model'` or `'default'`).
+    model_type: Detected `model_type`, or `None` if unknown.
+    export_kwargs: Keyword arguments resolved for `export` (besides `model`,
+      `output_dir`, `task`, `target`, and `dry_run`).
+    sources: Where each `export_kwargs` entry came from (`'user'`, `'model'` or
+      `'target'`).
+    target: Canonical hardware target string (e.g. `'cpu_gpu'`, `'npu'`,
+      `'npu:qualcomm'`).
+  """
+
+  model: str
+  task: str
+  task_source: str
+  model_type: str | None
+  export_kwargs: Mapping[str, Any]
+  sources: Mapping[str, str]
+  target: str = TARGET_CPU_GPU
+
+  def summary_rows(self) -> list[tuple[str, str, str]]:
+    """Returns `(setting, value, source)` rows describing the plan."""
+    rows = [
+        ('model_type', str(self.model_type), 'detected'),
+        ('task', self.task, self.task_source),
+        ('target', self.target, SOURCE_TARGET),
+    ]
+    for key in sorted(self.export_kwargs):
+      rows.append((key, repr(self.export_kwargs[key]), self.sources[key]))
+    return rows
+
+  def __str__(self) -> str:
+    """Formats the resolved export plan as a human-readable summary table."""
+    rows = self.summary_rows()
+    key_width = max(len('setting'), *(len(r[0]) for r in rows))
+    val_width = max(len('value'), *(len(r[1]) for r in rows))
+    lines = [
+        f'ExportPlan(model={self.model!r}):',
+        f"  {'setting':<{key_width}}  {'value':<{val_width}}  source",
+        f"  {'-' * key_width}  {'-' * val_width}  ------",
+    ]
+    for setting, value, source in rows:
+      lines.append(f'  {setting:<{key_width}}  {value:<{val_width}}  {source}')
+    return '\n'.join(lines)
+
+
+AutoExportPlan = ExportPlan
+
+
+def _read_json(path: pathlib.Path) -> dict[str, Any] | None:
+  try:
+    return json.loads(path.read_text())
+  except (OSError, ValueError):
+    # Missing or malformed file: detection falls back to the other sources.
+    return None
+
+
+def _fetch_hub_json(repo_id: str, filename: str) -> dict[str, Any] | None:
+  """Downloads a JSON file from a Hub repo, or returns None if unavailable."""
+  try:
+    path = huggingface_hub.hf_hub_download(repo_id, filename)
+  except (
+      huggingface_hub.utils.EntryNotFoundError,
+      huggingface_hub.utils.HfHubHTTPError,
+      OSError,
+      ValueError,
+  ):
+    # Missing file, gated / missing repo, offline or invalid repo id: the
+    # export itself reports any real error.
+    return None
+  return _read_json(pathlib.Path(path))
+
+
+def load_checkpoint_config(
+    model: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+  """Returns the raw `config.json` and `model_index.json` of a checkpoint.
+
+  Args:
+    model: Hugging Face repo id or local checkpoint directory.
+
+  Returns:
+    `(config, model_index)`: `config` is `{}` if the checkpoint has no
+    `config.json`; `model_index` is `None` unless it is a Diffusers pipeline.
+  """
+  local = pathlib.Path(model)
+  if local.is_dir():
+    return (
+        _read_json(local / 'config.json') or {},
+        _read_json(local / 'model_index.json'),
+    )
+  config = _fetch_hub_json(model, 'config.json') or {}
+  if config.get('model_type'):
+    # A regular Transformers checkpoint, not a Diffusers pipeline.
+    return config, None
+  return config, _fetch_hub_json(model, 'model_index.json')
+
+
+def _normalize_task(task: ExportTask | str | None) -> str | None:
+  """Returns the `ExportTask` value for `task`, or None for automatic."""
+  if task is None or task == TASK_AUTO:
+    return None
+  try:
+    return ExportTask(task).value
+  except ValueError:
+    raise ValueError(
+        f"Unknown task '{task}'. Use '{TASK_AUTO}' or one of:"
+        f" {', '.join(t.value for t in ExportTask)}."
+    ) from None
+
+
+def _find_extensions(
+    model: str,
+    config: Mapping[str, Any],
+    model_index: Mapping[str, Any] | None,
+    task: str | None,
+    model_extension: Any = None,
+) -> tuple[str | None, list[model_ext_extension.ModelExtension]]:
+  """Returns the detected model type and its extensions (most specific first)."""
+  model_type, extensions = _find_registered_extensions(
+      model, config, model_index, task
+  )
+  if model_extension is None:
+    return model_type, extensions
+  explicit = model_ext_extension.compose_extensions(*(
+      model_extension
+      if isinstance(model_extension, (list, tuple))
+      else (model_extension,)
+  ))
+  if model_type is None and explicit.model_types:
+    model_type = explicit.model_types[0]
+  return model_type, [explicit, *extensions]
+
+
+def _find_registered_extensions(
+    model: str,
+    config: Mapping[str, Any],
+    model_index: Mapping[str, Any] | None,
+    task: str | None,
+) -> tuple[str | None, list[model_ext_extension.ModelExtension]]:
+  """Returns the model type and its registered extensions."""
+  candidates = [
+      config.get('model_type'),
+      model_ext_extension.text_config_dict(config).get('model_type'),
+  ]
+  model_type = None
+  extensions = []
+  for candidate in candidates:
+    if not candidate:
+      continue
+    extension = model_ext_extension.get_model_extension(candidate)
+    if extension is not None and extension not in extensions:
+      model_type = model_type or candidate
+      extensions.append(extension)
+  if extensions:
+    return model_type, extensions
+  if config.get('model_type'):
+    # A regular checkpoint without a registered extension (e.g. a generic
+    # causal LM): export_hf's generic path handles it.
+    return config['model_type'], []
+
+  # Diffusers pipelines and standalone TTS checkpoints have no `model_type`.
+  for inference_task in (task,) if task else _INFERENCE_TASKS:
+    config_dict = dict(
+        model_index
+        if inference_task == ExportTask.TEXT_TO_IMAGE.value and model_index
+        else config
+    )
+    inferred = model_ext_extension.infer_model_type_from_extensions(
+        model, task=inference_task, config_dict=config_dict
+    )
+    if inferred:
+      extension = model_ext_extension.get_model_extension(inferred)
+      return inferred, [extension] if extension is not None else []
+  return None, []
+
+
+def _check_generic_text_generation(
+    model: str,
+    config: Mapping[str, Any],
+    extensions: Sequence[model_ext_extension.ModelExtension],
+    requested_task: str | None,
+) -> None:
+  """Rejects checkpoints the generic text-generation path cannot export."""
+  architectures = list(config.get('architectures') or [])
+  if extensions or requested_task or not architectures:
+    return
+  if any(
+      arch.endswith(_CAUSAL_LM_ARCHITECTURE_SUFFIXES) for arch in architectures
+  ):
+    return
+  raise ValueError(
+      f"'{model}' has architectures {architectures} (model_type"
+      f" {config.get('model_type')!r}), which no litert-torch ModelExtension"
+      ' handles and which are not an AutoModelForCausalLM. Pass a task, or'
+      ' load an extension for this architecture with `extension_modules`.'
+  )
+
+
+def _resolve_plan(
+    model: str,
+    *,
+    task: ExportTask | str | None = TASK_AUTO,
+    target: str | None = None,
+    extension_modules: Sequence[str] | str | None = None,
+    overrides: Mapping[str, Any] | None = None,
+) -> ExportPlan:
+  """Resolves the task, target defaults, and extension defaults for `model`."""
+  overrides = {
+      k: v
+      for k, v in (overrides or {}).items()
+      if v is not None or k in _NULLABLE_QUANTIZATION_KEYS
+  }
+  if target is None:
+    aot_backend = overrides.get('aot_backend')
+    if aot_backend:
+      norm_vendor = vendor_configs.normalize_vendor(str(aot_backend))
+      if norm_vendor in vendor_configs.VENDOR_CONFIGS:
+        target = f'{TARGET_NPU}:{norm_vendor}'
+      else:
+        target = TARGET_NPU
+    elif overrides.get('split_cache'):
+      target = TARGET_NPU
+    else:
+      target = TARGET_CPU_GPU
+
+  target_spec = parse_target(target)
+  if target_spec.soc is not None:
+    # TODO(weiyiw): Support SoC-targeted AOT compilation (npu:<vendor>:<soc>).
+    # Note that qualcomm/mediatek/samsung require calibration while
+    # google_tensor and intel do not.
+    raise NotImplementedError(
+        f"SoC-targeted NPU export ('{target_spec.canonical}') with calibration"
+        ' and AOT compilation is not yet implemented in export_hf.export. Use'
+        f" target='npu:{target_spec.vendor}' to export the uncompiled"
+        ' split-cache model first.'
+    )
+
+  requested_task = _normalize_task(task)
+  if extension_modules:
+    model_ext_extension.load_extension_modules(extension_modules)
+    overrides['extension_modules'] = extension_modules
+  model_ext_extension.discover_entry_point_extensions()
+
+  config, model_index = load_checkpoint_config(model)
+  model_type, extensions = _find_extensions(
+      model,
+      config,
+      model_index,
+      requested_task,
+      model_extension=overrides.get('model_extension'),
+  )
+  _check_generic_text_generation(model, config, extensions, requested_task)
+  defaults = model_ext_extension.ExportDefaults()
+  config_dict = config or dict(model_index or {})
+  for extension in extensions:
+    extension_defaults = extension.get_export_defaults(
+        config_dict, requested_task, target_spec.canonical
+    )
+    if extension_defaults is not None:
+      defaults = extension_defaults
+      break
+
+  if requested_task:
+    resolved_task, task_source = requested_task, SOURCE_USER
+  elif defaults.task:
+    resolved_task, task_source = ExportTask(defaults.task).value, SOURCE_MODEL
+  else:
+    resolved_task = ExportTask.TEXT_GENERATION.value
+    task_source = SOURCE_DEFAULT
+
+  export_kwargs: dict[str, Any] = {}
+  sources: dict[str, str] = {}
+  if resolved_task in _LLM_TASKS:
+    for key, value in _target_llm_kwargs(target_spec).items():
+      export_kwargs[key] = value
+      sources[key] = SOURCE_TARGET
+  for key, value in defaults.export_kwargs.items():
+    export_kwargs[key] = _normalize_kwarg_value(value)
+    sources[key] = SOURCE_MODEL
+  for key, value in overrides.items():
+    export_kwargs[key] = value
+    sources[key] = SOURCE_USER
+
+  return ExportPlan(
+      model=model,
+      task=resolved_task,
+      task_source=task_source,
+      model_type=model_type,
+      export_kwargs=export_kwargs,
+      sources=sources,
+      target=target_spec.canonical,
+  )
 
 
 def _build_export_tasks(
@@ -215,19 +699,28 @@ def run_export_tasks(
   return exported_model_artifacts
 
 
+_UNSET: Any = object()
+_NULLABLE_QUANTIZATION_KEYS = frozenset({
+    'quantization_recipe',
+    'vision_encoder_quantization_recipe',
+    'audio_encoder_quantization_recipe',
+})
+
+
 def export(
     model: str,
-    output_dir: str,
-    task: ExportTask | str = ExportTask.TEXT_GENERATION,
-    keep_temporary_files: bool = False,
-    # target_accelerator: str | None = None,
+    output_dir: str | None = None,
+    task: ExportTask | str | None = TASK_AUTO,
+    target: str | None = None,
+    keep_temporary_files: bool | None = None,
+    dry_run: bool = False,
     # TODO(weiyiw): Remove the following flags.
     # pylint: disable=unused-argument
-    trust_remote_code: bool = False,
+    trust_remote_code: bool | None = None,
     prefill_lengths: list[int] | None = None,
     cache_length: int | None = None,
     cache_lengths: list[int] | None = None,
-    quantization_recipe: str | None = None,
+    quantization_recipe: str | None = _UNSET,
     enable_dynamic_shape: bool | None = None,
     enable_gpu_dynamic_prefill: bool | None = None,
     enable_gpu_dynamic_cache: bool | None = None,
@@ -253,9 +746,9 @@ def export(
     externalize_weights: bool | None = None,
     experimental_use_mixed_precision: bool | None = None,
     export_vision_encoder: bool | None = None,
-    vision_encoder_quantization_recipe: str | None = None,
+    vision_encoder_quantization_recipe: str | None = _UNSET,
     export_audio_encoder: bool | None = None,
-    audio_encoder_quantization_recipe: str | None = None,
+    audio_encoder_quantization_recipe: str | None = _UNSET,
     input_sec: float | None = None,
     t2i_output_image_size: int | None = None,
     stateful_after: int | None = None,
@@ -267,39 +760,56 @@ def export(
     aot_backend: str | None = None,
     aot_soc_model: str | None = None,
     aot_compilation_config_dict: dict[str, Any] | None = None,
-    experimental_lightweight_conversion: bool = False,
-    experimental_transpile_chat_template_for_minijinja: bool = False,
+    experimental_lightweight_conversion: bool | None = None,
+    experimental_transpile_chat_template_for_minijinja: bool | None = None,
     sliding_window_ring_buffer_size: int | None = None,
-    use_litert_lm_compiler: bool = False,
+    use_litert_lm_compiler: bool | None = None,
     compile_configs: str | None = None,
     calibration_dataset_dir: str | None = None,
-    calibration_dataset_format: str = 'jsonl',
-    calibration_eval_task_names: str | list[str] = 'ALL',
-    max_calibration_decode_steps: int = 32,
-    calibration_range_scale: float = 1.0,
-    use_float_input_output_normalizer: bool = False,
-    use_profiler_based_calibration: bool = True,
-    enable_min_max_calibration_update: bool = True,
-    ema_smoothing_factor: float = 0.1,
+    calibration_dataset_format: str | None = None,
+    calibration_eval_task_names: str | list[str] | None = None,
+    max_calibration_decode_steps: int | None = None,
+    calibration_range_scale: float | None = None,
+    use_float_input_output_normalizer: bool | None = None,
+    use_profiler_based_calibration: bool | None = None,
+    enable_min_max_calibration_update: bool | None = None,
+    ema_smoothing_factor: float | None = None,
     static_quantization_recipe: str | None = None,
     model_dtype: str | None = None,
-    use_v2: bool = False,
-    delete_in_memory_params: bool = False,
+    use_v2: bool | None = None,
+    delete_in_memory_params: bool | None = None,
     model_extension: Any = None,
-    extension_modules: list[str] | str | None = None,
+    extension_modules: Sequence[str] | str | None = None,
     # pylint: enable=unused-argument
     **kwargs,
-):
-  """Exports HuggingFace Transformers model to tflite.
+) -> ExportPlan:
+  """Exports a HuggingFace Transformers or Diffusers checkpoint to LiteRT.
+
+  Resolution order for every export argument (later wins):
+  1. `ExportableModuleConfig` field defaults.
+  2. Hardware `target` grand fallback defaults for LLM/VLM tasks (`cpu_gpu` vs
+     `npu` / `npu:<vendor>`).
+  3. `ModelExtension.get_export_defaults` of the checkpoint's extension.
+  4. Explicit caller arguments passed to `export(...)`.
 
   Args:
     model: The name of the HuggingFace Transformers model to export, or the path
       to the safetensors directory.
-    output_dir: The directory to export the model to.
-    task: The task to export the model for. Use 'text_generation' for text only
-      LLMs, 'image_text_to_text' for Vision LLMs, 'automatic_speech_recognition'
-      for ASR, 'text_to_speech' for TTS, and 'text_to_image' for ImageGen.
+    output_dir: The directory to export the model to. Required unless
+      `dry_run=True`.
+    task: The task to export the model for (`'auto'` / `None` to detect from the
+      checkpoint's `ModelExtension` or `config.json`, `'text_generation'`,
+      `'image_text_to_text'`, `'multimodal_lm'`,
+      `'automatic_speech_recognition'`, `'text_to_speech'`, `'text_to_image'`,
+      or `'any_to_any'`).
+    target: Hardware target preset: `'cpu_gpu'` (default; also `'cpu'` or
+      `'gpu'`), `'npu'`, `'npu:<vendor>'` (e.g. `'npu:qualcomm'`,
+      `'npu:mediatek'`, `'npu:intel'`, `'npu:google_tensor'`, `'npu:samsung'`),
+      or `'npu:<vendor>:<soc>'`.
     keep_temporary_files: Whether to keep the temporary files.
+    dry_run: When `True`, resolves and returns the `ExportPlan` (reading only
+      `config.json` / `model_index.json`) without creating `output_dir` or
+      loading/exporting the model.
     trust_remote_code: Whether to trust remote code.
     prefill_lengths: The lengths of the prefill input, separated by comma. If
       multiple prefill_lengths and multiple cache_lengths are provided, the
@@ -322,7 +832,9 @@ def export(
       `True` when RoPE is not externalized (`split_cache=False`) so GPU fp16
       inference computes rotary angles in fp32 past token position 2048, and
       `False` when `split_cache=True`.
+    use_swiglu_composite: Whether to enable the SwiGLU composite.
     use_qkv_norm_rope_composite: Whether to enable the QKV norm rope composite.
+    use_short_conv_composite: Whether to enable the short conv composite.
     use_sdpa_composite: Whether to enable the fused transposed SDPA composite in
       both prefill and decode signatures.
     use_sdpa_composite_for_vision: Whether the vision encoder (currently Gemma 4
@@ -358,20 +870,14 @@ def export(
     vision_encoder_quantization_recipe: The quantization recipe to use for the
       vision encoder.
     export_audio_encoder: Whether to export the audio encoder.
+    audio_encoder_quantization_recipe: The quantization recipe to use for the
+      audio encoder.
     input_sec: Input audio length in seconds.
     t2i_output_image_size: Output image height/width for text_to_image task.
     stateful_after: If >= 0, the model runs in stateful mode after this many
       tokens.
     litert_lm_model_type_override: Overriding the LiteRT LM model type.
     litert_lm_llm_metadata_override: Overriding the LiteRT LM LLM metadata.
-    aot_backend: The backend to use for AOT compilation.
-    aot_soc_model: The SoC model to use for AOT compilation.
-    aot_compilation_config_dict: The configuration dictionary for AOT
-      compilation.
-    experimental_lightweight_conversion: Whether to use lightweight conversion,
-      which might speed up large model conversion, but might not work for all
-      models.
-    sliding_window_ring_buffer_size: The size of the sliding window ring buffer.
     sampler_top_p: The top_p sampling parameter.
     sampler_temperature: The temperature sampling parameter.
     sampler_top_k: The top_k sampling parameter.
@@ -379,9 +885,12 @@ def export(
     aot_soc_model: The NPU SoC model to AOT compile for.
     aot_compilation_config_dict: Additional configuration options for AOT
       compilation.
-    experimental_lightweight_conversion: Whether to use lightweight conversion.
+    experimental_lightweight_conversion: Whether to use lightweight conversion,
+      which might speed up large model conversion, but might not work for all
+      models.
     experimental_transpile_chat_template_for_minijinja: Whether to transpile the
       chat template for MiniJinja.
+    sliding_window_ring_buffer_size: The size of the sliding window ring buffer.
     use_litert_lm_compiler: Whether to compile using the LiteRT LM NPU compiler.
     compile_configs: Path to compiler configuration files.
     calibration_dataset_dir: Directory containing the calibration dataset. If
@@ -422,15 +931,46 @@ def export(
     **kwargs: Additional keyword arguments to pass to the exportable module
       config.
 
+  Returns:
+    The resolved `ExportPlan`.
+
   Raises:
+    ValueError: If `output_dir` is omitted when `dry_run=False`, or if `task` /
+      `target` is invalid.
+    NotImplementedError: If `target` specifies a chip/SoC (`npu:<vendor>:<soc>`)
+      not yet supported via `target`.
     RuntimeError: If bundle_litert_lm is False when calibration is triggered.
   """
   provided_args = {
       k: v
       for k, v in locals().items()
-      if v is not None and k not in ['model', 'output_dir', 'task', 'kwargs']
+      if v is not _UNSET
+      and (v is not None or k in _NULLABLE_QUANTIZATION_KEYS)
+      and k
+      not in (
+          'model',
+          'output_dir',
+          'task',
+          'target',
+          'dry_run',
+          'kwargs',
+      )
   }
-  provided_args.update(kwargs)
+  for k, v in kwargs.items():
+    if v is not _UNSET and (v is not None or k in _NULLABLE_QUANTIZATION_KEYS):
+      provided_args[k] = v
+
+  if dry_run:
+    return _resolve_plan(
+        model,
+        task=task,
+        target=target,
+        extension_modules=extension_modules,
+        overrides=provided_args,
+    )
+
+  if not output_dir:
+    raise ValueError('output_dir is required when dry_run=False.')
 
   os.makedirs(output_dir, exist_ok=True)
   if not keep_temporary_files:
@@ -438,9 +978,14 @@ def export(
   else:
     work_dir = output_dir
 
-  if extension_modules:
-    model_ext_extension.load_extension_modules(extension_modules)
-  model_ext_extension.discover_entry_point_extensions()
+  plan = _resolve_plan(
+      model,
+      task=task,
+      target=target,
+      extension_modules=extension_modules,
+      overrides=provided_args,
+  )
+  resolved_task = ExportTask(plan.task)
 
   valid_fields = {
       f.name
@@ -448,7 +993,7 @@ def export(
   }
   config_args = {}
   extra_args = {}
-  for key, value in provided_args.items():
+  for key, value in plan.export_kwargs.items():
     if key == 'extra_kwargs':
       if isinstance(value, dict):
         extra_args.update(value)
@@ -461,7 +1006,7 @@ def export(
       model=model,
       output_dir=output_dir,
       work_dir=work_dir,
-      task=task,
+      task=resolved_task,
       extra_kwargs=extra_args,
       **config_args,
   )
@@ -472,7 +1017,7 @@ def export(
 
   # TODO(weiyiw): Move this to the exportable module config.
   export_tasks, legacy_compile_triggered = _build_export_tasks(export_config)
-  _warn_if_legacy_compile(task, legacy_compile_triggered)
+  _warn_if_legacy_compile(resolved_task, legacy_compile_triggered)
 
   run_compilation_pipeline = _should_run_compilation_pipeline(export_config)
 
@@ -501,14 +1046,15 @@ def export(
         output_dir=output_dir,
     )
     export_config.keep_temporary_files = orig_keep_temp
-    keep_temporary_files = orig_keep_temp
 
+  keep_temp = export_config.keep_temporary_files
   if not export_config.bundle_litert_lm:
-    keep_temporary_files = True
-  if not keep_temporary_files:
+    keep_temp = True
+  if not keep_temp:
     print('Cleaning up temporary files.')
     shutil.rmtree(work_dir)
   print(
       'Export complete. Model saved to:'
       f' {exported_model_artifacts.litert_lm_model_path or output_dir}'
   )
+  return plan

@@ -53,8 +53,8 @@ via `--extension_modules=/path/to/my_ext.py` or built-in under
 
 1. **Declare `get_export_defaults(self, config_dict, task=None,
    target='cpu_gpu')`**:
-   - Declares the default task (`ExportTask`) and architecture-specific export
-     keyword arguments for `target` without loading model weights.
+   - Enables one-call export via `export.export()` (and
+     `litert convert <hf_id> --target=<target>`).
    - Branch on `is_npu = str(target or '').startswith('npu')` when setting
      `quantization_recipe` (e.g. `'dynamic_wi8_afp32'` on NPU vs
      `'dynamic_wi4b32_afp32'` on `cpu_gpu`) so extension defaults do not clobber
@@ -79,7 +79,7 @@ via `--extension_modules=/path/to/my_ext.py` or built-in under
 
 Before running a multi-minute full checkpoint export, verify your extension on a
 tiny model (2–3 layers, `vocab_size=256`, `dtype=torch.float32`) using
-`model_ext/testing.py`:
+`model_ext/testing.py` and `export.export(..., dry_run=True)`:
 
 1. **`testing.assert_patch_numerical_parity(ext, tiny_model, ...)`**: Verifies
    eager numerical parity before vs. during `patch_model` and asserts that all
@@ -92,9 +92,22 @@ tiny model (2–3 layers, `vocab_size=256`, `dtype=torch.float32`) using
    composite flags on, and verifies Converter V2's `HFCheckpointWeightsLoader`
    resolves every patched parameter (shape and value). Run this whenever your
    patches fuse, rename, or add parameters (see gotcha F).
+4. **`export.export(model, target='cpu_gpu', dry_run=True)`** (and
+   `target='npu:qualcomm'`): Verifies task detection and target-specific export
+   kwargs without loading model weights.
 
 ### Step 4: Full Export & `litert_lm` Verification
 
+* **Via `litert convert` (`export_hf.export`)**:
+  ```bash
+  litert convert /path/to/checkpoint \
+    --target=cpu_gpu \
+    --extension-modules=/path/to/my_extension.py \
+    --trust-remote-code \
+    -o "$HOME/export_hf_test_models/outputs/my_model"
+  ```
+  (Pass `--dry-run` first to inspect the resolved `ExportPlan`, or
+  `--target=npu:qualcomm` / `--target=npu:mediatek` for NPU split-cache export.)
 * **From source (`bazel run`)**:
   ```bash
   bazel run \

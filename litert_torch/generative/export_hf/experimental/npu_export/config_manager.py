@@ -166,7 +166,7 @@ def build_pipeline_config(
   Returns:
     Resolved NpuPipelineConfig.
   """
-  clean_vendor = target_vendor.strip().lower()
+  clean_vendor = vendor_configs.normalize_vendor(target_vendor)
   if clean_vendor not in vendor_configs.VENDOR_CONFIGS:
     raise ValueError(
         f"Unknown target vendor '{target_vendor}'. Supported vendors:"

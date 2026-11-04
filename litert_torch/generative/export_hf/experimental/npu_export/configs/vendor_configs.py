@@ -33,7 +33,40 @@ VENDOR_CONFIGS: dict[str, dict[str, Any]] = {
         "a16w8": True,
         "allow_float_operations": True,
     },
+    "intel": {
+        "backend": "intel",
+        "k_ts_idx": 2,
+        "v_ts_idx": 3,
+    },
+    "google_tensor": {
+        "backend": "google_tensor",
+        "k_ts_idx": 2,
+        "v_ts_idx": 3,
+    },
+    "samsung": {
+        "backend": "samsung",
+        "k_ts_idx": 2,
+        "v_ts_idx": 3,
+    },
 }
+
+VENDOR_ALIASES: dict[str, str] = {
+    "qc": "qualcomm",
+    "qnn": "qualcomm",
+    "qcom": "qualcomm",
+    "mtk": "mediatek",
+    "neuro_pilot": "mediatek",
+    "openvino": "intel",
+    "tensor": "google_tensor",
+    "slsi": "samsung",
+}
+
+
+def normalize_vendor(vendor: str) -> str:
+  """Returns canonical vendor key in `VENDOR_CONFIGS`, or cleaned string."""
+  cleaned = vendor.strip().lower()
+  return VENDOR_ALIASES.get(cleaned, cleaned)
+
 
 # Sparse per-SoC override map for SoCs requiring non-default vendor settings.
 SOC_CONFIGS: dict[str, dict[str, Any]] = {}

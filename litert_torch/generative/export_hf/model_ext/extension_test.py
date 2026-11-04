@@ -1340,6 +1340,73 @@ class BuiltinGemma3nExtensionContractTest(
 ):
   extension_cls = builtin_extensions.Gemma3nExtension
 
+  def test_tiny_prefill_decode_and_per_layer_embedder_with_cpu_gpu_defaults(
+      self,
+  ):
+    ext = self.get_extension()
+    gemma3n_cfg = transformers.Gemma3nTextConfig(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=3,
+        num_kv_shared_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        hidden_size_per_layer_input=4,
+        vocab_size_per_layer_input=64,
+        altup_num_inputs=2,
+        sliding_window=8,
+        layer_types=[
+            'sliding_attention',
+            'full_attention',
+            'full_attention',
+        ],
+        max_position_embeddings=64,
+    )
+    with ext.patch_context():
+      tiny_model = transformers.Gemma3nForCausalLM(gemma3n_cfg).eval()
+
+    export_cfg = ExportableModuleConfig(
+        model='dummy',
+        prefill_lengths=[8, 16],
+        cache_length=32,
+        externalize_embedder=True,
+        single_token_embedder=True,
+        apply_gpu_composites=True,
+        model_extension=ext,
+    )
+    exported = self.assert_tiny_prefill_decode_torch_export(
+        model=tiny_model,
+        model_config=gemma3n_cfg,
+        export_config=export_cfg,
+    )
+    self.assertIn('prefill_8', exported)
+    self.assertIn('prefill_16', exported)
+    self.assertIn('decode', exported)
+
+    per_layer_cls = ext.get_additional_exportables(
+        gemma3n_cfg, export_cfg
+    )['per_layer_embedder']
+    per_layer_mod = per_layer_cls(tiny_model).eval()
+    single_inputs = per_layer_mod.get_sample_inputs(gemma3n_cfg, export_cfg)
+    self.assertEqual(list(single_inputs.keys()), ['per_layer_embedder'])
+
+    multi_prefill_cfg = dataclasses.replace(
+        export_cfg, single_token_embedder=False
+    )
+    multi_inputs = per_layer_mod.get_sample_inputs(
+        gemma3n_cfg, multi_prefill_cfg
+    )
+    self.assertEqual(
+        sorted(multi_inputs.keys()),
+        [
+            'decode_per_layer_embedder',
+            'prefill_per_layer_embedder_16',
+            'prefill_per_layer_embedder_8',
+        ],
+    )
+
 
 if __name__ == '__main__':
   googletest.main()
