@@ -63,6 +63,11 @@ class ParakeetCTC(asr_model.AsrModel):
     self._encoder = ParakeetCTCEncoder(self._model).eval()
     self._processor = asr_model.TransformersProcessor(model_id)
 
+  def get_speech2text_metadata(self, export_config):
+    return self.build_speech2text_metadata(
+        'parakeet', export_config, mel_frames_per_second=100
+    )
+
   def get_encoder(self) -> torch.nn.Module:
     return self._encoder
 

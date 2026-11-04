@@ -22,6 +22,7 @@ from litert_torch import progress
 from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.experimental.minijinja_transpile import transpile as transpile_lib
+from litert_torch.generative.export_hf.model_ext import exportables as model_ext_exportables
 from litert_torch.generative.export_hf.model_ext import extension as extension_lib
 from litert_torch.generative.export_hf.model_ext import metadata_builder as metadata_builder_lib
 
@@ -29,6 +30,10 @@ import litert_lm_builder as litertlm_builder
 from litert_lm_builder.runtime.proto import llm_metadata_pb2
 from litert_lm_builder.runtime.proto import llm_model_type_pb2
 from litert_lm_builder.runtime.proto import sampler_params_pb2
+try:
+  from litert_lm_builder.runtime.proto import speech2text_metadata_pb2
+except ImportError:
+  speech2text_metadata_pb2 = None
 
 _PH = 'KIMAIRA'
 
@@ -586,12 +591,84 @@ def package_image_gen_model(
       else:
         raise ValueError(f'Unsupported ImageGen model component: {name}')
 
+  return _build_litert_lm_file(
+      builder, export_config, exported_model_artifacts, output_dir, work_dir
+  )
+
+
+def _build_litert_lm_file(
+    builder: litertlm_builder.LitertLmFileBuilder,
+    export_config: exportable_module.ExportableModuleConfig,
+    exported_model_artifacts: export_lib.ExportedModelArtifacts,
+    output_dir: str | None,
+    work_dir: str | None,
+) -> export_lib.ExportedModelArtifacts:
+  """Writes `model.litertlm` into `output_dir` and returns updated artifacts."""
   model_path = os.path.join(output_dir, 'model.litertlm')  # pyrefly: ignore[no-matching-overload]
   with open(model_path, 'wb') as f:
       builder.build(f)
   return dataclasses.replace(
       exported_model_artifacts,
       litert_lm_model_path=model_path,
+  )
+
+
+def package_speech2text_model(
+    source_model_artifacts: export_lib.SourceModelArtifacts,
+    export_config: exportable_module.ExportableModuleConfig,
+    exported_model_artifacts: export_lib.ExportedModelArtifacts,
+) -> export_lib.ExportedModelArtifacts:
+  """Packs a standalone ASR model, its metadata and tokenizer into .litertlm."""
+  if speech2text_metadata_pb2 is None or not hasattr(
+      litertlm_builder.LitertLmFileBuilder, 'add_speech2text_metadata'
+  ):
+    raise ImportError(
+        'litert_lm_builder does not support Speech2TextMetadata packaging yet; '
+        'please upgrade litert-lm-builder or pass bundle_litert_lm=False.'
+    )
+  work_dir = export_config.work_dir or export_config.output_dir
+  output_dir = export_config.output_dir or export_config.work_dir
+  tokenizer_model_path = (
+      export_config.tokenizer_path_override
+      or exported_model_artifacts.tokenizer_model_path
+  )
+
+  asr_model = source_model_artifacts.model
+  speech2text_metadata = asr_model.get_speech2text_metadata(export_config)
+  speech2text_metadata_path = os.path.join(work_dir, 'speech2text_metadata.pb')  # pyrefly: ignore[no-matching-overload]
+  with open(speech2text_metadata_path, 'wb') as f:
+    f.write(speech2text_metadata.SerializeToString())
+
+  builder = litertlm_builder.LitertLmFileBuilder()
+  builder.add_system_metadata(
+      litertlm_builder.Metadata(
+          key='Authors',
+          value='ODML',
+          dtype=litertlm_builder.DType.STRING,
+      )
+  )
+  builder.add_speech2text_metadata(speech2text_metadata_path)
+  if tokenizer_model_path:
+    if tokenizer_model_path.endswith('.json'):
+      builder.add_hf_tokenizer(tokenizer_model_path)
+    else:
+      builder.add_sentencepiece_tokenizer(tokenizer_model_path)
+
+  speech_exportables = model_ext_exportables.get_speech_exportables(
+      source_model_artifacts.model_config, export_config
+  )
+  tflite_model_type = (
+      speech2text_metadata_pb2.Speech2TextMetadata.TF_LITE_ENCODER_DECODER
+      if len(speech_exportables) > 1
+      else speech2text_metadata_pb2.Speech2TextMetadata.TF_LITE_AUDIO_ENCODER
+  )
+  builder.add_tflite_model(
+      exported_model_artifacts.prefill_decode_model_path,  # pyrefly: ignore[bad-argument-type]
+      tflite_model_type,
+  )
+
+  return _build_litert_lm_file(
+      builder, export_config, exported_model_artifacts, output_dir, work_dir
   )
 
 
@@ -671,12 +748,8 @@ def package_any2any_model(
       else:
         raise ValueError(f'Unsupported Any2Any model component: {name}')
 
-  model_path = os.path.join(output_dir, 'model.litertlm')  # pyrefly: ignore[no-matching-overload]
-  with open(model_path, 'wb') as f:
-      builder.build(f)
-  return dataclasses.replace(
-      exported_model_artifacts,
-      litert_lm_model_path=model_path,
+  return _build_litert_lm_file(
+      builder, export_config, exported_model_artifacts, output_dir, work_dir
   )
 
 
@@ -695,6 +768,15 @@ def package_model(
     )
   if export_config.task == export_lib.ExportTask.ANY_TO_ANY:
     return package_any2any_model(
+        source_model_artifacts,
+        export_config,
+        exported_model_artifacts,
+    )
+  if (
+      export_config.task == export_lib.ExportTask.AUTOMATIC_SPEECH_RECOGNITION
+      and not export_config.export_audio_encoder
+  ):
+    return package_speech2text_model(
         source_model_artifacts,
         export_config,
         exported_model_artifacts,
@@ -860,10 +942,6 @@ def package_model(
           model_path,
           model_type,
       )
-  model_path = os.path.join(output_dir, 'model.litertlm')  # pyrefly: ignore[no-matching-overload]
-  with open(model_path, 'wb') as f:
-      builder.build(f)
-  return dataclasses.replace(
-      exported_model_artifacts,
-      litert_lm_model_path=model_path,
+  return _build_litert_lm_file(
+      builder, export_config, exported_model_artifacts, output_dir, work_dir
   )

@@ -73,6 +73,13 @@ class Whisper(asr_model.AsrModel):
     self._decoder = WhisperDecoder(self._model).eval()
     self._processor = asr_model.TransformersProcessor(model_id)
 
+  def get_speech2text_metadata(self, export_config):
+    del export_config
+    # WhisperFeatureExtractor and WhisperEncoder always use a fixed 30 s
+    # (3000-frame) encoder window regardless of `export_config.input_sec`,
+    # matching the runtime's 30 s Whisper defaults.
+    return self.build_speech2text_metadata('whisper')
+
   def get_encoder(self) -> torch.nn.Module:
     return self._encoder
 

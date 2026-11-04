@@ -175,7 +175,7 @@ class ExportableModuleConfig:
   # float16, and tells the runtime to compute activations in float16.
   experimental_use_fp16: bool = False
   export_vision_encoder: bool = True
-  export_audio_encoder: bool = True
+  export_audio_encoder: bool | None = None
   fuse_gate_up: bool | None = None
   fuse_qkv: bool | None = None
   use_rope_composite: bool | None = None
@@ -287,6 +287,9 @@ class ExportableModuleConfig:
   cache_length_dim: torch.export.Dim | None = None
   prefill_length_dim: torch.export.Dim | None = None
   externalize_rope: bool = False
+  _explicit_export_audio_encoder: bool | None = dataclasses.field(
+      default=None, repr=False
+  )
 
   def _normalize_sdpa_composite(self):
     """Normalizes `use_sdpa_composite` and resolves GPU optimization flags.
@@ -462,6 +465,8 @@ class ExportableModuleConfig:
           self.single_token_embedder = True
         self.export_audio_encoder = False
       case ExportTask.MULTIMODAL_LM:
+        if self.export_audio_encoder is None:
+          self.export_audio_encoder = True
         if self.export_vision_encoder:
           self.externalize_embedder = True
           self.single_token_embedder = True
@@ -470,11 +475,17 @@ class ExportableModuleConfig:
           self.single_token_embedder = True
       case ExportTask.AUTOMATIC_SPEECH_RECOGNITION:
         self.export_vision_encoder = False
+        if self.export_audio_encoder is None:
+          self.export_audio_encoder = False
+          if self._explicit_export_audio_encoder is None:
+            self._explicit_export_audio_encoder = False
+        elif self._explicit_export_audio_encoder is None:
+          self._explicit_export_audio_encoder = True
         self.split_cache = False
         self.externalize_rope = False
-        self.externalize_embedder = self.bundle_litert_lm
-        self.export_audio_encoder = self.bundle_litert_lm
-        self.single_token_embedder = self.bundle_litert_lm
+        if not self.export_audio_encoder:
+          self.externalize_embedder = False
+          self.single_token_embedder = False
       case ExportTask.TEXT_TO_SPEECH:
         self.export_vision_encoder = False
         self.export_audio_encoder = False
@@ -491,6 +502,8 @@ class ExportableModuleConfig:
         self.single_token_embedder = False
         self.externalize_rope = False
       case ExportTask.ANY_TO_ANY:
+        if self.export_audio_encoder is None:
+          self.export_audio_encoder = True
         self.split_cache = False
         self.externalize_embedder = True
         self.single_token_embedder = True

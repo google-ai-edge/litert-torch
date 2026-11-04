@@ -14,6 +14,7 @@
 # ==============================================================================
 """Tests for HF model export orchestration and PTQ pipeline."""
 
+import dataclasses
 from unittest import mock
 
 from absl.testing import absltest
@@ -254,6 +255,104 @@ class ExportNpuCompilationPipelineTest(absltest.TestCase):
       )
       mock_get_cls.assert_called_once_with("Flux2KleinPipeline")
       mock_model_cls.assert_called_once_with(tmp_dir, export_config=config)
+
+  def _asr_tasks_after_model_load(self, model_type, **kwargs):
+    config = export.exportable_module_config.ExportableModuleConfig(
+        model="fake/asr",
+        output_dir="/tmp/fake_asr_output",
+        task=export.ExportTask.AUTOMATIC_SPEECH_RECOGNITION,
+        **kwargs,
+    )
+    source = export_lib.SourceModelArtifacts(
+        model=mock.MagicMock(),
+        model_config=mock.MagicMock(model_type=model_type),
+        text_model_config=None,
+        tokenizer=None,
+    )
+    updated = export_lib.update_export_config(config, source)
+    return updated, export._build_export_tasks(updated)[0]
+
+  def test_bundled_standalone_asr_packages_speech2text_model(self):
+    config, tasks = self._asr_tasks_after_model_load("whisper")
+
+    self.assertFalse(config.externalize_embedder)
+    self.assertFalse(config.export_audio_encoder)
+    self.assertFalse(config.single_token_embedder)
+    self.assertEqual(
+        tasks,
+        [
+            export_lib.export_asr_models,
+            export_lib.export_tokenizer,
+            litert_lm_builder.package_model,
+        ],
+    )
+
+  def test_bundled_llm_asr_uses_llm_export_path(self):
+    config, tasks = self._asr_tasks_after_model_load("qwen3_asr")
+
+    self.assertTrue(config.export_audio_encoder)
+    self.assertTrue(config.externalize_embedder)
+    self.assertTrue(config.single_token_embedder)
+    replaced = dataclasses.replace(config, cache_length=512)
+    self.assertTrue(replaced.export_audio_encoder)
+    self.assertTrue(replaced.externalize_embedder)
+    self.assertTrue(replaced.single_token_embedder)
+    self.assertEqual(
+        tasks,
+        [
+            export_lib.export_text_prefill_decode_model,
+            export_lib.export_embedder_model,
+            export_lib.export_audio_encoder_models,
+            export_lib.export_tokenizer,
+            litert_lm_builder.package_model,
+        ],
+    )
+
+  def test_unbundled_llm_asr_exports_submodels_without_packaging(self):
+    config, tasks = self._asr_tasks_after_model_load(
+        "qwen3_asr", bundle_litert_lm=False
+    )
+
+    self.assertTrue(config.export_audio_encoder)
+    self.assertTrue(config.externalize_embedder)
+    self.assertTrue(config.single_token_embedder)
+    self.assertEqual(
+        tasks,
+        [
+            export_lib.export_text_prefill_decode_model,
+            export_lib.export_embedder_model,
+            export_lib.export_audio_encoder_models,
+        ],
+    )
+
+  def test_explicit_export_audio_encoder_false_preserves_standalone_asr_path(
+      self,
+  ):
+    config, tasks = self._asr_tasks_after_model_load(
+        "qwen3_asr", bundle_litert_lm=True, export_audio_encoder=False
+    )
+
+    self.assertFalse(config.export_audio_encoder)
+    self.assertFalse(config.externalize_embedder)
+    self.assertFalse(config.single_token_embedder)
+    self.assertFalse(config.bundle_litert_lm)
+    self.assertEqual(tasks, [export_lib.export_asr_models])
+
+    # Also verify dataclasses.replace on a default ASR config before
+    # update_export_config does not flip _explicit_export_audio_encoder=True.
+    default_cfg = export.exportable_module_config.ExportableModuleConfig(
+        model="qwen3_asr",
+        task=export.ExportTask.AUTOMATIC_SPEECH_RECOGNITION,
+    )
+    replaced_default = dataclasses.replace(default_cfg, cache_length=512)
+    self.assertFalse(replaced_default._explicit_export_audio_encoder)
+
+  def test_unbundled_asr_exports_only_the_tflite_model(self):
+    _, tasks = self._asr_tasks_after_model_load(
+        "whisper", bundle_litert_lm=False
+    )
+
+    self.assertEqual(tasks, [export_lib.export_asr_models])
 
   @mock.patch("litert_torch.generative.export_hf.export.run_export_tasks")
   def test_text_to_speech_kokoro_export_orchestration(self, mock_run_export):

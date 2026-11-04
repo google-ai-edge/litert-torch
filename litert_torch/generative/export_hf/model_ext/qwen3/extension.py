@@ -48,6 +48,21 @@ class Qwen3AsrExtension(extension_lib.ModelExtension):
 
   model_types = ('qwen3_asr',)
 
+  def update_export_config(self, export_config, model_config):
+    """See base class."""
+    del model_config
+    if getattr(export_config, '_explicit_export_audio_encoder', False):
+      if export_config.export_audio_encoder:
+        export_config.externalize_embedder = True
+        export_config.single_token_embedder = True
+      else:
+        export_config.bundle_litert_lm = False
+      return export_config
+    export_config.externalize_embedder = True
+    export_config.export_audio_encoder = True
+    export_config.single_token_embedder = True
+    return export_config
+
   def get_speech_model_cls(self, model_type):
     """See base class."""
     del model_type

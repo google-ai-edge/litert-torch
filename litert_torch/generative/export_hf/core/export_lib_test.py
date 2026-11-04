@@ -110,6 +110,40 @@ class ExportLibTest(parameterized.TestCase):
 
     self.assertEqual(result_config["pre_tokenizer"]["type"], "Metaspace")
 
+  def test_maybe_patch_tokenizer_handles_null_pre_tokenizer(self):
+    tokenizer_path = os.path.join(self.test_dir, "tokenizer.json")
+    config = {
+        "model": {"type": "BPE", "vocab": {"hello": 1}},
+        "pre_tokenizer": None,
+        "decoder": None,
+    }
+    with open(tokenizer_path, "w") as f:
+      json.dump(config, f)
+
+    export_lib._maybe_patch_tokenizer(tokenizer_path)
+
+    with open(tokenizer_path, "r") as f:
+      result_config = json.load(f)
+    self.assertIsNone(result_config["pre_tokenizer"])
+
+  def test_maybe_patch_tokenizer_handles_unigram_list_vocab(self):
+    tokenizer_path = os.path.join(self.test_dir, "tokenizer.json")
+    config = {
+        "model": {
+            "type": "Unigram",
+            "vocab": [["<unk>", 0.0], ["▁hello", -1.0]],
+        },
+        "pre_tokenizer": {"type": "Metaspace"},
+    }
+    with open(tokenizer_path, "w") as f:
+      json.dump(config, f)
+
+    export_lib._maybe_patch_tokenizer(tokenizer_path)
+
+    with open(tokenizer_path, "r") as f:
+      result_config = json.load(f)
+    self.assertEqual(result_config["model"]["type"], "Unigram")
+
   def test_maybe_patch_tokenizer_skips_no_bpe_chars(self):
     tokenizer_path = os.path.join(self.test_dir, "tokenizer.json")
 
@@ -140,12 +174,12 @@ class ExportLibTest(parameterized.TestCase):
         config.task,
         export_lib.exportable_module_config.ExportTask.AUTOMATIC_SPEECH_RECOGNITION,
     )
-    self.assertTrue(config.export_audio_encoder)
+    self.assertFalse(config.export_audio_encoder)
     self.assertTrue(config.bundle_litert_lm)
     self.assertFalse(config.export_vision_encoder)
     self.assertFalse(config.split_cache)
-    self.assertTrue(config.externalize_embedder)
-    self.assertTrue(config.single_token_embedder)
+    self.assertFalse(config.externalize_embedder)
+    self.assertFalse(config.single_token_embedder)
     self.assertFalse(config.externalize_rope)
     self.assertEqual(config.input_sec, 1.0)
     self.assertEqual(config.stateful_after, -1)

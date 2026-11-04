@@ -54,20 +54,30 @@ def _build_export_tasks(
   export_tasks = []
   legacy_compile_triggered = False
 
-  if task == ExportTask.AUTOMATIC_SPEECH_RECOGNITION:
+  if (
+      task == ExportTask.AUTOMATIC_SPEECH_RECOGNITION
+      and export_config.export_audio_encoder
+  ):
+    # Audio encoder + LLM (e.g. Qwen3-ASR), packaged with `LlmMetadata`.
+    # `ModelExtension.update_export_config` enables `export_audio_encoder` for
+    # LLM-based ASR models once the model is loaded.
+    export_tasks.append(export_lib.export_text_prefill_decode_model)
+    if export_config.externalize_embedder:
+      export_tasks.append(export_lib.export_embedder_model)
+    export_tasks.append(export_lib.export_audio_encoder_models)
     if export_config.bundle_litert_lm:
-      export_tasks.append(export_lib.export_text_prefill_decode_model)
-      if export_config.externalize_embedder:
-        export_tasks.append(export_lib.export_embedder_model)
-      if export_config.export_audio_encoder:
-        export_tasks.append(export_lib.export_audio_encoder_models)
       export_tasks.append(export_lib.export_tokenizer)
       export_tasks.append(litert_lm_builder.package_model)
-    else:
-      export_tasks.append(export_lib.export_asr_models)
-      if export_config.aot_backend is not None:
-        export_tasks.append(export_lib.aot_compile_model)
-        legacy_compile_triggered = True
+  elif task == ExportTask.AUTOMATIC_SPEECH_RECOGNITION:
+    # Standalone (encoder-decoder or CTC) ASR model in one TFLite model;
+    # `package_model` packages it with its `Speech2TextMetadata`.
+    export_tasks.append(export_lib.export_asr_models)
+    if export_config.bundle_litert_lm:
+      export_tasks.append(export_lib.export_tokenizer)
+      export_tasks.append(litert_lm_builder.package_model)
+    elif export_config.aot_backend is not None:
+      export_tasks.append(export_lib.aot_compile_model)
+      legacy_compile_triggered = True
   elif task == ExportTask.TEXT_TO_SPEECH:
     export_tasks.append(export_lib.export_tts_models)
     if export_config.aot_backend is not None:

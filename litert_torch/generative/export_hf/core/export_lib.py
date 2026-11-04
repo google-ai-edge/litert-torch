@@ -1757,13 +1757,19 @@ def _maybe_patch_tokenizer(tokenizer_path: str) -> None:
     except json.JSONDecodeError:
       return
 
-  is_bpe = data.get('model', {}).get('type') == 'BPE'
-  has_metaspace = data.get('pre_tokenizer', {}).get('type') == 'Metaspace'
+  model = data.get('model') or {}
+  pre_tokenizer = data.get('pre_tokenizer') or {}
+  is_bpe = model.get('type') == 'BPE'
+  has_metaspace = pre_tokenizer.get('type') == 'Metaspace'
+  if not (is_bpe and has_metaspace):
+    return
 
-  vocab = data.get('model', {}).get('vocab', {})
-  has_bpe_chars = any('Ġ' in k or 'Ċ' in k for k in vocab.keys())
+  vocab = model.get('vocab') or {}
+  has_bpe_chars = isinstance(vocab, dict) and any(
+      'Ġ' in k or 'Ċ' in k for k in vocab.keys()
+  )
 
-  if is_bpe and has_metaspace and has_bpe_chars:
+  if has_bpe_chars:
     print(
         'WARNING: Detected BPE tokenizer with Metaspace pre-tokenizer but BPE'
         ' characters in vocab. Patching to ByteLevel.'

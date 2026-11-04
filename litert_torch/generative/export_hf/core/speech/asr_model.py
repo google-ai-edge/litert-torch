@@ -15,15 +15,23 @@
 
 """Base class of ASR models to be converted to tflite."""
 
+from __future__ import annotations
+
 import abc
 import dataclasses
 from typing import Optional
 
 from litert_torch.backend.composite import StableHLOCompositeBuilder
+from litert_torch.generative.export_hf.core import exportable_module_config
 import numpy as np
 import torch
 from torch.nn import functional as F
 import transformers
+
+try:
+  from litert_lm_builder.runtime.proto import speech2text_metadata_pb2
+except ImportError:
+  speech2text_metadata_pb2 = None
 
 
 class AsrGroupNorm(torch.nn.Module):
@@ -197,6 +205,72 @@ class AsrModel:
     # Replace sdpa for GPU inference.
     attn_funs = transformers.modeling_utils.ALL_ATTENTION_FUNCTIONS
     attn_funs["sdpa"] = _sdpa
+
+  @staticmethod
+  def build_speech2text_metadata(
+      asr_model_type: str,
+      export_config: (
+          exportable_module_config.ExportableModuleConfig | None
+      ) = None,
+      *,
+      mel_frames_per_second: int | None = None,
+      **kwargs,
+  ) -> speech2text_metadata_pb2.Speech2TextMetadata:
+    """Builds `Speech2TextMetadata` for a standalone ASR model.
+
+    The runtime fills every field the metadata leaves unset with per-model
+    defaults (e.g. a 30 s window for Whisper). For models whose exported encoder
+    input shape scales with `export_config.input_sec`, pass `export_config` so
+    the exported input window (`input_milliseconds` and `n_frames`) is written
+    explicitly.
+
+    Args:
+      asr_model_type: `Speech2TextModelType` oneof field name (e.g. `'whisper'`,
+        `'parakeet'`, `'moonshine'`).
+      export_config: Optional `ExportableModuleConfig` whose `input_sec`
+        determines the exported encoder input window. Omit for models with a
+        fixed encoder window (such as Whisper's 30 s encoder).
+      mel_frames_per_second: Log-mel spectrogram frames per second of audio (100
+        for a 10 ms hop), or `None` for models that take raw PCM.
+      **kwargs: Additional `Speech2TextMetadata` proto fields (e.g.
+        `sample_rate_hz`, `decode_stop_token_id`).
+
+    Returns:
+      Populated `Speech2TextMetadata` proto.
+
+    Raises:
+      ImportError: If `speech2text_metadata_pb2` is unavailable.
+    """
+    if speech2text_metadata_pb2 is None:
+      raise ImportError(
+          "speech2text_metadata_pb2 is unavailable; please upgrade"
+          " litert-lm-builder."
+      )
+    metadata = speech2text_metadata_pb2.Speech2TextMetadata(
+        asr_model_type={asr_model_type: {}},
+        **kwargs,
+    )
+    input_sec = export_config.input_sec if export_config is not None else None
+    if input_sec:
+      metadata.input_milliseconds = round(input_sec * 1000)
+      if mel_frames_per_second:
+        metadata.log_mel_spectrogram_config.n_frames = round(
+            input_sec * mel_frames_per_second
+        )
+    if (
+        export_config is not None
+        and export_config.stateful_after is not None
+        and export_config.stateful_after > 0
+    ):
+      metadata.decode_statefully_after = export_config.stateful_after
+    return metadata
+
+  @abc.abstractmethod
+  def get_speech2text_metadata(
+      self, export_config: exportable_module_config.ExportableModuleConfig
+  ) -> speech2text_metadata_pb2.Speech2TextMetadata:
+    """Returns `Speech2TextMetadata` proto populated for the ASR model."""
+    raise NotImplementedError()
 
   @abc.abstractmethod
   def get_encoder(self) -> torch.nn.Module:

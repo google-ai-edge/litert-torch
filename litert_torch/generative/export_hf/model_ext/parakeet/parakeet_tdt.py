@@ -20,6 +20,23 @@ import numpy as np
 import torch
 
 
+class _FlattenedJointNet(torch.nn.Module):
+  """Flattens 4D [B, T, U, H] inputs to 3D [B, T * U, H] before Linear.
+
+  Avoids a TFLite MLIR BatchMatMul reshape fusion rank-mismatch failure when
+  `U == 1` in `decode_1`.
+  """
+
+  def __init__(self, joint_net: torch.nn.Module):
+    super().__init__()
+    self._joint_net = joint_net
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    b, t, u, h = x.shape
+    out = self._joint_net(x.reshape(b, t * u, h))
+    return out.reshape(b, t, u, -1)
+
+
 class ParakeetTDTDecoder(torch.nn.Module):
   """Wrapper of ParakeetTDT for decoder outputs."""
 
@@ -27,6 +44,7 @@ class ParakeetTDTDecoder(torch.nn.Module):
     super().__init__()
     self._decoder = model.decoder.eval()
     self._joint = model.joint.eval()
+    self._joint.joint_net = _FlattenedJointNet(self._joint.joint_net)
     # It is needed for correct inference though it's not clear why.
     self._joint.set_fuse_loss_wer(False)
 
@@ -133,6 +151,11 @@ class ParakeetTDT(asr_model.AsrModel):
     self._encoder = ParakeetTDTEncoder(self._model).eval()
     self._decoder = ParakeetTDTDecoder(self._model).eval()
     self._processor = ParakeetAsrProcessor(self._model)
+
+  def get_speech2text_metadata(self, export_config):
+    return self.build_speech2text_metadata(
+        'parakeet', export_config, mel_frames_per_second=100
+    )
 
   def get_encoder(self) -> torch.nn.Module:
     return self._encoder
