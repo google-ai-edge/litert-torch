@@ -18,6 +18,8 @@ import dataclasses
 import os
 import re
 
+from google.protobuf import message
+from google.protobuf import text_format
 from litert_torch import progress
 from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module
@@ -753,6 +755,71 @@ def package_any2any_model(
   )
 
 
+_PBTEXT_SUFFIXES = ('.pbtext', '.pbtxt', '.textproto', '.txtpb', '.textpb')
+
+
+def _parse_llm_metadata_override_file(
+    filepath: str,
+    llm_metadata: llm_metadata_pb2.LlmMetadata,
+) -> None:
+  """Parses a textproto or binary `LlmMetadata` file into `llm_metadata`."""
+  with open(filepath, 'rb') as f:
+    raw = f.read()
+  text_parse_error = None
+  if not override_is_binary_only(filepath):
+    try:
+      text_format.Parse(raw.decode('utf-8'), llm_metadata)
+      return
+    except UnicodeDecodeError:
+      if filepath.endswith(_PBTEXT_SUFFIXES):
+        raise
+    except text_format.ParseError as e:
+      if filepath.endswith(_PBTEXT_SUFFIXES):
+        raise
+      text_parse_error = e
+      llm_metadata.Clear()
+  try:
+    llm_metadata.ParseFromString(raw)
+  except message.DecodeError as e:
+    if text_parse_error is not None:
+      raise text_parse_error from e
+    raise ValueError(
+        f'Failed to parse LlmMetadata from {filepath}: {e}'
+    ) from e
+
+
+def override_is_binary_only(filepath: str) -> bool:
+  """Returns True when `filepath` explicitly ends with `.pb`."""
+  return filepath.endswith('.pb')
+
+
+def _resolve_llm_metadata_override_path(
+    override: str,
+    export_config: exportable_module.ExportableModuleConfig,
+    work_dir: str | None,
+) -> str:
+  """Returns the `LlmMetadata` override path, syncing `max_num_tokens`."""
+  target_dir = work_dir or export_config.output_dir or '.'
+  max_num_tokens = (
+      export_config.llm_metadata_max_num_tokens_override
+      or export_config.cache_length
+  )
+  llm_metadata = llm_metadata_pb2.LlmMetadata()
+  if os.path.exists(override):
+    _parse_llm_metadata_override_file(override, llm_metadata)
+  elif override.endswith((*_PBTEXT_SUFFIXES, '.pb')) or (
+      ':' not in override and '{' not in override
+  ):
+    raise FileNotFoundError(f'LlmMetadata override file not found: {override}')
+  else:
+    text_format.Parse(override, llm_metadata)
+  llm_metadata.max_num_tokens = max_num_tokens
+  out_path = os.path.join(target_dir, 'llm_metadata.pb')
+  with open(out_path, 'wb') as f:
+    f.write(llm_metadata.SerializeToString())
+  return out_path
+
+
 @progress.task('Package model')
 def package_model(
     source_model_artifacts: export_lib.SourceModelArtifacts,
@@ -814,12 +881,9 @@ def package_model(
   if not chat_templates:
     print('WARNING: Chat template is not found. Using empty template.')
   if export_config.litert_lm_llm_metadata_override:
-    if os.path.exists(export_config.litert_lm_llm_metadata_override):
-      llm_metadata_path = export_config.litert_lm_llm_metadata_override
-    else:
-      llm_metadata_path = os.path.join(work_dir, 'llm_metadata.pbtext')  # pyrefly: ignore[no-matching-overload]
-      with open(llm_metadata_path, 'w') as f:
-        f.write(export_config.litert_lm_llm_metadata_override)
+    llm_metadata_path = _resolve_llm_metadata_override_path(
+        export_config.litert_lm_llm_metadata_override, export_config, work_dir
+    )
   else:
     llm_metadata = build_llm_metadata(
         source_model_artifacts,

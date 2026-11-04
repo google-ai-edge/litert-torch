@@ -76,7 +76,7 @@ are registered via `model_ext/builtin_extensions.py` with `override=False` so
 explicit user registrations take precedence.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import contextlib
 import hashlib
 import importlib
@@ -167,6 +167,34 @@ class AudioExportablesSpec(NamedTuple):
   encoder_cls: Any
   adapter_cls: Any = None
   eoa_cls: Any = None
+
+
+# Re-exported so extensions can name tasks without depending on `core`.
+ExportTask = exportable_module_config.ExportTask
+
+
+class ExportDefaults(NamedTuple):
+  """Recommended export settings for a checkpoint.
+
+  Returned by `ModelExtension.get_export_defaults` so per-architecture
+  knowledge lives with the extension rather than in every caller. Explicit
+  caller arguments always override these values.
+
+  Attributes:
+    task: Default `ExportTask` for the checkpoint, or `None` to let the caller
+      decide (`text_generation` when nothing else applies).
+    export_kwargs: Recommended `export.export` keyword arguments for the
+      resolved task and `target` (e.g. `quantization_recipe`, `input_sec`,
+      `externalize_embedder`).
+  """
+
+  task: str | None = None
+  export_kwargs: Mapping[str, Any] = types.MappingProxyType({})
+
+
+def text_config_dict(config_dict: Mapping[str, Any]) -> Mapping[str, Any]:
+  """Returns `config_dict['text_config']` if present, else `config_dict`."""
+  return config_dict.get('text_config') or config_dict
 
 
 class ModelExtension:
@@ -576,6 +604,35 @@ class ModelExtension:
     del model_type
     return None
 
+  def get_export_defaults(
+      self,
+      config_dict: Mapping[str, Any],
+      task: str | None = None,
+      target: str = 'cpu_gpu',
+  ) -> ExportDefaults | None:
+    """Returns recommended export settings for a checkpoint.
+
+    Invoked before export using only the raw `config.json` (or Diffusers
+    `model_index.json`) so no model is loaded. Override it to declare the
+    default task and the export arguments known to work for the architecture;
+    callers merge them over the hardware target base settings and under their
+    own explicit arguments.
+
+    Args:
+      config_dict: Parsed `config.json` (or `model_index.json`) contents, or an
+        empty dict if the checkpoint has none.
+      task: Task requested by the caller, or `None` when the task is detected
+        automatically. Return arguments that suit this task (for example, drop
+        vision-encoder arguments when a VLM is exported as `text_generation`).
+      target: Canonical hardware target string (e.g. `'cpu_gpu'`, `'npu'`,
+        `'npu:qualcomm'`).
+
+    Returns:
+      An `ExportDefaults`, or `None` if the extension has no recommendation.
+    """
+    del config_dict, task, target
+    return None
+
   def get_litert_lm_section_types(self) -> dict[str, Any]:
     """Maps auxiliary submodel names to `.litertlm` container section types.
 
@@ -956,6 +1013,19 @@ class CompositeModelExtension(ModelExtension):
     """See base class."""
     for ext in reversed(self._extensions):
       res = ext.get_any2any_model_cls(model_type)
+      if res is not None:
+        return res
+    return None
+
+  def get_export_defaults(
+      self,
+      config_dict: Mapping[str, Any],
+      task: str | None = None,
+      target: str = 'cpu_gpu',
+  ) -> ExportDefaults | None:
+    """See base class."""
+    for ext in reversed(self._extensions):
+      res = ext.get_export_defaults(config_dict, task, target)
       if res is not None:
         return res
     return None

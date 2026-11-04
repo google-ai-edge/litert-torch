@@ -36,3 +36,16 @@ class Lfm2Extension(extension_lib.ModelExtension):
   fused_weight_specs = (
       extension_lib.FusedWeightSpec('gate_up_proj', ('w1', 'w3'), dim=0),
   )
+
+  def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
+    """See base class."""
+    del config_dict, task
+    is_npu = str(target or '').startswith('npu')
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.TEXT_GENERATION,
+        export_kwargs={
+            'quantization_recipe': (
+                'dynamic_wi8_afp32' if is_npu else 'dynamic_wi4b32_afp32'
+            ),
+        },
+    )

@@ -40,6 +40,7 @@ import torch
 import transformers
 
 from absl.testing import absltest as googletest
+from absl.testing import parameterized
 from litert_lm_builder.runtime.proto import llm_metadata_pb2
 from litert_lm_builder.runtime.proto import llm_model_type_pb2
 
@@ -160,7 +161,7 @@ class _W13FusingExtensionWithSpec(_W13FusingExtension):
   )
 
 
-class ModelExtensionTest(googletest.TestCase):
+class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -514,6 +515,150 @@ class ModelExtensionTest(googletest.TestCase):
         'minicpmo',
     ):
       self.assertIn(expected, registered)
+
+  @parameterized.named_parameters(
+      (
+          'qwen3_0_6b_cpu_gpu',
+          'qwen3',
+          {'text_config': {'hidden_size': 1024}},
+          None,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_GENERATION,
+          {'quantization_recipe': 'dynamic_wi4b32_afp32'},
+      ),
+      (
+          'qwen3_1_7b_cpu_gpu',
+          'qwen3',
+          {'hidden_size': 2048},
+          None,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_GENERATION,
+          {'quantization_recipe': 'dynamic_wi8_afp32'},
+      ),
+      (
+          'qwen3_4b_npu',
+          'qwen3',
+          {'hidden_size': 2560},
+          None,
+          'npu:qualcomm',
+          extension.ExportTask.TEXT_GENERATION,
+          {'quantization_recipe': 'dynamic_wi8_afp32'},
+      ),
+      (
+          'qwen3_tts_task',
+          'qwen3',
+          {'hidden_size': 1024},
+          extension.ExportTask.TEXT_TO_SPEECH,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_TO_SPEECH,
+          {},
+      ),
+      (
+          'gemma3n_text_override',
+          'gemma3n',
+          {'model_type': 'gemma3n'},
+          extension.ExportTask.TEXT_GENERATION,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_GENERATION,
+          {
+              'externalize_embedder': True,
+              'single_token_embedder': True,
+              'export_vision_encoder': False,
+          },
+      ),
+      (
+          'lfm2_vl_text_override',
+          'lfm2_vl',
+          {'model_type': 'lfm2_vl'},
+          extension.ExportTask.TEXT_GENERATION,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_GENERATION,
+          {
+              'quantization_recipe': 'dynamic_wi4b32_afp32',
+              'export_vision_encoder': False,
+              'auto_model_override': 'AutoModelForImageTextToText',
+          },
+      ),
+      (
+          'gemma4_text_only',
+          'gemma4',
+          {'model_type': 'gemma4', 'vision_config': None},
+          None,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_GENERATION,
+          {
+              'quantization_recipe': 'dynamic_wi4b32_afp32',
+              'externalize_embedder': True,
+              'single_token_embedder': True,
+              'export_vision_encoder': False,
+              'export_audio_encoder': False,
+          },
+      ),
+      (
+          'gemma4_vision',
+          'gemma4',
+          {'model_type': 'gemma4', 'vision_config': {'hidden_size': 768}},
+          None,
+          'cpu_gpu',
+          extension.ExportTask.IMAGE_TEXT_TO_TEXT,
+          {
+              'quantization_recipe': 'dynamic_wi4b32_afp32',
+              'externalize_embedder': True,
+              'single_token_embedder': True,
+              'export_vision_encoder': True,
+              'export_audio_encoder': False,
+          },
+      ),
+      (
+          'gemma4_vision_text_override',
+          'gemma4',
+          {'model_type': 'gemma4', 'vision_config': {'hidden_size': 768}},
+          extension.ExportTask.TEXT_GENERATION,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_GENERATION,
+          {
+              'quantization_recipe': 'dynamic_wi4b32_afp32',
+              'externalize_embedder': True,
+              'single_token_embedder': True,
+              'export_vision_encoder': False,
+              'export_audio_encoder': False,
+          },
+      ),
+      (
+          'gemma4_multimodal_audio_vision',
+          'gemma4',
+          {
+              'model_type': 'gemma4',
+              'vision_config': {'hidden_size': 768},
+              'audio_config': {'hidden_size': 512},
+          },
+          None,
+          'cpu_gpu',
+          extension.ExportTask.MULTIMODAL_LM,
+          {
+              'quantization_recipe': 'dynamic_wi4b32_afp32',
+              'externalize_embedder': True,
+              'single_token_embedder': True,
+              'export_vision_encoder': True,
+              'export_audio_encoder': True,
+          },
+      ),
+  )
+  def test_builtin_get_export_defaults(
+      self,
+      model_type,
+      config_dict,
+      task,
+      target,
+      expected_task,
+      expected_kwargs,
+  ):
+    ext = extension.get_model_extension(model_type)
+    self.assertIsNotNone(ext)
+    defaults = ext.get_export_defaults(config_dict, task=task, target=target)
+    self.assertIsNotNone(defaults)
+    self.assertEqual(defaults.task, expected_task)
+    self.assertEqual(dict(defaults.export_kwargs), expected_kwargs)
 
   def test_non_text_generation_checkpoint_matching_and_section_types(self):
 

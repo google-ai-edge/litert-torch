@@ -405,6 +405,109 @@ class BuildLlmMetadataStartTokenTest(parameterized.TestCase):
     self.assertIn("message['content']", metadata.jinja_prompt_template)
     self.assertIn('message["content"]', metadata.jinja_prompt_template)
 
+  @parameterized.named_parameters(
+      (
+          "pbtext_file",
+          "custom_metadata.pbtext",
+          b"max_num_tokens: 128\nllm_model_type { qwen3 {} }\n",
+      ),
+      (
+          "pbtxt_file",
+          "custom_metadata.pbtxt",
+          b"max_num_tokens: 128\nllm_model_type { qwen3 {} }\n",
+      ),
+      (
+          "textpb_file",
+          "custom_metadata.textpb",
+          b"max_num_tokens: 128\nllm_model_type { qwen3 {} }\n",
+      ),
+      (
+          "extensionless_file",
+          "custom_metadata",
+          b"max_num_tokens: 128\nllm_model_type { qwen3 {} }\n",
+      ),
+      (
+          "binary_pb_file",
+          "custom_metadata.pb",
+          litert_lm_builder.llm_metadata_pb2.LlmMetadata(
+              max_num_tokens=128,
+              llm_model_type={"qwen3": {}},
+          ).SerializeToString(),
+      ),
+      (
+          "inline_colon",
+          None,
+          "max_num_tokens: 128\nllm_model_type { qwen3 {} }",
+      ),
+      ("inline_braces_only", None, "llm_model_type { qwen3 {} }"),
+  )
+  def test_package_model_syncs_max_num_tokens_in_pbtext_override(
+      self, filename, override_content
+  ):
+    temp_dir = self.create_tempdir().full_path
+    prefill_decode_path = os.path.join(temp_dir, "prefill_decode.tflite")
+    tok_path = os.path.join(temp_dir, "tokenizer.json")
+    for p, content in [
+        (prefill_decode_path, b"TFL3_PREFILL_DECODE"),
+        (tok_path, b'{"version": "1.0"}'),
+    ]:
+      with open(p, "wb") as f:
+        f.write(content)
+    if filename is not None:
+      override = os.path.join(temp_dir, filename)
+      with open(override, "wb") as f:
+        f.write(override_content)
+    else:
+      override = override_content
+
+    fake_config = types.SimpleNamespace(model_type="qwen3", num_hidden_layers=2)
+    source_artifacts = export_lib.SourceModelArtifacts(
+        model=_FakeModel(),  # pyrefly: ignore[bad-argument-type]
+        model_config=fake_config,  # pyrefly: ignore[bad-argument-type]
+        text_model_config=fake_config,  # pyrefly: ignore[bad-argument-type]
+        tokenizer=_FakeTokenizer(
+            bos_token=None, bos_token_id=None, prepends_bos=False
+        ),
+    )
+    export_config = exportable_module.ExportableModuleConfig(
+        model="test-model",
+        output_dir=temp_dir,
+        work_dir=temp_dir,
+        cache_length=32771,
+        llm_metadata_max_num_tokens_override=4096,
+        litert_lm_llm_metadata_override=override,
+    )
+    exported_artifacts = export_lib.ExportedModelArtifacts(
+        prefill_decode_model_path=prefill_decode_path,
+        tokenizer_model_path=tok_path,
+    )
+    litert_lm_builder.package_model(
+        source_artifacts, export_config, exported_artifacts
+    )
+    rewritten = os.path.join(temp_dir, "llm_metadata.pb")
+    self.assertTrue(os.path.exists(rewritten))
+    parsed = litert_lm_builder.llm_metadata_pb2.LlmMetadata()
+    with open(rewritten, "rb") as f:
+      parsed.ParseFromString(f.read())
+    self.assertEqual(parsed.max_num_tokens, 4096)
+    self.assertTrue(parsed.llm_model_type.HasField("qwen3"))
+
+  def test_resolve_llm_metadata_override_missing_file_raises(self):
+    temp_dir = self.create_tempdir().full_path
+    export_config = exportable_module.ExportableModuleConfig(
+        model="test-model",
+        output_dir=temp_dir,
+        work_dir=temp_dir,
+    )
+    with self.assertRaises(FileNotFoundError):
+      litert_lm_builder._resolve_llm_metadata_override_path(
+          os.path.join(temp_dir, "missing.pbtext"), export_config, temp_dir
+      )
+    with self.assertRaises(FileNotFoundError):
+      litert_lm_builder._resolve_llm_metadata_override_path(
+          os.path.join(temp_dir, "missing.pbtxt"), export_config, temp_dir
+      )
+
 
 class ParseChatTemplateTest(parameterized.TestCase):
 

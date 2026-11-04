@@ -31,6 +31,16 @@ class WhisperExtension(extension_lib.ModelExtension):
 
   model_types = ('whisper',)
 
+  def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
+    """See base class."""
+    del config_dict, task, target
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.AUTOMATIC_SPEECH_RECOGNITION,
+        export_kwargs={
+            'input_sec': 30.0,
+        },
+    )
+
   def get_speech_model_cls(self, model_type):
     """See base class."""
     del model_type

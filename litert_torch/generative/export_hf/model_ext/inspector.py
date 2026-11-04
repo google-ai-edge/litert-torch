@@ -432,6 +432,24 @@ def _generate_extension_skeleton(
         "      extension.FusedWeightSpec('gate_up_proj', ('w1', 'w3'), dim=0),",
         '  )',
     ])
+  lines.extend([
+      '',
+      '  def get_export_defaults(',
+      '      self, config_dict, task=None, target="cpu_gpu"',
+      '  ):',
+      '    del config_dict, task',
+      '    is_npu = str(target or "").startswith("npu")',
+      '    return extension.ExportDefaults(',
+      '        task=extension.ExportTask.TEXT_GENERATION,',
+      '        export_kwargs={',
+      '            "quantization_recipe": (',
+      '                "dynamic_wi8_afp32"',
+      '                if is_npu',
+      '                else "dynamic_wi4b32_afp32"',
+      '            ),',
+      '        },',
+      '    )',
+  ])
   if has_auto_map:
     lines.extend([
         '',

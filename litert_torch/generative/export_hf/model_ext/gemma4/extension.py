@@ -69,6 +69,42 @@ class Gemma4Extension(extension_lib.ModelExtension):
       )
     return export_config
 
+  def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
+    """See base class."""
+    model_type = config_dict.get('model_type')
+    has_audio = bool(config_dict.get('audio_config'))
+    has_vision = (
+        model_type == 'gemma4'
+        and config_dict.get('vision_config', True) is not None
+    )
+    if task is None:
+      if model_type == 'gemma4' and has_audio:
+        resolved_task = extension_lib.ExportTask.MULTIMODAL_LM
+      elif model_type == 'gemma4' and has_vision:
+        resolved_task = extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT
+      else:
+        resolved_task = extension_lib.ExportTask.TEXT_GENERATION
+    else:
+      resolved_task = task
+    export_vision = resolved_task in (
+        extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT,
+        extension_lib.ExportTask.MULTIMODAL_LM,
+    )
+    export_audio = resolved_task == extension_lib.ExportTask.MULTIMODAL_LM
+    is_npu = str(target or '').startswith('npu')
+    return extension_lib.ExportDefaults(
+        task=resolved_task,
+        export_kwargs={
+            'quantization_recipe': (
+                'dynamic_wi8_afp32' if is_npu else 'dynamic_wi4b32_afp32'
+            ),
+            'externalize_embedder': True,
+            'single_token_embedder': not is_npu,
+            'export_vision_encoder': export_vision,
+            'export_audio_encoder': export_audio,
+        },
+    )
+
   def get_prefill_decode_exportables(self, model_config, export_config):
     """See base class."""
     if model_config.get_text_config().hidden_size_per_layer_input:

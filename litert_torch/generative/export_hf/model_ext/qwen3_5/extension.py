@@ -33,6 +33,18 @@ class Qwen3_5Extension(extension_lib.ModelExtension):  # pylint: disable=invalid
 
   model_types = ('qwen3_5', 'qwen3_5_text')
 
+  def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
+    """See base class."""
+    # int4 exports can fail to load on the CPU backend (all-zero
+    # int4 block scales), so Qwen3.5 defaults to int8 weights.
+    del config_dict, task, target
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.TEXT_GENERATION,
+        export_kwargs={
+            'quantization_recipe': 'dynamic_wi8_afp32',
+        },
+    )
+
   def get_prefill_decode_exportables(self, model_config, export_config):
     """See base class."""
     del model_config

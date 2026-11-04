@@ -33,6 +33,24 @@ class Lfm2VlExtension(extension_lib.ModelExtension):
 
   model_types = ('lfm2_vl',)
 
+  def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
+    """See base class."""
+    del config_dict
+    vlm = task in (None, extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT)
+    is_npu = str(target or '').startswith('npu')
+    export_kwargs = {
+        'quantization_recipe': (
+            'dynamic_wi8_afp32' if is_npu else 'dynamic_wi4b32_afp32'
+        ),
+        'export_vision_encoder': vlm,
+    }
+    if not vlm:
+      export_kwargs['auto_model_override'] = 'AutoModelForImageTextToText'
+    return extension_lib.ExportDefaults(
+        task=task or extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT,
+        export_kwargs=export_kwargs,
+    )
+
   def get_vision_exportables(self, model_config, export_config=None):
     """See base class."""
     del model_config, export_config

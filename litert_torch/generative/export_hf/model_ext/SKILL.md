@@ -49,7 +49,31 @@ python -m litert_torch.generative.export_hf.model_ext.inspector \
 
 Subclass `extension.ModelExtension` (either in an out-of-tree `.py` file passed
 via `--extension_modules=/path/to/my_ext.py` or built-in under
-`model_ext/<arch>/extension.py`) and set `model_types = ('<model_type>',)`.
+`model_ext/<arch>/extension.py`) and set `model_types = ('<model_type>',)`:
+
+1. **Declare `get_export_defaults(self, config_dict, task=None,
+   target='cpu_gpu')`**:
+   - Declares the default task (`ExportTask`) and architecture-specific export
+     keyword arguments for `target` without loading model weights.
+   - Branch on `is_npu = str(target or '').startswith('npu')` when setting
+     `quantization_recipe` (e.g. `'dynamic_wi8_afp32'` on NPU vs
+     `'dynamic_wi4b32_afp32'` on `cpu_gpu`) so extension defaults do not clobber
+     NPU target presets.
+   - Optionally attach model-specific metadata/template overrides in
+     `export_kwargs` (`'litert_lm_llm_metadata_override'`,
+     `'jinja_chat_template_override'`). Note that `litert_lm_builder`
+     automatically syncs `max_num_tokens` in `.pbtext` / `.pbtxt` / `.pb`
+     overrides with `export_config.llm_metadata_max_num_tokens_override or
+     export_config.cache_length`.
+2. **Configure `LlmMetadata` and `ExecutorMetadata` hooks if needed**:
+   - `metadata_builder.build_executor_metadata` automatically builds KV cache
+     and state buffer descriptors from `config.layer_types`
+     (`'full_attention'`, `'sliding_attention'`, `'linear_attention'`,
+     `'conv'`).
+   - If the model sets `config.sliding_window` without `config.layer_types`, set
+     `sliding_window_layers = 'all'` on your `ModelExtension`.
+   - If the model requires custom executor metadata, override
+     `get_executor_metadata_builder(self, model_config)`.
 
 ### Step 3: Fast Inner-Loop Verification (`<2s` on CPU)
 
