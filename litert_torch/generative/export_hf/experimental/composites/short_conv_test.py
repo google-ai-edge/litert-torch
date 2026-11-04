@@ -293,6 +293,48 @@ class ShortConvTest(parameterized.TestCase):
         targets,
     )
 
+  def test_short_conv_ungated_with_extra_trailing_channels(self):
+    batch_size = 1
+    hidden_size = 64
+    extra_channels = 24
+    conv_L_cache = 4
+
+    conv_state = torch.randn(batch_size, hidden_size, conv_L_cache - 1)
+    conv_weight = torch.randn(hidden_size, 1, conv_L_cache)
+    conv_bias = torch.randn(hidden_size)
+
+    for seq_len, num_valid in ((1, None), (6, 4)):
+      x_prefix = torch.randn(batch_size, seq_len, hidden_size)
+      trailing = torch.full((batch_size, seq_len, extra_channels), 99.0)
+      fused_in = torch.cat([x_prefix, trailing], dim=-1)
+      num_valid_t = (
+          None
+          if num_valid is None
+          else torch.tensor([num_valid], dtype=torch.int32)
+      )
+      expected_y, expected_state = short_conv.apply_short_conv_step(
+          in_proj_out=x_prefix,
+          conv_state=conv_state.clone(),
+          conv_weight=conv_weight,
+          conv_bias=conv_bias,
+          num_valid_tokens=num_valid_t,
+          conv_L_cache=conv_L_cache,
+          is_gated=False,
+          use_silu=True,
+      )
+      actual_y, actual_state = short_conv.apply_short_conv_step(
+          in_proj_out=fused_in,
+          conv_state=conv_state.clone(),
+          conv_weight=conv_weight,
+          conv_bias=conv_bias,
+          num_valid_tokens=num_valid_t,
+          conv_L_cache=conv_L_cache,
+          is_gated=False,
+          use_silu=True,
+      )
+      torch.testing.assert_close(actual_y, expected_y, rtol=1e-5, atol=1e-5)
+      torch.testing.assert_close(actual_state, expected_state)
+
 
 if __name__ == "__main__":
   googletest.main()
