@@ -36,6 +36,7 @@ from litert_torch.generative.examples.stable_diffusion import clip as sd_clip
 from litert_torch.generative.examples.stable_diffusion import decoder as sd_decoder
 from litert_torch.generative.examples.stable_diffusion import diffusion as sd_diffusion
 from litert_torch.generative.layers import kv_cache
+from litert_torch.generative.layers import normalization
 from litert_torch.generative.test import utils as test_utils
 import numpy as np
 import torch
@@ -346,7 +347,19 @@ class TestModelConversion(googletest.TestCase):
     )
 
     pytorch_model = sd_decoder.Decoder(config).eval()
+    # GroupNorm/LayerNorm parameters are created with torch.empty, i.e. left
+    # uninitialized. Give them deterministic values so the test compares real
+    # outputs instead of garbage (which typically made both sides all-NaN).
+    with torch.no_grad():
+      for module in pytorch_model.modules():
+        if isinstance(
+            module, (normalization.GroupNorm, normalization.LayerNorm)
+        ):
+          module.weight.fill_(1.0)
+          if module.bias is not None:
+            module.bias.zero_()
     torch_output = pytorch_model(latents)
+    self.assertFalse(np.isnan(torch_output.detach().numpy()).any())
 
     edge_model = litert_torch.signature(
         "decode", pytorch_model, (latents,)
