@@ -24,10 +24,10 @@ Registers:
 """
 
 from litert_torch.generative.export_hf.model_ext import extension as extension_lib
-# Registers qwen3 and qwen3_asr patches.
-from litert_torch.generative.export_hf.model_ext.qwen3 import patch as _
+from litert_torch.generative.export_hf.model_ext.qwen3 import patch as qwen3_patch
 from litert_torch.generative.export_hf.model_ext.qwen3 import qwen3_asr as qwen3_asr_lib
 from litert_torch.generative.export_hf.model_ext.qwen3_tts import qwen3_tts as qwen3_tts_lib
+from litert_lm_builder.runtime.proto import llm_model_type_pb2
 
 
 @extension_lib.register_model_extension(override=False)
@@ -40,6 +40,14 @@ class Qwen2Extension(extension_lib.ModelExtension):
   """
 
   model_types = ('qwen2', 'qwen2p5')
+  is_causal_text_model = True
+
+  def get_llm_model_type_proto(self, model_config, export_config=None):
+    """See base class."""
+    del model_config, export_config
+    return llm_model_type_pb2.LlmModelType(
+        qwen2p5=llm_model_type_pb2.Qwen2p5()
+    )
 
   def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
     """See base class."""
@@ -58,6 +66,20 @@ class Qwen3Extension(extension_lib.ModelExtension):
   """Built-in extension for Qwen3 decoder-only LLMs (`qwen3`, `qwen3_text`)."""
 
   model_types = ('qwen3', 'qwen3_text')
+  is_causal_text_model = True
+
+  def get_llm_model_type_proto(self, model_config, export_config=None):
+    """See base class."""
+    del model_config, export_config
+    return llm_model_type_pb2.LlmModelType(qwen3=llm_model_type_pb2.Qwen3())
+
+  def patch_context(self):
+    """See base class."""
+    return qwen3_patch.qwen3_litert_patch()
+
+  def patch_model(self, model, export_config):
+    """See base class."""
+    return qwen3_patch.patch_qwen3_model(model, export_config)
 
   def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
     """See base class."""
@@ -94,6 +116,19 @@ class Qwen3AsrExtension(extension_lib.ModelExtension):
   """Built-in extension for Qwen3 ASR (`qwen3_asr`)."""
 
   model_types = ('qwen3_asr',)
+
+  def get_llm_model_type_proto(self, model_config, export_config=None):
+    """See base class."""
+    del model_config, export_config
+    return llm_model_type_pb2.LlmModelType(qwen3=llm_model_type_pb2.Qwen3())
+
+  def patch_context(self):
+    """See base class."""
+    return qwen3_patch.qwen3_litert_patch()
+
+  def patch_model(self, model, export_config):
+    """See base class."""
+    return qwen3_patch.patch_qwen3_model(model, export_config)
 
   def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
     """See base class."""

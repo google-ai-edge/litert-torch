@@ -39,7 +39,7 @@ from litert_torch.generative.export_hf.model_ext.minicpm_o import encoders
 from litert_torch.generative.export_hf.model_ext.minicpm_o import tts
 from litert_torch.generative.export_hf.model_ext.minicpm_o import vocoder
 from litert_torch.generative.export_hf.model_ext.minicpm_o import weights_utils
-from litert_torch.generative.export_hf.model_ext.qwen3 import patch as _  # pylint: disable=unused-import
+from litert_torch.generative.export_hf.model_ext.qwen3 import extension as _  # pylint: disable=unused-import
 import safetensors
 import torch
 import transformers

@@ -451,16 +451,6 @@ def build_llm_metadata(
     llm_metadata.llm_model_type.CopyFrom(ext_model_type_proto)
   else:
     match (model_type):
-      case 'qwen3' | 'qwen3_text' | 'qwen3_asr':
-        llm_metadata.llm_model_type.CopyFrom(
-            llm_model_type_pb2.LlmModelType(qwen3=llm_model_type_pb2.Qwen3())
-        )
-      case 'qwen2' | 'qwen2p5':
-        llm_metadata.llm_model_type.CopyFrom(
-            llm_model_type_pb2.LlmModelType(
-                qwen2p5=llm_model_type_pb2.Qwen2p5()
-            )
-        )
       case 'lfm2' | 'lfm2_vl':
         llm_metadata.llm_model_type.CopyFrom(
             llm_model_type_pb2.LlmModelType(lfm2=llm_model_type_pb2.Lfm2())
