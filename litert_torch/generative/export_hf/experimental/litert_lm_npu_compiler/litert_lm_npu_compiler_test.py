@@ -910,6 +910,51 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
   @mock.patch(
       'litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler.ApplyPlugin'
   )
+  def test_unmatched_compile_configs_warns(self, mock_apply_plugin_class):
+    main_model_bytes = build_dummy_tflite_model([('serving_default', 0)])
+    main_model_path = os.path.join(self.test_dir, 'model.tflite')
+    with open(main_model_path, 'wb') as f:
+      f.write(main_model_bytes)
+
+    metadata_path = os.path.join(self.test_dir, 'metadata.pb')
+    with open(metadata_path, 'wb') as f:
+      f.write(llm_metadata_pb2.LlmMetadata().SerializeToString())
+    tokenizer_path = os.path.join(self.test_dir, 'tokenizer.model')
+    with open(tokenizer_path, 'w') as f:
+      f.write('dummy')
+
+    input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
+    builder = litertlm_builder.LitertLmFileBuilder()
+    builder.add_tflite_model(
+        main_model_path, llm_metadata_pb2.LlmMetadata.TF_LITE_PREFILL_DECODE
+    )
+    builder.add_llm_metadata(metadata_path)
+    builder.add_sentencepiece_tokenizer(tokenizer_path)
+    with open(input_litertlm_path, 'wb') as f:
+      builder.build(f)
+
+    output_litertlm_path = os.path.join(self.test_dir, 'output.litertlm')
+
+    # 'prefill' does not match the 'prefill_decode' section.
+    with self.assertLogs(level='WARNING') as logs:
+      litert_lm_npu_compiler.compile_litertlm(
+          input_litertlm=input_litertlm_path,
+          output_litertlm=output_litertlm_path,
+          backend='qualcomm',
+          soc_model='SM8750',
+          compile_configs={'prefill': {'compile': True}},
+      )
+
+    mock_apply_plugin_class.assert_not_called()
+    self.assertTrue(
+        any('No model was compiled' in line for line in logs.output)
+    )
+    self.assertTrue(any("'prefill_decode'" in line for line in logs.output))
+    self.assertTrue(any("'prefill'" in line for line in logs.output))
+
+  @mock.patch(
+      'litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler.ApplyPlugin'
+  )
   def test_generic_defaults_mediatek_encoders(self, mock_apply_plugin_class):
     compiled_instances = []
 
