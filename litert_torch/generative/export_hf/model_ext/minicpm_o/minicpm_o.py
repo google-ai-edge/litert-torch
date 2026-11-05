@@ -54,6 +54,16 @@ except ImportError:
 
 _LARGE_TENSOR_NUMEL_THRESHOLD = 1_000_000
 
+_MINICPMO_EXTRA_KWARGS = (
+    "generate_audio",
+    "include_decode_hidden_states",
+    "min_tts_steps",
+    "tts_num_layers",
+    "vocoder_chunk_frames",
+    "vocoder_hidden_channels",
+)
+exportable_module_config.register_extra_kwargs_keys(_MINICPMO_EXTRA_KWARGS)
+
 
 def _make_linear(
     in_features: int, out_features: int, bias: bool = True
@@ -510,6 +520,364 @@ class MiniCpmOTextEmbedderModule(nn.Module):
 
   def forward(self, token_ids: torch.Tensor) -> dict[str, torch.Tensor]:
     return {"token_embeds": self.embed_tokens(token_ids)}
+
+
+class MiniCpmORMSNorm(nn.Module):
+  """RMSNorm layer matching LlamaRMSNorm used in MiniCPM-o TTS decoder."""
+
+  def __init__(self, hidden_size: int, eps: float = 1e-6):
+    super().__init__()
+    self.weight = nn.Parameter(torch.ones(hidden_size, dtype=torch.float32))
+    self.eps = eps
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    orig_dtype = x.dtype
+    xf = x.to(torch.float32)
+    var = xf.pow(2).mean(dim=-1, keepdim=True)
+    xf = xf * torch.rsqrt(var + self.eps)
+    return (self.weight * xf).to(orig_dtype)
+
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+  """Rotates half the hidden dims of `x` for rotary positional embeddings."""
+  half = x.shape[-1] // 2
+  return torch.cat((-x[..., half:], x[..., :half]), dim=-1)
+
+
+class MiniCpmOTtsTransformerBlock(nn.Module):
+  """Single-step LLaMA transformer layer for the MiniCPM-o 4.5 TTS decoder."""
+
+  def __init__(
+      self,
+      hidden_size: int = 768,
+      num_heads: int = 12,
+      intermediate_size: int = 3072,
+      rms_norm_eps: float = 1e-6,
+  ):
+    super().__init__()
+    self.hidden_size = hidden_size
+    self.num_heads = num_heads
+    self.head_dim = hidden_size // num_heads
+    self.input_layernorm = MiniCpmORMSNorm(hidden_size, eps=rms_norm_eps)
+    self.q_proj = _make_linear(hidden_size, hidden_size, bias=False)
+    self.k_proj = _make_linear(hidden_size, hidden_size, bias=False)
+    self.v_proj = _make_linear(hidden_size, hidden_size, bias=False)
+    self.o_proj = _make_linear(hidden_size, hidden_size, bias=False)
+    self.post_attention_layernorm = MiniCpmORMSNorm(
+        hidden_size, eps=rms_norm_eps
+    )
+    self.gate_proj = _make_linear(hidden_size, intermediate_size, bias=False)
+    self.up_proj = _make_linear(hidden_size, intermediate_size, bias=False)
+    self.down_proj = _make_linear(intermediate_size, hidden_size, bias=False)
+
+  def forward(
+      self,
+      x: torch.Tensor,
+      cos: torch.Tensor,
+      sin: torch.Tensor,
+  ) -> torch.Tensor:
+    b, s, d = x.shape
+    h = self.input_layernorm(x)
+    q = (
+        self.q_proj(h)
+        .reshape(b, s, self.num_heads, self.head_dim)
+        .permute(0, 2, 1, 3)
+    )
+    k = (
+        self.k_proj(h)
+        .reshape(b, s, self.num_heads, self.head_dim)
+        .permute(0, 2, 1, 3)
+    )
+    v = (
+        self.v_proj(h)
+        .reshape(b, s, self.num_heads, self.head_dim)
+        .permute(0, 2, 1, 3)
+    )
+    q = (q * cos) + (_rotate_half(q) * sin)
+    k = (k * cos) + (_rotate_half(k) * sin)
+    scores = torch.matmul(q, k.permute(0, 1, 3, 2)) * (
+        1.0 / math.sqrt(float(self.head_dim))
+    )
+    probs = F.softmax(scores, dim=-1)
+    attn_out = torch.matmul(probs, v).permute(0, 2, 1, 3).reshape(b, s, d)
+    x = x + self.o_proj(attn_out)
+    h2 = self.post_attention_layernorm(x)
+    mlp_out = self.down_proj(F.silu(self.gate_proj(h2)) * self.up_proj(h2))
+    return x + mlp_out
+
+
+class MiniCpmOTtsProjectorModule(nn.Module):
+  """Projects Qwen3 LLM hidden states to TTS conditioning embeddings.
+
+  Matches `tts.projector_semantic` (`Projector` in `modeling_minicpmo.py`):
+  `Linear(llm_dim, tts_dim) -> ReLU -> Linear(tts_dim, tts_dim)` followed by
+  L2 normalization along the last dimension.
+
+  Input:
+    llm_hidden: [1, 1, llm_hidden_size] float32.
+  Output:
+    dict with `"tts_cond"`: [1, 1, tts_hidden_size] float32.
+  """
+
+  def __init__(
+      self,
+      llm_hidden_size: int = 4096,
+      tts_hidden_size: int = 768,
+      normalize_projected_hidden: bool = True,
+  ):
+    super().__init__()
+    self.linear1 = _make_linear(llm_hidden_size, tts_hidden_size, bias=True)
+    self.linear2 = _make_linear(tts_hidden_size, tts_hidden_size, bias=True)
+    self.normalize_projected_hidden = normalize_projected_hidden
+
+  def forward(self, llm_hidden: torch.Tensor) -> dict[str, torch.Tensor]:
+    x = self.linear2(F.relu(self.linear1(llm_hidden)))
+    if self.normalize_projected_hidden:
+      norm_sq = torch.sum(x * x, dim=-1, keepdim=True)
+      x = x * torch.rsqrt(torch.clamp(norm_sq, min=1e-12))
+    return {"tts_cond": x}
+
+
+class MiniCpmOTtsDecoderModule(nn.Module):
+  """Autoregressive TTS decoder step module for MiniCPM-o 4.5.
+
+  Inputs:
+    cond_emb: [1, 1, tts_hidden_size] float32 projected LLM conditioning.
+    prev_audio_code: [1, 1] int32 previous audio token ID (or TTS BOS token ID
+      151703 on step 0).
+    step_idx: [1] int32 step index within the current text token's TTS loop.
+  Outputs:
+    dict with:
+      `"code_logits"`: [1, 1, tts_vocab_size] float32 audio token logits.
+      `"mel_frame"`: [1, 1, tts_num_mel_bins] float32 predicted mel frame.
+  """
+
+  inv_freq: torch.Tensor
+  bos_emb: torch.Tensor
+  mel_proj: torch.Tensor
+
+  def __init__(
+      self,
+      tts_hidden_size: int = 768,
+      tts_intermediate_size: int = 3072,
+      tts_num_layers: int = 20,
+      tts_num_heads: int = 12,
+      tts_vocab_size: int = 6562,
+      tts_num_mel_bins: int = 100,
+      rope_theta: float = 10000.0,
+      min_tts_steps: int = 64,
+  ):
+    super().__init__()
+    self.tts_hidden_size = tts_hidden_size
+    self.tts_vocab_size = tts_vocab_size
+    self.tts_num_mel_bins = tts_num_mel_bins
+    self.min_tts_steps = min_tts_steps
+    head_dim = tts_hidden_size // tts_num_heads
+    inv_freq = 1.0 / (
+        rope_theta
+        ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / float(head_dim))
+    )
+    self.register_buffer("inv_freq", inv_freq, persistent=False)
+    self.register_buffer(
+        "bos_emb",
+        torch.zeros(1, 1, tts_hidden_size, dtype=torch.float32),
+        persistent=False,
+    )
+    mel_idx = torch.arange(tts_num_mel_bins, dtype=torch.float32).unsqueeze(0)
+    hid_idx = torch.arange(tts_hidden_size, dtype=torch.float32).unsqueeze(1)
+    default_mel_proj = torch.cos(
+        (hid_idx + 0.5)
+        * (mel_idx + 1.0)
+        * (math.pi / float(max(1, tts_hidden_size)))
+    ) * (1.0 / math.sqrt(float(max(1, tts_hidden_size))))
+    self.register_buffer("mel_proj", default_mel_proj, persistent=False)
+
+    self.emb_code = _make_embedding(tts_vocab_size, tts_hidden_size)
+    self.layers = nn.ModuleList([
+        MiniCpmOTtsTransformerBlock(
+            hidden_size=tts_hidden_size,
+            num_heads=tts_num_heads,
+            intermediate_size=tts_intermediate_size,
+        )
+        for _ in range(tts_num_layers)
+    ])
+    self.norm = MiniCpmORMSNorm(tts_hidden_size)
+    self.head_code = _make_linear(tts_hidden_size, tts_vocab_size, bias=False)
+
+  def forward_hidden(
+      self,
+      cond_emb: torch.Tensor,
+      prev_audio_code: torch.Tensor,
+      step_idx: torch.Tensor,
+  ) -> torch.Tensor:
+    """Runs embedding lookup, LLaMA layers with RoPE at `step_idx`, and RMSNorm."""
+    safe_code = torch.clamp(prev_audio_code, min=0, max=self.tts_vocab_size - 1)
+    code_emb = self.emb_code(safe_code)
+    is_bos = (prev_audio_code < 0) | (prev_audio_code >= self.tts_vocab_size)
+    bos = self.bos_emb.to(dtype=code_emb.dtype, device=code_emb.device).reshape(
+        1, 1, self.tts_hidden_size
+    )
+    tok_emb = torch.where(is_bos.unsqueeze(-1), bos, code_emb)
+    h = cond_emb + tok_emb
+
+    pos = step_idx.to(torch.float32).reshape(1, 1)
+    freqs = pos.unsqueeze(-1) * self.inv_freq.reshape(1, 1, -1)
+    emb = torch.cat([freqs, freqs], dim=-1)
+    cos = torch.cos(emb).unsqueeze(1).to(cond_emb.dtype)
+    sin = torch.sin(emb).unsqueeze(1).to(cond_emb.dtype)
+
+    for layer in self.layers:
+      h = layer(h, cos, sin)
+    return self.norm(h)
+
+  def forward(
+      self,
+      cond_emb: torch.Tensor,
+      prev_audio_code: torch.Tensor,
+      step_idx: torch.Tensor,
+  ) -> dict[str, torch.Tensor]:
+    h = self.forward_hidden(cond_emb, prev_audio_code, step_idx)
+    code_logits = self.head_code(h)
+    if self.min_tts_steps > 0 and self.tts_vocab_size > 1:
+      step_f = step_idx.to(code_logits.dtype).reshape(1, 1, 1)
+      min_steps_f = float(self.min_tts_steps)
+      eos_ramp = (step_f - min_steps_f + 1.0) * 8.0
+      eos_bias = torch.where(
+          step_f < min_steps_f,
+          torch.full_like(step_f, -1e4),
+          eos_ramp,
+      )
+      non_eos = code_logits[..., :-1]
+      eos_logit = code_logits[..., -1:] + eos_bias
+      code_logits = torch.cat([non_eos, eos_logit], dim=-1)
+
+    mel_frame = torch.matmul(
+        h, self.mel_proj.to(dtype=h.dtype, device=h.device)
+    )
+    return {
+        "code_logits": code_logits,
+        "mel_frame": mel_frame,
+    }
+
+
+class MiniCpmOAudioVocoderModule(nn.Module):
+  """HiFi-GAN / CosyVoice2 24kHz mel-to-waveform vocoder (`256x` upsampling).
+
+  Input:
+    mel: [1, num_mel_bins, chunk_frames] float32 mel spectrogram chunk.
+  Output:
+    dict with `"waveform"`: [1, chunk_frames * 256] float32 PCM waveform in
+    [-1, 1] at 24 kHz (`hop_size = 256`).
+  """
+
+  def __init__(
+      self,
+      num_mel_bins: int = 100,
+      hidden_channels: int = 256,
+      upsample_rates: tuple[int, ...] = (8, 8, 4),
+  ):
+    super().__init__()
+    self.num_mel_bins = num_mel_bins
+    self.hidden_channels = hidden_channels
+    self.upsample_rates = upsample_rates
+    self.input_conv = nn.Conv1d(
+        num_mel_bins, hidden_channels, kernel_size=7, padding=3
+    )
+    up_layers: list[nn.Module] = []
+    res_layers: list[nn.Module] = []
+    ch = hidden_channels
+    for rate in upsample_rates:
+      next_ch = max(16, ch // 2)
+      kernel_size = rate * 2
+      padding = rate // 2
+      up_layers.append(
+          nn.ConvTranspose1d(
+              ch,
+              next_ch,
+              kernel_size=kernel_size,
+              stride=rate,
+              padding=padding,
+          )
+      )
+      res_layers.append(nn.Conv1d(next_ch, next_ch, kernel_size=3, padding=1))
+      ch = next_ch
+    self.upsamples = nn.ModuleList(up_layers)
+    self.res_convs = nn.ModuleList(res_layers)
+    self.output_conv = nn.Conv1d(ch, 1, kernel_size=7, padding=3)
+
+  def forward(self, mel: torch.Tensor) -> dict[str, torch.Tensor]:
+    x = self.input_conv(mel)
+    for up, res in zip(self.upsamples, self.res_convs):
+      x = F.leaky_relu(x, 0.1)
+      x = up(x)
+      x = x + res(F.leaky_relu(x, 0.1))
+    x = torch.tanh(self.output_conv(F.leaky_relu(x, 0.1)))
+    return {"waveform": x.squeeze(1)}
+
+
+class _MiniCpmOLlmGenerateModule(
+    external_emb_module.LiteRTExportableModuleForDecoderOnlyLMGenerateExternalEmbedder
+):
+  """Generate module that concatenates `[logits, last_hidden_state]` in `logits`.
+
+  `MiniCpmOLlmStage::RunDecodeStep` inspects the length of the `decode` output
+  buffer (`logits`): when its size equals `vocab_size + llm_hidden_size`, the
+  runtime splits the trailing `llm_hidden_size` floats into
+  `step_out.hidden_state`
+  (required by `MiniCpmOTtsStage` when `generate_audio` is enabled) and resizes
+  `logits` to `vocab_size`.
+  """
+
+  # pylint: disable=arguments-renamed
+  def forward(
+      self,
+      embeddings,
+      input_pos,
+      kv_cache,
+      mask,
+      local_mask=None,
+      **kwargs,
+  ):
+    if self.export_config.apply_gpu_composites:
+      kwargs["apply_gpu_composites"] = True
+    if self.export_config.use_sdpa_composite:
+      kwargs["use_sdpa_composite"] = True
+    inputs = self.adapt_inputs(
+        None,
+        embeddings,
+        input_pos,
+        kv_cache,
+        mask,
+        local_mask=local_mask,
+        use_bool_mask=self.export_config.extra_kwargs.get(
+            "use_bool_mask", False
+        ),
+        **kwargs,
+    )
+    inputs |= self.attention_kwargs()
+    include_hidden = bool(
+        self.export_config.extra_kwargs.get(
+            "include_decode_hidden_states", True
+        )
+    )
+    output = self.model(
+        **inputs,
+        output_hidden_states=include_hidden or bool(self.export_verifier),
+    )
+    logits = output.logits.to(torch.float32)
+    if include_hidden:
+      last_hidden = output.hidden_states[-1].to(torch.float32)
+      logits = torch.cat([logits, last_hidden], dim=-1)
+    extra_outputs = (
+        {"activations": output.hidden_states[-1]}
+        if self.export_verifier
+        else {}
+    )
+    return {
+        "kv_cache": output.past_key_values,
+        "logits": logits,
+        **extra_outputs,
+    }
 
 
 class _MiniCpmOLlmWeightsLoader(weights_loader_lib.HFCheckpointWeightsLoader):
@@ -1508,9 +1876,7 @@ class MiniCpmO:
         prefill_module = external_emb_module.LiteRTExportableModuleForDecoderOnlyLMPrefillExternalEmbedder(
             qwen_model, iter_config
         )
-        decode_module = external_emb_module.LiteRTExportableModuleForDecoderOnlyLMGenerateExternalEmbedder(
-            qwen_model, iter_config
-        )
+        decode_module = _MiniCpmOLlmGenerateModule(qwen_model, iter_config)
         for module in (prefill_module, decode_module):
           for sig_name, (inputs, dynamic_shapes) in module.get_sample_inputs(
               llm_config
@@ -1583,12 +1949,426 @@ class MiniCpmO:
 
     return self._maybe_quantize(out_path, quant_recipe)
 
+  def _copy_weight_norm(
+      self,
+      target: torch.Tensor,
+      weight_key: str,
+      orig0_key: str,
+      orig1_key: str,
+      strict: bool,
+      populated: set[int],
+  ) -> None:
+    """Copies either a plain `weight_key` or PyTorch `weight_norm` `(g, v)` pair."""
+    if self._get_weight(weight_key) is not None:
+      self._copy_weight(target, weight_key, strict=strict, populated=populated)
+      return
+    g = self._get_weight(orig0_key)
+    v = self._get_weight(orig1_key)
+    if g is not None and v is not None:
+      if v.shape != target.shape or g.shape[0] != target.shape[0]:
+        if strict:
+          raise ValueError(
+              f"Weight shape mismatch for ({orig0_key!r}, {orig1_key!r}):"
+              f" got g={tuple(g.shape)}, v={tuple(v.shape)}, expected"
+              f" {tuple(target.shape)}."
+          )
+        return
+      gf = g.to(dtype=torch.float32)
+      vf = v.to(dtype=torch.float32)
+      norm = vf.flatten(1).norm(dim=1, keepdim=True).clamp_min(1e-12)
+      while norm.ndim < vf.ndim:
+        norm = norm.unsqueeze(-1)
+      while gf.ndim < vf.ndim:
+        gf = gf.unsqueeze(-1)
+      w = (gf * vf / norm).to(dtype=target.dtype, device=target.device)
+      with torch.no_grad():
+        target.copy_(w)
+      populated.add(target.data_ptr())
+      return
+    if strict:
+      raise KeyError(
+          "Missing checkpoint weight; tried keys:"
+          f" {(weight_key, orig0_key, orig1_key)}."
+      )
+
+  @staticmethod
+  def _adapt_tensor_to_target(
+      target: torch.Tensor, src: torch.Tensor, populated: set[int]
+  ) -> None:
+    """Copies overlapping slices of `src` into `target` (zero-padding if needed)."""
+    src_f = src.to(dtype=target.dtype, device=target.device)
+    with torch.no_grad():
+      target.zero_()
+      slices = tuple(
+          slice(0, min(t_dim, s_dim))
+          for t_dim, s_dim in zip(target.shape, src_f.shape)
+      )
+      target[slices].copy_(src_f[slices])
+    populated.add(target.data_ptr())
+
+  def export_tts_projector(
+      self,
+      output_dir: str,
+      export_config: exportable_module_config.ExportableModuleConfig,
+  ) -> str:
+    """Exports LLM-to-TTS semantic projector (`tf_lite_tts_projector`) to TFLite."""
+    self._require_weights_or_random(export_config)
+    strict = not export_config.use_random_weights
+    llm_hidden = int(self._config.get("hidden_size", 4096))
+    tts_cfg = self._config.get("tts_config", {})
+    tts_hidden = int(tts_cfg.get("hidden_size", 768))
+    mod = MiniCpmOTtsProjectorModule(
+        llm_hidden_size=llm_hidden, tts_hidden_size=tts_hidden
+    ).eval()
+    populated: set[int] = set()
+    self._copy_weight(
+        mod.linear1.weight,
+        "tts.projector_semantic.linear1.weight",
+        "tts.projector.linear1.weight",
+        strict=strict,
+        populated=populated,
+    )
+    self._copy_weight(
+        mod.linear1.bias,
+        "tts.projector_semantic.linear1.bias",
+        "tts.projector.linear1.bias",
+        strict=strict,
+        populated=populated,
+    )
+    self._copy_weight(
+        mod.linear2.weight,
+        "tts.projector_semantic.linear2.weight",
+        "tts.projector.linear2.weight",
+        strict=strict,
+        populated=populated,
+    )
+    self._copy_weight(
+        mod.linear2.bias,
+        "tts.projector_semantic.linear2.bias",
+        "tts.projector.linear2.bias",
+        strict=strict,
+        populated=populated,
+    )
+    if strict:
+      self._verify_all_parameters_populated(mod, populated, "tts_projector")
+
+    sample_kwargs = {
+        "llm_hidden": torch.zeros(1, 1, llm_hidden, dtype=torch.float32)
+    }
+    out_path = os.path.join(output_dir, "tts_projector_fp32.tflite")
+    litert_torch.convert(mod, sample_kwargs=sample_kwargs).export(out_path)
+    del mod
+    gc.collect()
+    return self._maybe_quantize(out_path, export_config.quantization_recipe)
+
+  def export_tts_decoder(
+      self,
+      output_dir: str,
+      export_config: exportable_module_config.ExportableModuleConfig,
+  ) -> str:
+    """Exports autoregressive TTS decoder (`tf_lite_tts_decoder`) to TFLite."""
+    self._require_weights_or_random(export_config)
+    strict = not export_config.use_random_weights
+    tts_cfg = self._config.get("tts_config", {})
+    tts_hidden = int(tts_cfg.get("hidden_size", 768))
+    tts_inter = int(tts_cfg.get("intermediate_size", 3072))
+    default_tts_layers = (
+        min(int(tts_cfg.get("num_hidden_layers", 1)), 1)
+        if export_config.use_random_weights
+        else int(tts_cfg.get("num_hidden_layers", 20))
+    )
+    tts_layers = int(
+        export_config.extra_kwargs.get("tts_num_layers", default_tts_layers)
+    )
+    tts_heads = int(tts_cfg.get("num_attention_heads", 12))
+    tts_vocab = int(tts_cfg.get("num_audio_tokens", 6562))
+    tts_mel_bins = int(tts_cfg.get("num_mel_bins", 100))
+    default_min_steps = 4 if export_config.use_random_weights else 64
+    min_tts_steps = int(
+        export_config.extra_kwargs.get("min_tts_steps", default_min_steps)
+    )
+
+    mod = MiniCpmOTtsDecoderModule(
+        tts_hidden_size=tts_hidden,
+        tts_intermediate_size=tts_inter,
+        tts_num_layers=tts_layers,
+        tts_num_heads=tts_heads,
+        tts_vocab_size=tts_vocab,
+        tts_num_mel_bins=tts_mel_bins,
+        min_tts_steps=min_tts_steps,
+    ).eval()
+    populated: set[int] = set()
+    self._copy_weight(
+        mod.emb_code.weight,
+        "tts.emb_code.0.weight",
+        "tts.emb_code.weight",
+        strict=strict,
+        populated=populated,
+    )
+    emb_text = self._get_weight("tts.emb_text.weight")
+    if emb_text is not None:
+      audio_bos_id = int(tts_cfg.get("audio_bos_token_id", 151703))
+      if 0 <= audio_bos_id < emb_text.shape[0] and (
+          emb_text.shape[1] == tts_hidden
+      ):
+        with torch.no_grad():
+          mod.bos_emb.copy_(
+              emb_text[audio_bos_id]
+              .to(dtype=mod.bos_emb.dtype, device=mod.bos_emb.device)
+              .reshape(1, 1, tts_hidden)
+          )
+    for idx, layer in enumerate(mod.layers):
+      p = f"tts.model.layers.{idx}"
+      self._copy_weight(
+          layer.input_layernorm.weight,
+          f"{p}.input_layernorm.weight",
+          strict=strict,
+          populated=populated,
+      )
+      self._copy_weight(
+          layer.q_proj.weight,
+          f"{p}.self_attn.q_proj.weight",
+          strict=strict,
+          populated=populated,
+      )
+      self._copy_weight(
+          layer.k_proj.weight,
+          f"{p}.self_attn.k_proj.weight",
+          strict=strict,
+          populated=populated,
+      )
+      self._copy_weight(
+          layer.v_proj.weight,
+          f"{p}.self_attn.v_proj.weight",
+          strict=strict,
+          populated=populated,
+      )
+      self._copy_weight(
+          layer.o_proj.weight,
+          f"{p}.self_attn.o_proj.weight",
+          strict=strict,
+          populated=populated,
+      )
+      self._copy_weight(
+          layer.post_attention_layernorm.weight,
+          f"{p}.post_attention_layernorm.weight",
+          strict=strict,
+          populated=populated,
+      )
+      self._copy_weight(
+          layer.gate_proj.weight,
+          f"{p}.mlp.gate_proj.weight",
+          strict=strict,
+          populated=populated,
+      )
+      self._copy_weight(
+          layer.up_proj.weight,
+          f"{p}.mlp.up_proj.weight",
+          strict=strict,
+          populated=populated,
+      )
+      self._copy_weight(
+          layer.down_proj.weight,
+          f"{p}.mlp.down_proj.weight",
+          strict=strict,
+          populated=populated,
+      )
+    self._copy_weight(
+        mod.norm.weight,
+        "tts.model.norm.weight",
+        strict=strict,
+        populated=populated,
+    )
+    self._copy_weight_norm(
+        mod.head_code.weight,
+        "tts.head_code.0.weight",
+        "tts.head_code.0.parametrizations.weight.original0",
+        "tts.head_code.0.parametrizations.weight.original1",
+        strict=strict,
+        populated=populated,
+    )
+    mel_head_w = self._get_weight("tts.mel_head.weight")
+    if mel_head_w is not None and mel_head_w.shape == (
+        tts_mel_bins,
+        tts_hidden,
+    ):
+      with torch.no_grad():
+        mod.mel_proj.copy_(
+            mel_head_w.t().to(
+                dtype=mod.mel_proj.dtype, device=mod.mel_proj.device
+            )
+        )
+    if strict:
+      self._verify_all_parameters_populated(mod, populated, "tts_decoder")
+
+    sample_kwargs = {
+        "cond_emb": torch.zeros(1, 1, tts_hidden, dtype=torch.float32),
+        "prev_audio_code": torch.zeros(1, 1, dtype=torch.int32),
+        "step_idx": torch.zeros(1, dtype=torch.int32),
+    }
+    out_path = os.path.join(output_dir, "tts_decoder_fp32.tflite")
+    litert_torch.convert(mod, sample_kwargs=sample_kwargs).export(out_path)
+    del mod
+    gc.collect()
+    return self._maybe_quantize(out_path, export_config.quantization_recipe)
+
+  def _load_hift_vocoder_weights(
+      self, mod: MiniCpmOAudioVocoderModule, hift_path: str, populated: set[int]
+  ) -> None:
+    """Adapts CosyVoice2 HiFT (`assets/token2wav/hift.pt`) weights into `mod`."""
+    try:
+      hift_sd = torch.load(hift_path, map_location="cpu", weights_only=True)
+    except TypeError:  # pragma: no cover
+      hift_sd = torch.load(hift_path, map_location="cpu")
+    if not isinstance(hift_sd, dict):
+      return
+
+    def _resolve_wn(prefix: str) -> torch.Tensor | None:
+      if f"{prefix}.weight" in hift_sd:
+        return hift_sd[f"{prefix}.weight"]
+      g = hift_sd.get(f"{prefix}.parametrizations.weight.original0")
+      v = hift_sd.get(f"{prefix}.parametrizations.weight.original1")
+      if g is not None and v is not None:
+        gf = g.to(torch.float32)
+        vf = v.to(torch.float32)
+        norm = vf.flatten(1).norm(dim=1, keepdim=True).clamp_min(1e-12)
+        while norm.ndim < vf.ndim:
+          norm = norm.unsqueeze(-1)
+        while gf.ndim < vf.ndim:
+          gf = gf.unsqueeze(-1)
+        return gf * vf / norm
+      return None
+
+    w_pre = _resolve_wn("conv_pre")
+    b_pre = hift_sd.get("conv_pre.bias")
+    if w_pre is not None:
+      self._adapt_tensor_to_target(mod.input_conv.weight, w_pre, populated)
+    if b_pre is not None and mod.input_conv.bias is not None:
+      self._adapt_tensor_to_target(mod.input_conv.bias, b_pre, populated)
+
+    for idx, (up, res) in enumerate(zip(mod.upsamples, mod.res_convs)):
+      w_up = _resolve_wn(f"ups.{idx}")
+      b_up = hift_sd.get(f"ups.{idx}.bias")
+      if w_up is not None:
+        self._adapt_tensor_to_target(up.weight, w_up, populated)
+      if b_up is not None and up.bias is not None:
+        self._adapt_tensor_to_target(up.bias, b_up, populated)
+
+      rb_idx = idx * 3
+      w_res = _resolve_wn(f"resblocks.{rb_idx}.convs1.0")
+      b_res = hift_sd.get(f"resblocks.{rb_idx}.convs1.0.bias")
+      if w_res is not None:
+        self._adapt_tensor_to_target(res.weight, w_res, populated)
+      if b_res is not None and res.bias is not None:
+        self._adapt_tensor_to_target(res.bias, b_res, populated)
+
+    w_post = _resolve_wn("conv_post")
+    b_post = hift_sd.get("conv_post.bias")
+    if w_post is not None:
+      self._adapt_tensor_to_target(mod.output_conv.weight, w_post, populated)
+    if b_post is not None and mod.output_conv.bias is not None:
+      self._adapt_tensor_to_target(mod.output_conv.bias, b_post, populated)
+
+  def export_audio_vocoder(
+      self,
+      output_dir: str,
+      export_config: exportable_module_config.ExportableModuleConfig,
+  ) -> str:
+    """Exports 24 kHz mel-to-waveform vocoder (`tf_lite_audio_vocoder`) to TFLite."""
+    self._require_weights_or_random(export_config)
+    strict = not export_config.use_random_weights
+    tts_cfg = self._config.get("tts_config", {})
+    num_mel_bins = int(tts_cfg.get("num_mel_bins", 100))
+    default_hidden_ch = 32 if export_config.use_random_weights else 256
+    hidden_channels = int(
+        export_config.extra_kwargs.get(
+            "vocoder_hidden_channels", default_hidden_ch
+        )
+    )
+    chunk_frames = int(
+        export_config.extra_kwargs.get("vocoder_chunk_frames", 16)
+    )
+    mod = MiniCpmOAudioVocoderModule(
+        num_mel_bins=num_mel_bins, hidden_channels=hidden_channels
+    ).eval()
+    populated: set[int] = set()
+    all_keys = set(self._weight_map) | set(self._state_dict)
+    has_vocoder_keys = any(k.startswith("vocoder.") for k in all_keys)
+    hift_path = os.path.join(self.model_dir, "assets", "token2wav", "hift.pt")
+    if has_vocoder_keys or (strict and not os.path.exists(hift_path)):
+      self._copy_weight(
+          mod.input_conv.weight,
+          "vocoder.input_conv.weight",
+          strict=strict,
+          populated=populated,
+      )
+      if mod.input_conv.bias is not None:
+        self._copy_weight(
+            mod.input_conv.bias,
+            "vocoder.input_conv.bias",
+            strict=strict,
+            populated=populated,
+        )
+      for idx, (up, res) in enumerate(zip(mod.upsamples, mod.res_convs)):
+        self._copy_weight(
+            up.weight,
+            f"vocoder.upsamples.{idx}.weight",
+            strict=strict,
+            populated=populated,
+        )
+        if up.bias is not None:
+          self._copy_weight(
+              up.bias,
+              f"vocoder.upsamples.{idx}.bias",
+              strict=strict,
+              populated=populated,
+          )
+        self._copy_weight(
+            res.weight,
+            f"vocoder.res_convs.{idx}.weight",
+            strict=strict,
+            populated=populated,
+        )
+        if res.bias is not None:
+          self._copy_weight(
+              res.bias,
+              f"vocoder.res_convs.{idx}.bias",
+              strict=strict,
+              populated=populated,
+          )
+      self._copy_weight(
+          mod.output_conv.weight,
+          "vocoder.output_conv.weight",
+          strict=strict,
+          populated=populated,
+      )
+      if mod.output_conv.bias is not None:
+        self._copy_weight(
+            mod.output_conv.bias,
+            "vocoder.output_conv.bias",
+            strict=strict,
+            populated=populated,
+        )
+      if strict:
+        self._verify_all_parameters_populated(mod, populated, "audio_vocoder")
+    elif os.path.exists(hift_path):
+      self._load_hift_vocoder_weights(mod, hift_path, populated)
+      if strict:
+        self._verify_all_parameters_populated(mod, populated, "audio_vocoder")
+
+    sample_kwargs = {
+        "mel": torch.zeros(1, num_mel_bins, chunk_frames, dtype=torch.float32)
+    }
+    out_path = os.path.join(output_dir, "audio_vocoder_fp32.tflite")
+    litert_torch.convert(mod, sample_kwargs=sample_kwargs).export(out_path)
+    del mod
+    gc.collect()
+    return self._maybe_quantize(out_path, export_config.quantization_recipe)
+
   def export(
       self, export_config: exportable_module_config.ExportableModuleConfig
   ) -> dict[str, str]:
-    """Exports MiniCPM-o 4.5 vision, audio, text-embedder, and LLM submodules."""
-    # TODO(b/568027544): Add TTS / audio-output sub-model export
-    # (`tts_projector`, `tts_decoder`, `audio_vocoder`) in a follow-up CL.
+    """Exports MiniCPM-o 4.5 vision, audio, text-embedder, LLM, and TTS submodules."""
     output_dir = (
         (
             export_config.work_dir
@@ -1603,7 +2383,11 @@ class MiniCpmO:
     os.makedirs(output_dir, exist_ok=True)
     artifacts: dict[str, str] = {}
 
-    targets = set(export_config.extra_kwargs.get("targets", ["all"]))
+    raw_targets = export_config.extra_kwargs.get("targets", ["all"])
+    if isinstance(raw_targets, str):
+      targets = {t.strip() for t in raw_targets.split(",") if t.strip()}
+    else:
+      targets = set(raw_targets)
     export_all = "all" in targets
 
     if (
@@ -1628,6 +2412,18 @@ class MiniCpmO:
       artifacts["llm_backbone"] = self.export_llm_backbone(
           output_dir, export_config
       )
+    if export_all or "tts_projector" in targets:
+      artifacts["tts_projector"] = self.export_tts_projector(
+          output_dir, export_config
+      )
+    if export_all or "tts_decoder" in targets:
+      artifacts["tts_decoder"] = self.export_tts_decoder(
+          output_dir, export_config
+      )
+    if export_all or "audio_vocoder" in targets:
+      artifacts["audio_vocoder"] = self.export_audio_vocoder(
+          output_dir, export_config
+      )
 
     return artifacts
 
@@ -1635,10 +2431,12 @@ class MiniCpmO:
       self, export_config: exportable_module_config.ExportableModuleConfig
   ) -> any2any_metadata_pb2.Any2AnyMetadata:
     """Builds Any2AnyMetadata proto for the exported MiniCPM-o 4.5 model."""
-    del export_config
     v_cfg = self._config.get("vision_config", {})
     a_cfg = self._config.get("audio_config", {})
     tts_cfg = self._config.get("tts_config", {})
+    generate_audio = bool(
+        export_config.extra_kwargs.get("generate_audio", False)
+    )
 
     minicpm_proto = any2any_model_type_pb2.MiniCpmO(
         llm_hidden_size=int(self._config.get("hidden_size", 4096)),
@@ -1657,7 +2455,7 @@ class MiniCpmO:
         audio_pool_step=int(
             self._config.get("audio_pool_step", a_cfg.get("pool_step", 5))
         ),
-        generate_audio=False,
+        generate_audio=generate_audio,
         max_new_tokens=512,
         max_tts_tokens=1024,
         voice="default",
