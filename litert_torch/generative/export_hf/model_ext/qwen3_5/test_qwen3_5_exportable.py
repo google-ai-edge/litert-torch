@@ -150,7 +150,11 @@ class Qwen35ExportableTest(absltest.TestCase):
         hf_conv = hf_conv[0] if isinstance(hf_conv, dict) else hf_conv
         hf_rec = getattr(hf_cache.layers[i], "recurrent_states")
         hf_rec = hf_rec[0] if isinstance(hf_rec, dict) else hf_rec
-        torch.testing.assert_close(export_cache.layers[i].conv_states, hf_conv[:, :, -conv_L:], rtol=1e-3, atol=1e-3)
+        ref_conv = hf_conv[:, :, -conv_L:]
+        ref_conv = ref_conv.transpose(1, 2)
+        torch.testing.assert_close(
+            export_cache.layers[i].conv_states, ref_conv, rtol=1e-3, atol=1e-3
+        )
         torch.testing.assert_close(export_cache.layers[i].recurrent_states, hf_rec, rtol=1e-3, atol=1e-3)
       else:
         torch.testing.assert_close(export_cache.layers[i].keys[:, :, :128], hf_cache.layers[i].keys, rtol=5e-3, atol=5e-3)  # pyrefly: ignore[missing-attribute]

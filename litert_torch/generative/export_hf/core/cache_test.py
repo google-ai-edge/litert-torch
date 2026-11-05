@@ -303,7 +303,7 @@ class CacheTest(googletest.TestCase):
 
     conv_layer = kv_cache.layers[1]
     self.assertIsNotNone(conv_layer.recurrent_states)
-    self.assertEqual(conv_layer.conv_states.shape, (1, 2 * 16 * 2 + 4 * 16, 3))
+    self.assertEqual(conv_layer.conv_states.shape, (1, 3, 2 * 16 * 2 + 4 * 16))
     self.assertEqual(conv_layer.recurrent_states.shape, (1, 4, 16, 16))
     self.assertEqual(conv_layer.conv_states.dtype, torch.float32)
     self.assertEqual(conv_layer.recurrent_states.dtype, torch.float32)
@@ -317,6 +317,25 @@ class CacheTest(googletest.TestCase):
     new_r = torch.ones_like(conv_layer.recurrent_states)
     conv_layer.update_recurrent_state(new_r)
     self.assertTrue(torch.allclose(conv_layer.recurrent_states, new_r))
+
+    # Test update_conv_state (single-token decode)
+    conv_dim = conv_layer.conv_states.shape[-1]
+    initial_c = torch.randn(1, 3, conv_dim, dtype=torch.float16)
+    conv_layer.conv_states.copy_(initial_c)
+    new_token_c = torch.randn(1, 1, conv_dim, dtype=torch.float16)
+    updated_c = conv_layer.update_conv_state(new_token_c)
+    expected_c = torch.cat([initial_c[:, 1:, :], new_token_c], dim=1)
+    self.assertTrue(torch.allclose(updated_c, expected_c))
+
+    # Test update_conv_state (multi-token prefill with mask)
+    prefill_c = torch.randn(1, 5, conv_dim, dtype=torch.float16)
+    valid_mask = torch.tensor([[1.0, 1.0, 1.0, 1.0, 0.0]])
+    updated_prefill_c = conv_layer.update_conv_state(
+        prefill_c, valid_mask=valid_mask
+    )
+    padded_input = torch.cat([expected_c, prefill_c], dim=1)
+    expected_prefill_c = padded_input[:, 4:7, :]
+    self.assertTrue(torch.allclose(updated_prefill_c, expected_prefill_c))
 
     # Test flatten / unflatten roundtrip
     flattened, context = cache_lib._flatten_kvc_t(kv_cache)

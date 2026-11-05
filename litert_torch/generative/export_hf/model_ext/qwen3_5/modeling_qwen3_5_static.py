@@ -276,25 +276,23 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
           use_silu=True,
       )
     else:
-      mixed_qkv_masked = mixed_qkv.transpose(1, 2)
-
-      full_qkv = torch.cat([conv_state, mixed_qkv_masked], dim=-1)
+      # conv_state is channels-last (NWC): [batch, state_len, conv_dim].
+      full_qkv = torch.cat([conv_state, mixed_qkv], dim=1)
       conv_out = F.conv1d(
-          full_qkv,
+          full_qkv.transpose(1, 2),
           self.conv1d.weight,
           self.conv1d.bias,
           padding=0,
           groups=self.conv_dim,
       )
       conv_out = F.silu(conv_out[:, :, -seq_len:]).transpose(1, 2)
-
       if num_valid_tokens is not None:
         indices = num_valid_tokens + torch.arange(
             state_len, device=full_qkv.device, dtype=torch.int32
         )
-        new_conv_state = torch.ops.tfl.gather(full_qkv, indices, 2)
+        new_conv_state = torch.ops.tfl.gather(full_qkv, indices, 1)
       else:
-        new_conv_state = full_qkv[:, :, -state_len:]
+        new_conv_state = full_qkv[:, -state_len:, :]
 
     query, key, value = torch.split(
         conv_out, [self.key_dim, self.key_dim, self.value_dim], dim=-1
@@ -380,8 +378,8 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
     else:
       conv_state = torch.zeros(
           batch_size,
-          self.conv_dim,
           state_len,
+          self.conv_dim,
           dtype=hidden_states.dtype,
           device=hidden_states.device,
       )
