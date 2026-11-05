@@ -618,6 +618,13 @@ class ModelExtension:
     callers merge them over the hardware target base settings and under their
     own explicit arguments.
 
+    Note: Built-in extensions key off `config.json` (`model_type` and shape
+    fields) and target the official base/instruct checkpoints for each family.
+    When exporting custom fine-tunes or derivative checkpoints that modify the
+    chat template, stop/BOS tokens, or multimodal token/patch settings, callers
+    should override `litert_lm_llm_metadata_override='none'` (or a custom
+    `.pbtext` path) and/or `jinja_chat_template_override`.
+
     Args:
       config_dict: Parsed `config.json` (or `model_index.json`) contents, or an
         empty dict if the checkpoint has none.

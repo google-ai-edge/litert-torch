@@ -16,7 +16,10 @@
 
 import dataclasses
 import os
+import pathlib
 import re
+import urllib.error
+import urllib.request
 
 from google.protobuf import message
 from google.protobuf import text_format
@@ -757,10 +760,119 @@ def package_any2any_model(
 
 _PBTEXT_SUFFIXES = ('.pbtext', '.pbtxt', '.textproto', '.txtpb', '.textpb')
 
+DEFAULT_LITERT_LM_MODELS_REF = 'main'
+LITERT_LM_MODELS_REF_ENV_VAR = 'LITERT_LM_MODELS_REF'
+_COMMIT_SHA = re.compile(r'^[0-9a-f]{7,40}$')
+_CANONICAL_LITERT_LM_METADATA_RELPATHS = {
+    'qwen3': 'qwen3/LlmMetadataProto.pbtext',
+    'qwen2_5': 'qwen2_5/LlmMetadataProto.pbtext',
+    'qwen3_5': 'qwen3_5/LlmMetadataProto.pbtext',
+    'lfm2': 'lfm2/LlmMetadataProto.pbtext',
+    'minicpm5': 'minicpm5/LlmMetadataProto.pbtext',
+    'gemma4': 'gemma4/LlmMetadataProto.pbtext',
+    'gemma4_12b': 'gemma4/LlmMetadataProto_12b.pbtext',
+    'gemma4_26b_31b': 'gemma4/LlmMetadataProto_26b_31b.pbtext',
+}
+CANONICAL_LITERT_LM_FAMILIES = frozenset(
+    _CANONICAL_LITERT_LM_METADATA_RELPATHS
+)
+
+_RAW_URL_TEMPLATE = (
+    'https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/'
+    '{ref}/models/{relpath}'
+)
+_CACHE_SUBDIR = os.path.join('litert-torch', 'litert_lm_models')
+_LEGACY_CLI_CACHE_SUBDIR = os.path.join('litert-cli', 'litert_lm_models')
+
+
+def _default_cache_root() -> pathlib.Path:
+  xdg = os.environ.get('XDG_CACHE_HOME')
+  return pathlib.Path(xdg) if xdg else (pathlib.Path.home() / '.cache')
+
+
+def fetch_canonical_metadata(
+    family: str,
+    *,
+    ref: str | None = None,
+    cache_dir: pathlib.Path | str | None = None,
+) -> pathlib.Path:
+  """Returns the local path to canonical `<family>` metadata, fetching if needed.
+
+  A commit SHA ref is served from the local cache once fetched. Moving refs
+  such as `main` are fetched on every call; the cached copy is used when the
+  fetch fails (e.g. offline).
+
+  Args:
+    family: LiteRT-LM model family key (e.g. `'qwen3'`, `'gemma4_12b'`).
+    ref: LiteRT-LM git ref; defaults to `LITERT_LM_MODELS_REF` or `'main'`.
+    cache_dir: Optional directory override for cached `.pbtext` files.
+
+  Returns:
+    Path to the local `.pbtext` file.
+
+  Raises:
+    RuntimeError: If the config cannot be fetched and is not cached.
+  """
+  resolved_ref = (
+      ref
+      or os.environ.get(LITERT_LM_MODELS_REF_ENV_VAR)
+      or DEFAULT_LITERT_LM_MODELS_REF
+  )
+  cache_root = _default_cache_root()
+  resolved_cache_dir = (
+      pathlib.Path(cache_dir)
+      if cache_dir is not None
+      else (cache_root / _CACHE_SUBDIR)
+  )
+  cached = resolved_cache_dir / resolved_ref / f'{family}.pbtext'
+  legacy_cached = (
+      cache_root / _LEGACY_CLI_CACHE_SUBDIR / resolved_ref / f'{family}.pbtext'
+      if cache_dir is None
+      else None
+  )
+  if _COMMIT_SHA.match(resolved_ref):
+    if cached.is_file():
+      return cached
+    if legacy_cached is not None and legacy_cached.is_file():
+      return legacy_cached
+
+  relpath = _CANONICAL_LITERT_LM_METADATA_RELPATHS.get(
+      family, f'{family}/LlmMetadataProto.pbtext'
+  )
+  url = _RAW_URL_TEMPLATE.format(ref=resolved_ref, relpath=relpath)
+  try:
+    req = urllib.request.Request(
+        url, headers={'User-Agent': 'litert-torch'}
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+      data = resp.read()
+  except (urllib.error.URLError, OSError, TimeoutError) as exc:
+    if cached.is_file():
+      return cached
+    if legacy_cached is not None and legacy_cached.is_file():
+      return legacy_cached
+    raise RuntimeError(
+        f"Could not fetch canonical LiteRT-LM config for '{family}' from {url}:"
+        f' {exc}'
+    ) from exc
+
+  try:
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cached.with_suffix('.pbtext.tmp')
+    tmp.write_bytes(data)
+    tmp.replace(cached)
+  except OSError as exc:
+    raise RuntimeError(
+        f'Fetched {url} but could not write cache file {cached}: {exc}'
+    ) from exc
+  return cached
+
 
 def _parse_llm_metadata_override_file(
     filepath: str,
     llm_metadata: llm_metadata_pb2.LlmMetadata,
+    *,
+    allow_unknown_field: bool = False,
 ) -> None:
   """Parses a textproto or binary `LlmMetadata` file into `llm_metadata`."""
   with open(filepath, 'rb') as f:
@@ -768,7 +880,11 @@ def _parse_llm_metadata_override_file(
   text_parse_error = None
   if not override_is_binary_only(filepath):
     try:
-      text_format.Parse(raw.decode('utf-8'), llm_metadata)
+      text_format.Parse(
+          raw.decode('utf-8'),
+          llm_metadata,
+          allow_unknown_field=allow_unknown_field,
+      )
       return
     except UnicodeDecodeError:
       if filepath.endswith(_PBTEXT_SUFFIXES):
@@ -797,8 +913,10 @@ def _resolve_llm_metadata_override_path(
     override: str,
     export_config: exportable_module.ExportableModuleConfig,
     work_dir: str | None,
-) -> str:
+) -> str | None:
   """Returns the `LlmMetadata` override path, syncing `max_num_tokens`."""
+  if not override or override.lower() == 'none':
+    return None
   target_dir = work_dir or export_config.output_dir or '.'
   max_num_tokens = (
       export_config.llm_metadata_max_num_tokens_override
@@ -807,6 +925,18 @@ def _resolve_llm_metadata_override_path(
   llm_metadata = llm_metadata_pb2.LlmMetadata()
   if os.path.exists(override):
     _parse_llm_metadata_override_file(override, llm_metadata)
+  elif override in CANONICAL_LITERT_LM_FAMILIES:
+    try:
+      canonical_path = fetch_canonical_metadata(override)
+    except RuntimeError as exc:
+      print(
+          f'Warning: {exc}\n'
+          'Falling back to the metadata generated by export_hf.'
+      )
+      return None
+    _parse_llm_metadata_override_file(
+        str(canonical_path), llm_metadata, allow_unknown_field=True
+    )
   elif override.endswith((*_PBTEXT_SUFFIXES, '.pb')) or (
       ':' not in override and '{' not in override
   ):
@@ -818,6 +948,48 @@ def _resolve_llm_metadata_override_path(
   with open(out_path, 'wb') as f:
     f.write(llm_metadata.SerializeToString())
   return out_path
+
+
+def _resolve_chat_templates(
+    tokenizer,
+    export_config: exportable_module.ExportableModuleConfig,
+    *,
+    use_jinja_template: bool,
+):
+  """Resolves the chat template string or parsed prompt template tuples."""
+  if export_config.jinja_chat_template_override:
+    if os.path.exists(export_config.jinja_chat_template_override):
+      with open(export_config.jinja_chat_template_override, 'rt') as f:
+        return f.read()
+    try:
+      # pylint: disable=g-import-not-at-top
+      import huggingface_hub
+    except ImportError as e:
+      raise ImportError(
+          'Please install huggingface_hub to use remote chat template.'
+      ) from e
+    repo_id = export_config.jinja_chat_template_override
+    filename = 'chat_template.jinja'
+    try:
+      chat_templates_path = huggingface_hub.hf_hub_download(
+          repo_id=repo_id, filename=filename
+      )
+      with open(chat_templates_path, 'rt') as f:
+        return f.read()
+    except (
+        huggingface_hub.utils.EntryNotFoundError,
+        huggingface_hub.utils.HfHubHTTPError,
+        OSError,
+        ValueError,
+    ) as exc:
+      print(
+          'Warning: Could not download remote chat template from'
+          f" '{repo_id}/{filename}': {exc}\n"
+          "Falling back to the tokenizer's chat template."
+      )
+  if use_jinja_template:
+    return getattr(tokenizer, 'chat_template', '')
+  return parse_chat_template(tokenizer)
 
 
 @progress.task('Package model')
@@ -856,35 +1028,23 @@ def package_model(
   tokenizer_model_path = exported_model_artifacts.tokenizer_model_path
   if export_config.tokenizer_path_override:
     tokenizer_model_path = export_config.tokenizer_path_override
-  if export_config.jinja_chat_template_override:
-    if os.path.exists(export_config.jinja_chat_template_override):
-      chat_templates_path = export_config.jinja_chat_template_override
-    else:
-      try:
-        # pylint: disable=g-import-not-at-top
-        import huggingface_hub
-      except ImportError as e:
-        raise ImportError(
-            'Please install huggingface_hub to use remote chat template.'
-        ) from e
-      repo_id = export_config.jinja_chat_template_override
-      filename = 'chat_template.jinja'
-      chat_templates_path = huggingface_hub.hf_hub_download(
-          repo_id=repo_id, filename=filename
-      )
-    with open(chat_templates_path, 'rt') as f:
-      chat_templates = f.read()
-  elif use_jinja_template:
-    chat_templates = getattr(tokenizer, 'chat_template', '')
-  else:
-    chat_templates = parse_chat_template(tokenizer)
-  if not chat_templates:
-    print('WARNING: Chat template is not found. Using empty template.')
-  if export_config.litert_lm_llm_metadata_override:
+  override = export_config.litert_lm_llm_metadata_override
+  llm_metadata_path = None
+  canonical_fallback = False
+  if override and str(override).lower() != 'none':
     llm_metadata_path = _resolve_llm_metadata_override_path(
-        export_config.litert_lm_llm_metadata_override, export_config, work_dir
+        override, export_config, work_dir
     )
-  else:
+    if llm_metadata_path is None:
+      canonical_fallback = True
+  if llm_metadata_path is None:
+    chat_templates = _resolve_chat_templates(
+        tokenizer,
+        export_config,
+        use_jinja_template=use_jinja_template and not canonical_fallback,
+    )
+    if not chat_templates:
+      print('WARNING: Chat template is not found. Using empty template.')
     llm_metadata = build_llm_metadata(
         source_model_artifacts,
         export_config,

@@ -72,6 +72,7 @@ _CPU_GPU_LLM_KWARGS = types.MappingProxyType({
     'prefill_lengths': (128, 1024),
     'cache_length': 32771,
     'llm_metadata_max_num_tokens_override': 4096,
+    'use_jinja_template': False,
 })
 
 # Generic NPU split-cache export settings for LLMs/VLMs (`npu`, `npu:<vendor>`).
@@ -84,6 +85,7 @@ _NPU_LLM_KWARGS = types.MappingProxyType({
     'prefill_lengths': (128,),
     'cache_length': 1024,
     'quantization_recipe': 'dynamic_wi8_afp32',
+    'use_jinja_template': False,
 })
 
 # Architecture suffixes that export_hf's generic text-generation path loads with
@@ -146,11 +148,12 @@ def parse_target(target: str | None) -> TargetSpec:
   - `None`, `''`, `'cpu_gpu'`, `'cpu'`, `'gpu'`: Resolves to the `'cpu_gpu'`
     family.
   - `'npu'`: Generic uncompiled NPU split-cache export.
-  - `'npu:<vendor>'`: Vendor-specific uncompiled NPU split-cache export (e.g.
-    `'npu:qualcomm'` / `'npu:qc'`, `'npu:mediatek'` / `'npu:mtk'`,
-    `'npu:intel'`, `'npu:google_tensor'`, `'npu:samsung'` / `'npu:slsi'`).
-  - `'npu:<vendor>:<soc>'`: Vendor + SoC NPU target (e.g.
-    `'npu:qualcomm:sm8750'`).
+  - `'npu:<vendor>'`: Vendor-specific uncompiled NPU split-cache export (where
+    `<vendor>` is a key or alias in `vendor_configs.VENDOR_CONFIGS`, e.g.
+    `'npu:qualcomm'`, `'npu:qc'`, `'npu:mediatek'`, `'npu:mtk'`, `'npu:intel'`,
+    `'npu:google_tensor'`, `'npu:samsung'`, `'npu:slsi'`).
+  - `'npu:<vendor>:<soc>'`: Vendor + SoC NPU target (reserved for SoC-specific
+    AOT compilation).
 
   Args:
     target: Raw target string, or `None` for the default `'cpu_gpu'` target.
@@ -379,12 +382,10 @@ def _find_registered_extensions(
       extensions.append(extension)
   if extensions:
     return model_type, extensions
-  if config.get('model_type'):
-    # A regular checkpoint without a registered extension (e.g. a generic
-    # causal LM): export_hf's generic path handles it.
-    return config['model_type'], []
 
-  # Diffusers pipelines and standalone TTS checkpoints have no `model_type`.
+  # Diffusers pipelines, standalone TTS checkpoints, and checkpoints that
+  # reuse a generic `model_type` (e.g. MiniCPM5 with `model_type='llama'`) are
+  # matched via `ModelExtension.match_checkpoint`.
   for inference_task in (task,) if task else _INFERENCE_TASKS:
     config_dict = dict(
         model_index
@@ -396,7 +397,14 @@ def _find_registered_extensions(
     )
     if inferred:
       extension = model_ext_extension.get_model_extension(inferred)
-      return inferred, [extension] if extension is not None else []
+      return (
+          config.get('model_type') or inferred,
+          [extension] if extension is not None else [],
+      )
+  if config.get('model_type'):
+    # A regular checkpoint without a registered extension (e.g. a generic
+    # causal LM): export_hf's generic path handles it.
+    return config['model_type'], []
   return None, []
 
 
@@ -451,14 +459,10 @@ def _resolve_plan(
 
   target_spec = parse_target(target)
   if target_spec.soc is not None:
-    # TODO(weiyiw): Support SoC-targeted AOT compilation (npu:<vendor>:<soc>).
-    # Note that qualcomm/mediatek/samsung require calibration while
-    # google_tensor and intel do not.
     raise NotImplementedError(
-        f"SoC-targeted NPU export ('{target_spec.canonical}') with calibration"
-        ' and AOT compilation is not yet implemented in export_hf.export. Use'
-        f" target='npu:{target_spec.vendor}' to export the uncompiled"
-        ' split-cache model first.'
+        f"SoC-targeted NPU AOT compilation ('{target_spec.canonical}') is not"
+        f" yet supported in export(). Use target='npu:{target_spec.vendor}' to"
+        ' export the uncompiled split-cache model.'
     )
 
   requested_task = _normalize_task(task)
@@ -504,6 +508,19 @@ def _resolve_plan(
     export_kwargs[key] = _normalize_kwarg_value(value)
     sources[key] = SOURCE_MODEL
   for key, value in overrides.items():
+    if (
+        key == 'litert_lm_llm_metadata_override'
+        and (value is None or str(value).lower() == 'none')
+    ):
+      export_kwargs[key] = None
+      sources[key] = SOURCE_USER
+      if (
+          'use_jinja_template' not in overrides
+          and not export_kwargs.get('jinja_chat_template_override')
+      ):
+        export_kwargs['use_jinja_template'] = False
+        sources['use_jinja_template'] = SOURCE_TARGET
+      continue
     export_kwargs[key] = value
     sources[key] = SOURCE_USER
 
@@ -610,7 +627,7 @@ def _should_run_compilation_pipeline(
   return (
       export_config.aot_backend is not None
       and export_config.use_litert_lm_compiler
-  ) or export_config.calibration_dataset_dir is not None
+  ) or (export_config.calibration_dataset_dir is not None)
 
 
 def _warn_if_legacy_compile(
@@ -704,6 +721,8 @@ _NULLABLE_QUANTIZATION_KEYS = frozenset({
     'quantization_recipe',
     'vision_encoder_quantization_recipe',
     'audio_encoder_quantization_recipe',
+    'litert_lm_llm_metadata_override',
+    'jinja_chat_template_override',
 })
 
 
@@ -742,6 +761,7 @@ def export(
     cache_implementation: str | None = None,
     auto_model_override: str | None = None,
     use_jinja_template: bool | None = None,
+    jinja_chat_template_override: str | None = _UNSET,
     bundle_litert_lm: bool | None = None,
     externalize_weights: bool | None = None,
     experimental_use_mixed_precision: bool | None = None,
@@ -753,7 +773,7 @@ def export(
     t2i_output_image_size: int | None = None,
     stateful_after: int | None = None,
     litert_lm_model_type_override: str | None = None,
-    litert_lm_llm_metadata_override: str | None = None,
+    litert_lm_llm_metadata_override: str | None = _UNSET,
     sampler_top_p: float | None = None,
     sampler_temperature: float | None = None,
     sampler_top_k: int | None = None,
@@ -791,6 +811,19 @@ def export(
      `npu` / `npu:<vendor>`).
   3. `ModelExtension.get_export_defaults` of the checkpoint's extension.
   4. Explicit caller arguments passed to `export(...)`.
+
+  Note on built-in `LlmMetadata` and chat template defaults:
+    Built-in `ModelExtension`s for several families (`qwen2`, `qwen3`,
+    `qwen3_5`, `lfm2`, `lfm2_vl`, `minicpm5`, `gemma4`, `gemma4_unified`) set
+    `litert_lm_llm_metadata_override` (fetched from the
+    `google-ai-edge/LiteRT-LM` `models/` directory at `LITERT_LM_MODELS_REF`,
+    defaulting to `main`) or `jinja_chat_template_override` tuned for official
+    base/instruct checkpoints. These defaults may be wrong for custom
+    fine-tunes, derivative checkpoints with modified chat templates or stop/BOS
+    tokens, or non-standard vision patch counts. Pass
+    `litert_lm_llm_metadata_override='none'` (and/or
+    `jinja_chat_template_override=''`) to synthesize metadata from the
+    checkpoint's own tokenizer, or pass a custom `.pbtext` / `.jinja` path.
 
   Args:
     model: The name of the HuggingFace Transformers model to export, or the path
@@ -862,6 +895,12 @@ def export(
     cache_implementation: The cache implementation to use.
     auto_model_override: Overriding the AutoModel class to use for export.
     use_jinja_template: Whether to use jinja template.
+    jinja_chat_template_override: Optional local file path or Hugging Face repo
+      id containing `chat_template.jinja` to override the chat template. Note
+      that some built-in extensions (e.g. `gemma4` E2B/E4B) set a default remote
+      template for official checkpoints; pass `jinja_chat_template_override=''`
+      when exporting custom fine-tunes whose own `tokenizer.chat_template`
+      should be preserved.
     bundle_litert_lm: Whether to bundle the model as a LiteRT LM file.
     externalize_weights: Whether to move eligible TFLite weight tensors into a
       separate `tflite_weights` section when packaging the `.litertlm` file.
@@ -877,7 +916,12 @@ def export(
     stateful_after: If >= 0, the model runs in stateful mode after this many
       tokens.
     litert_lm_model_type_override: Overriding the LiteRT LM model type.
-    litert_lm_llm_metadata_override: Overriding the LiteRT LM LLM metadata.
+    litert_lm_llm_metadata_override: Overriding the LiteRT LM LLM metadata (a
+      local `.pbtext`/`.pb` path, inline textproto, canonical family key in
+      `litert_lm_builder.CANONICAL_LITERT_LM_FAMILIES`, or `'none'` to disable
+      any built-in extension metadata preset and synthesize `LlmMetadata` from
+      the checkpoint's own tokenizer/config, which is recommended for custom
+      fine-tunes).
     sampler_top_p: The top_p sampling parameter.
     sampler_temperature: The temperature sampling parameter.
     sampler_top_k: The top_k sampling parameter.

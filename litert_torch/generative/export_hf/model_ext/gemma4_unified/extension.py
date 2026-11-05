@@ -36,11 +36,17 @@ class Gemma4UnifiedExtension(extension_lib.ModelExtension):
 
   def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
     """See base class."""
-    del config_dict, target
+    del target
     vlm = task in (None, extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT)
     return extension_lib.ExportDefaults(
         task=task or extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT,
-        export_kwargs={'export_vision_encoder': vlm},
+        export_kwargs={
+            'export_vision_encoder': vlm,
+            'use_jinja_template': True,
+            'litert_lm_llm_metadata_override': (
+                gemma4_metadata_builder.GEMMA4_12B_CANONICAL_METADATA
+            ),
+        },
     )
 
   def get_vision_exportables(self, model_config, export_config=None):

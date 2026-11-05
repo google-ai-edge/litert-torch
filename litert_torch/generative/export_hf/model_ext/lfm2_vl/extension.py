@@ -43,6 +43,8 @@ class Lfm2VlExtension(extension_lib.ModelExtension):
             'dynamic_wi8_afp32' if is_npu else 'dynamic_wi4b32_afp32'
         ),
         'export_vision_encoder': vlm,
+        'use_jinja_template': True,
+        'litert_lm_llm_metadata_override': 'lfm2',
     }
     if not vlm:
       export_kwargs['auto_model_override'] = 'AutoModelForImageTextToText'

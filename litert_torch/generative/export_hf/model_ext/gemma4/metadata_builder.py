@@ -14,12 +14,65 @@
 # ==============================================================================
 """Metadata builder for Gemma4."""
 
-from typing import Any
+from typing import Any, Mapping
 
 from litert_torch.generative.export_hf.core import exportable_module
 
 from litert_lm_builder.runtime.proto import llm_metadata_pb2
 from litert_lm_builder.runtime.proto import llm_model_type_pb2
+
+GEMMA4_E2B_E4B_CHAT_TEMPLATE_REPO = (
+    'litert-community/gemma-4-E2B-it-litert-lm'
+)
+GEMMA4_12B_CANONICAL_METADATA = 'gemma4_12b'
+GEMMA4_26B_31B_CANONICAL_METADATA = 'gemma4_26b_31b'
+
+
+def is_moe(text_cfg: Mapping[str, Any]) -> bool:
+  """Returns whether `text_cfg` describes a Gemma 4 MoE (26B-A4B) variant."""
+  num_experts = text_cfg.get('num_experts')
+  return bool(text_cfg.get('enable_moe_block')) or (
+      num_experts is not None and int(num_experts) > 1
+  )
+
+
+def default_export_metadata_kwargs(
+    text_cfg: Mapping[str, Any],
+) -> dict[str, Any]:
+  """Selects Gemma 4 (E2B/E4B vs 26B MoE / 31B) metadata / template defaults.
+
+  Targets official Gemma 4 instruct checkpoints (using
+  `hidden_size_per_layer_input` for E2B/E4B and MoE / non-PLE config fields for
+  26B/31B). Custom fine-tunes or checkpoints with non-standard chat templates or
+  vision patch counts should override `litert_lm_llm_metadata_override` /
+  `jinja_chat_template_override`.
+
+  Args:
+    text_cfg: Parsed `text_config` (or top-level `config.json`) dictionary.
+
+  Returns:
+    Default `export.export` keyword arguments for `LlmMetadata` / chat template.
+  """
+  ple = text_cfg.get('hidden_size_per_layer_input')
+  if ple:
+    return {
+        'use_jinja_template': True,
+        'jinja_chat_template_override': GEMMA4_E2B_E4B_CHAT_TEMPLATE_REPO,
+    }
+  hidden_size = text_cfg.get('hidden_size')
+  if (
+      is_moe(text_cfg)
+      or (ple is not None and int(ple) == 0)
+      or (hidden_size is not None and int(hidden_size) > 2560)
+  ):
+    return {
+        'use_jinja_template': True,
+        'litert_lm_llm_metadata_override': GEMMA4_26B_31B_CANONICAL_METADATA,
+    }
+  return {
+      'use_jinja_template': True,
+      'jinja_chat_template_override': GEMMA4_E2B_E4B_CHAT_TEMPLATE_REPO,
+  }
 
 
 def build_llm_metadata(

@@ -14,9 +14,11 @@
 # ==============================================================================
 """Tests for litert_lm_builder."""
 
+import io
 import os
 import types
 from unittest import mock
+import urllib.error
 from absl.testing import absltest
 from absl.testing import parameterized
 from litert_torch.generative.export_hf.core import export_lib
@@ -507,6 +509,131 @@ class BuildLlmMetadataStartTokenTest(parameterized.TestCase):
       litert_lm_builder._resolve_llm_metadata_override_path(
           os.path.join(temp_dir, "missing.pbtxt"), export_config, temp_dir
       )
+
+  def test_fetch_canonical_metadata_and_family_override(self):
+    cache_root = self.create_tempdir().full_path
+    temp_dir = self.create_tempdir().full_path
+    pbtext = (
+        "max_num_tokens: 32768\n"
+        "llm_model_type { qwen3 {} }\n"
+        'jinja_prompt_template: "{{ messages }}"\n'
+    )
+    with mock.patch.dict(
+        os.environ, {"XDG_CACHE_HOME": cache_root}, clear=False
+    ):
+      os.environ.pop("LITERT_LM_MODELS_REF", None)
+      with mock.patch.object(
+          litert_lm_builder.urllib.request,
+          "urlopen",
+          side_effect=lambda *a, **k: io.BytesIO(pbtext.encode("utf-8")),
+      ) as urlopen_mock:
+        p1 = litert_lm_builder.fetch_canonical_metadata("qwen3")
+        p2 = litert_lm_builder.fetch_canonical_metadata("qwen3")
+        self.assertEqual(p1, p2)
+        self.assertEqual(urlopen_mock.call_count, 2)
+
+        # Commit SHA ref is served from cache on the second call.
+        litert_lm_builder.fetch_canonical_metadata("qwen3", ref="4a363c07")
+        litert_lm_builder.fetch_canonical_metadata("qwen3", ref="4a363c07")
+        self.assertEqual(urlopen_mock.call_count, 3)
+
+        # Gemma 4 12B and 26B/31B map to their files under models/gemma4/.
+        litert_lm_builder.fetch_canonical_metadata(
+            "gemma4_12b", ref="4a363c07"
+        )
+        self.assertEqual(
+            urlopen_mock.call_args[0][0].full_url,
+            "https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/"
+            "4a363c07/models/gemma4/LlmMetadataProto_12b.pbtext",
+        )
+        litert_lm_builder.fetch_canonical_metadata(
+            "gemma4_26b_31b", ref="4a363c07"
+        )
+        self.assertEqual(
+            urlopen_mock.call_args[0][0].full_url,
+            "https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/"
+            "4a363c07/models/gemma4/LlmMetadataProto_26b_31b.pbtext",
+        )
+
+      # Offline fallback uses cached `main` copy.
+      with mock.patch.object(
+          litert_lm_builder.urllib.request,
+          "urlopen",
+          side_effect=urllib.error.URLError("offline"),
+      ):
+        export_config = exportable_module.ExportableModuleConfig(
+            model="Qwen/Qwen3-0.6B",
+            output_dir=temp_dir,
+            work_dir=temp_dir,
+            cache_length=32771,
+            llm_metadata_max_num_tokens_override=4096,
+            litert_lm_llm_metadata_override="qwen3",
+        )
+        out_path = litert_lm_builder._resolve_llm_metadata_override_path(
+            "qwen3", export_config, temp_dir
+        )
+        self.assertIsNotNone(out_path)
+        parsed = litert_lm_builder.llm_metadata_pb2.LlmMetadata()
+        with open(out_path, "rb") as f:
+          parsed.ParseFromString(f.read())
+        self.assertEqual(parsed.max_num_tokens, 4096)
+        self.assertEqual(parsed.jinja_prompt_template, "{{ messages }}")
+
+  def test_canonical_family_offline_without_cache_falls_back_to_generated_metadata(
+      self,
+  ):
+    cache_root = self.create_tempdir().full_path
+    temp_dir = self.create_tempdir().full_path
+    prefill_decode_path = os.path.join(temp_dir, "prefill_decode.tflite")
+    tok_path = os.path.join(temp_dir, "tokenizer.json")
+    for p, content in [
+        (prefill_decode_path, b"TFL3_PREFILL_DECODE"),
+        (tok_path, b'{"version": "1.0"}'),
+    ]:
+      with open(p, "wb") as f:
+        f.write(content)
+
+    fake_config = types.SimpleNamespace(model_type="qwen3", num_hidden_layers=2)
+    source_artifacts = export_lib.SourceModelArtifacts(
+        model=_FakeModel(),  # pyrefly: ignore[bad-argument-type]
+        model_config=fake_config,  # pyrefly: ignore[bad-argument-type]
+        text_model_config=fake_config,  # pyrefly: ignore[bad-argument-type]
+        tokenizer=_FakeChatMlTokenizer(),
+    )
+    export_config = exportable_module.ExportableModuleConfig(
+        model="Qwen/Qwen3-0.6B",
+        output_dir=temp_dir,
+        work_dir=temp_dir,
+        use_jinja_template=True,
+        litert_lm_llm_metadata_override="qwen3",
+    )
+    exported_artifacts = export_lib.ExportedModelArtifacts(
+        prefill_decode_model_path=prefill_decode_path,
+        tokenizer_model_path=tok_path,
+    )
+    with mock.patch.dict(
+        os.environ, {"XDG_CACHE_HOME": cache_root}, clear=False
+    ):
+      with mock.patch.object(
+          litert_lm_builder.urllib.request,
+          "urlopen",
+          side_effect=urllib.error.URLError("offline"),
+      ):
+        with mock.patch.object(
+            litertlm_builder.LitertLmFileBuilder, "build", autospec=True
+        ):
+          litert_lm_builder.package_model(
+              source_artifacts, export_config, exported_artifacts
+          )
+    rewritten = os.path.join(temp_dir, "llm_metadata.pb")
+    self.assertTrue(os.path.exists(rewritten))
+    parsed = litert_lm_builder.llm_metadata_pb2.LlmMetadata()
+    with open(rewritten, "rb") as f:
+      parsed.ParseFromString(f.read())
+    self.assertFalse(parsed.HasField("jinja_prompt_template"))
+    self.assertEqual(
+        parsed.prompt_templates.user.prefix, "<|im_start|>user\n"
+    )
 
 
 class ParseChatTemplateTest(parameterized.TestCase):

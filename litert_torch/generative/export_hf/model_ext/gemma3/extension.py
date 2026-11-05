@@ -45,7 +45,10 @@ class Gemma3Extension(extension_lib.ModelExtension):
     ):
       return extension_lib.ExportDefaults(
           task=extension_lib.ExportTask.TEXT_GENERATION,
-          export_kwargs={'export_vision_encoder': False},
+          export_kwargs={
+              'export_vision_encoder': False,
+              'use_jinja_template': False,
+          },
       )
     return extension_lib.ExportDefaults(
         task=extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT,
@@ -53,6 +56,7 @@ class Gemma3Extension(extension_lib.ModelExtension):
             'export_vision_encoder': True,
             'externalize_embedder': True,
             'vision_encoder_quantization_recipe': 'weight_only_wi8_afp32',
+            'use_jinja_template': False,
         },
     )
 

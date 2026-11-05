@@ -416,6 +416,8 @@ class ExportPlanAndPresetResolutionTest(parameterized.TestCase):
             "cache_length": 32771,
             "llm_metadata_max_num_tokens_override": 4096,
             "quantization_recipe": expected_quantization,
+            "use_jinja_template": True,
+            "litert_lm_llm_metadata_override": "qwen3",
         },
     )
     self.assertEqual(plan.sources["apply_gpu_composites"], "target")
@@ -424,6 +426,10 @@ class ExportPlanAndPresetResolutionTest(parameterized.TestCase):
         plan.sources["llm_metadata_max_num_tokens_override"], "target"
     )
     self.assertEqual(plan.sources["quantization_recipe"], "model")
+    self.assertEqual(plan.sources["use_jinja_template"], "model")
+    self.assertEqual(
+        plan.sources["litert_lm_llm_metadata_override"], "model"
+    )
 
   def test_user_overrides_win_and_none_is_ignored(self):
     model = self._checkpoint({"model_type": "qwen3", "hidden_size": 1024})
@@ -488,6 +494,8 @@ class ExportPlanAndPresetResolutionTest(parameterized.TestCase):
             "prefill_lengths": [128],
             "cache_length": 1024,
             "quantization_recipe": "dynamic_wi8_afp32",
+            "use_jinja_template": True,
+            "litert_lm_llm_metadata_override": "qwen3",
         },
     )
     self.assertEqual(plan.sources["split_cache"], "target")
@@ -526,13 +534,19 @@ class ExportPlanAndPresetResolutionTest(parameterized.TestCase):
     self.assertEqual(plan.sources["k_ts_idx"], "target")
     self.assertEqual(plan.sources["v_ts_idx"], "target")
 
-  def test_npu_soc_target_raises_not_implemented_error(self):
+  @parameterized.parameters(
+      "npu:qualcomm:sm8750",
+      "npu:qc:SM8850",
+      "npu:mediatek:mt6991",
+      "npu:intel:lunar_lake",
+  )
+  def test_npu_soc_target_raises_not_implemented_error(self, target):
     model = self._checkpoint({"model_type": "qwen3", "hidden_size": 1024})
 
     with self.assertRaisesRegex(
-        NotImplementedError, "npu:qualcomm:sm8750.*not yet implemented"
+        NotImplementedError, "SoC-targeted NPU AOT compilation"
     ):
-      export.export(model, target="npu:qualcomm:sm8750", dry_run=True)
+      export.export(model, target=target, dry_run=True)
 
   def test_whisper_is_asr_without_llm_settings(self):
     model = self._checkpoint({"model_type": "whisper"})
@@ -626,19 +640,88 @@ class ExportPlanAndPresetResolutionTest(parameterized.TestCase):
     self.assertEqual(plan.task, "text_generation")
     self.assertEqual(plan.task_source, export.SOURCE_DEFAULT)
     self.assertTrue(plan.export_kwargs["apply_gpu_composites"])
+    self.assertFalse(plan.export_kwargs["use_jinja_template"])
+    self.assertEqual(plan.sources["use_jinja_template"], "target")
+
+  def test_minicpm5_llama_checkpoint_matches_minicpm5_extension(self):
+    model = self._checkpoint(
+        {
+            "model_type": "llama",
+            "architectures": ["LlamaForCausalLM"],
+            "_name_or_path": "openbmb/MiniCPM5-1B",
+        }
+    )
+
+    plan = export.export(model, dry_run=True)
+
+    self.assertEqual(plan.task, "text_generation")
+    self.assertEqual(plan.model_type, "llama")
+    self.assertTrue(plan.export_kwargs["use_jinja_template"])
+    self.assertEqual(
+        plan.export_kwargs["litert_lm_llm_metadata_override"], "minicpm5"
+    )
+    self.assertEqual(
+        plan.sources["litert_lm_llm_metadata_override"], export.SOURCE_MODEL
+    )
+
+  @parameterized.parameters(None, "none", "NONE")
+  def test_disabling_llm_metadata_override_resets_use_jinja_template(
+      self, none_value
+  ):
+    model = self._checkpoint({"model_type": "qwen3", "hidden_size": 1024})
+
+    plan = export.export(
+        model,
+        dry_run=True,
+        litert_lm_llm_metadata_override=none_value,
+    )
+
+    self.assertIsNone(plan.export_kwargs["litert_lm_llm_metadata_override"])
+    self.assertEqual(
+        plan.sources["litert_lm_llm_metadata_override"], export.SOURCE_USER
+    )
+    self.assertFalse(plan.export_kwargs["use_jinja_template"])
 
   @parameterized.named_parameters(
+      (
+          "qwen2",
+          {"model_type": "qwen2"},
+          "text_generation",
+          {
+              "use_jinja_template": True,
+              "litert_lm_llm_metadata_override": "qwen2_5",
+          },
+      ),
       (
           "qwen3_5",
           {"model_type": "qwen3_5"},
           "text_generation",
-          {"quantization_recipe": "dynamic_wi8_afp32"},
+          {
+              "quantization_recipe": "dynamic_wi8_afp32",
+              "use_jinja_template": True,
+              "litert_lm_llm_metadata_override": "qwen3_5",
+          },
       ),
       (
           "lfm2",
           {"model_type": "lfm2"},
           "text_generation",
-          {"quantization_recipe": "dynamic_wi4b32_afp32"},
+          {
+              "quantization_recipe": "dynamic_wi4b32_afp32",
+              "use_jinja_template": True,
+              "litert_lm_llm_metadata_override": "lfm2",
+          },
+      ),
+      (
+          "lfm2_vl",
+          {"model_type": "lfm2_vl", "text_config": {"model_type": "lfm2"}},
+          "image_text_to_text",
+          {
+              "quantization_recipe": "dynamic_wi4b32_afp32",
+              "export_vision_encoder": True,
+              "use_jinja_template": True,
+              "litert_lm_llm_metadata_override": "lfm2",
+          },
       ),
       (
           "gemma3_vlm",
@@ -651,6 +734,7 @@ class ExportPlanAndPresetResolutionTest(parameterized.TestCase):
               "export_vision_encoder": True,
               "externalize_embedder": True,
               "vision_encoder_quantization_recipe": "weight_only_wi8_afp32",
+              "use_jinja_template": False,
           },
       ),
       (
@@ -662,13 +746,82 @@ class ExportPlanAndPresetResolutionTest(parameterized.TestCase):
               "externalize_embedder": True,
               "single_token_embedder": True,
               "vision_encoder_quantization_recipe": "weight_only_wi8_afp32",
+              "use_jinja_template": False,
+          },
+      ),
+      (
+          "gemma4",
+          {
+              "model_type": "gemma4",
+              "text_config": {
+                  "model_type": "gemma4_text",
+                  "hidden_size_per_layer_input": 256,
+              },
+          },
+          "image_text_to_text",
+          {
+              "quantization_recipe": "dynamic_wi4b32_afp32",
+              "externalize_embedder": True,
+              "single_token_embedder": True,
+              "export_vision_encoder": True,
+              "export_audio_encoder": False,
+              "use_jinja_template": True,
+              "jinja_chat_template_override": (
+                  "litert-community/gemma-4-E2B-it-litert-lm"
+              ),
+          },
+      ),
+      (
+          "gemma4_26b_moe",
+          {
+              "model_type": "gemma4",
+              "text_config": {
+                  "model_type": "gemma4_text",
+                  "enable_moe_block": True,
+                  "num_experts": 128,
+              },
+          },
+          "image_text_to_text",
+          {
+              "quantization_recipe": "dynamic_wi4b32_afp32",
+              "externalize_embedder": True,
+              "single_token_embedder": True,
+              "export_vision_encoder": True,
+              "export_audio_encoder": False,
+              "use_jinja_template": True,
+              "litert_lm_llm_metadata_override": "gemma4_26b_31b",
+          },
+      ),
+      (
+          "gemma4_31b",
+          {
+              "model_type": "gemma4",
+              "text_config": {
+                  "model_type": "gemma4_text",
+                  "hidden_size": 5376,
+                  "hidden_size_per_layer_input": 0,
+              },
+          },
+          "image_text_to_text",
+          {
+              "quantization_recipe": "dynamic_wi4b32_afp32",
+              "externalize_embedder": True,
+              "single_token_embedder": True,
+              "export_vision_encoder": True,
+              "export_audio_encoder": False,
+              "use_jinja_template": True,
+              "litert_lm_llm_metadata_override": "gemma4_26b_31b",
           },
       ),
       (
           "gemma4_unified",
           {"model_type": "gemma4_unified"},
           "image_text_to_text",
-          {"export_vision_encoder": True},
+          {
+              "export_vision_encoder": True,
+              "use_jinja_template": True,
+              "litert_lm_llm_metadata_override": "gemma4_12b",
+          },
       ),
       (
           "moonshine",

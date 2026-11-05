@@ -42,6 +42,8 @@ class Qwen3_5Extension(extension_lib.ModelExtension):  # pylint: disable=invalid
         task=extension_lib.ExportTask.TEXT_GENERATION,
         export_kwargs={
             'quantization_recipe': 'dynamic_wi8_afp32',
+            'use_jinja_template': True,
+            'litert_lm_llm_metadata_override': 'qwen3_5',
         },
     )
 

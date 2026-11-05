@@ -102,6 +102,9 @@ class Gemma4Extension(extension_lib.ModelExtension):
             'single_token_embedder': not is_npu,
             'export_vision_encoder': export_vision,
             'export_audio_encoder': export_audio,
+            **gemma4_metadata_builder.default_export_metadata_kwargs(
+                extension_lib.text_config_dict(config_dict)
+            ),
         },
     )
 

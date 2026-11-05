@@ -31,6 +31,29 @@ from litert_torch.generative.export_hf.model_ext.qwen3_tts import qwen3_tts as q
 
 
 @extension_lib.register_model_extension(override=False)
+class Qwen2Extension(extension_lib.ModelExtension):
+  """Built-in extension for Qwen2 / Qwen2.5 decoder-only LLMs (`qwen2`, `qwen2p5`).
+
+  Defaults to the canonical `qwen2_5` `LlmMetadata` preset. For custom
+  fine-tunes or checkpoints with non-standard chat templates / stop tokens, pass
+  `litert_lm_llm_metadata_override='none'` (or a custom `.pbtext` path).
+  """
+
+  model_types = ('qwen2', 'qwen2p5')
+
+  def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
+    """See base class."""
+    del config_dict, target
+    return extension_lib.ExportDefaults(
+        task=task or extension_lib.ExportTask.TEXT_GENERATION,
+        export_kwargs={
+            'use_jinja_template': True,
+            'litert_lm_llm_metadata_override': 'qwen2_5',
+        },
+    )
+
+
+@extension_lib.register_model_extension(override=False)
 class Qwen3Extension(extension_lib.ModelExtension):
   """Built-in extension for Qwen3 decoder-only LLMs (`qwen3`, `qwen3_text`)."""
 
@@ -55,6 +78,8 @@ class Qwen3Extension(extension_lib.ModelExtension):
                 if hidden_size == 2048 or is_npu
                 else 'dynamic_wi4b32_afp32'
             ),
+            'use_jinja_template': True,
+            'litert_lm_llm_metadata_override': 'qwen3',
         },
     )
 

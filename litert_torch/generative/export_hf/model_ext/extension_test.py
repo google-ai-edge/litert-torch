@@ -501,6 +501,7 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
         'gemma3',
         'gemma3n',
         'gemma4',
+        'qwen2',
         'qwen3',
         'qwen3_5',
         'lfm2',
@@ -512,11 +513,24 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
         'kokoro',
         'bonsai_flux2',
         'flux2_klein',
+        'minicpm5',
         'minicpmo',
     ):
       self.assertIn(expected, registered)
 
   @parameterized.named_parameters(
+      (
+          'qwen2_cpu_gpu',
+          'qwen2',
+          {'model_type': 'qwen2'},
+          None,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_GENERATION,
+          {
+              'use_jinja_template': True,
+              'litert_lm_llm_metadata_override': 'qwen2_5',
+          },
+      ),
       (
           'qwen3_0_6b_cpu_gpu',
           'qwen3',
@@ -524,7 +538,11 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
           None,
           'cpu_gpu',
           extension.ExportTask.TEXT_GENERATION,
-          {'quantization_recipe': 'dynamic_wi4b32_afp32'},
+          {
+              'quantization_recipe': 'dynamic_wi4b32_afp32',
+              'use_jinja_template': True,
+              'litert_lm_llm_metadata_override': 'qwen3',
+          },
       ),
       (
           'qwen3_1_7b_cpu_gpu',
@@ -533,7 +551,11 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
           None,
           'cpu_gpu',
           extension.ExportTask.TEXT_GENERATION,
-          {'quantization_recipe': 'dynamic_wi8_afp32'},
+          {
+              'quantization_recipe': 'dynamic_wi8_afp32',
+              'use_jinja_template': True,
+              'litert_lm_llm_metadata_override': 'qwen3',
+          },
       ),
       (
           'qwen3_4b_npu',
@@ -542,7 +564,11 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
           None,
           'npu:qualcomm',
           extension.ExportTask.TEXT_GENERATION,
-          {'quantization_recipe': 'dynamic_wi8_afp32'},
+          {
+              'quantization_recipe': 'dynamic_wi8_afp32',
+              'use_jinja_template': True,
+              'litert_lm_llm_metadata_override': 'qwen3',
+          },
       ),
       (
           'qwen3_tts_task',
@@ -564,6 +590,7 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
               'externalize_embedder': True,
               'single_token_embedder': True,
               'export_vision_encoder': False,
+              'use_jinja_template': False,
           },
       ),
       (
@@ -577,6 +604,8 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
               'quantization_recipe': 'dynamic_wi4b32_afp32',
               'export_vision_encoder': False,
               'auto_model_override': 'AutoModelForImageTextToText',
+              'use_jinja_template': True,
+              'litert_lm_llm_metadata_override': 'lfm2',
           },
       ),
       (
@@ -592,6 +621,10 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
               'single_token_embedder': True,
               'export_vision_encoder': False,
               'export_audio_encoder': False,
+              'use_jinja_template': True,
+              'jinja_chat_template_override': (
+                  'litert-community/gemma-4-E2B-it-litert-lm'
+              ),
           },
       ),
       (
@@ -607,6 +640,10 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
               'single_token_embedder': True,
               'export_vision_encoder': True,
               'export_audio_encoder': False,
+              'use_jinja_template': True,
+              'jinja_chat_template_override': (
+                  'litert-community/gemma-4-E2B-it-litert-lm'
+              ),
           },
       ),
       (
@@ -622,6 +659,10 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
               'single_token_embedder': True,
               'export_vision_encoder': False,
               'export_audio_encoder': False,
+              'use_jinja_template': True,
+              'jinja_chat_template_override': (
+                  'litert-community/gemma-4-E2B-it-litert-lm'
+              ),
           },
       ),
       (
@@ -641,6 +682,10 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
               'single_token_embedder': True,
               'export_vision_encoder': True,
               'export_audio_encoder': True,
+              'use_jinja_template': True,
+              'jinja_chat_template_override': (
+                  'litert-community/gemma-4-E2B-it-litert-lm'
+              ),
           },
       ),
   )

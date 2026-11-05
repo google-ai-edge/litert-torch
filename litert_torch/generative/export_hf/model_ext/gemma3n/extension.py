@@ -49,6 +49,7 @@ class Gemma3nExtension(extension_lib.ModelExtension):
               'externalize_embedder': True,
               'single_token_embedder': not is_npu,
               'export_vision_encoder': False,
+              'use_jinja_template': False,
           },
       )
     return extension_lib.ExportDefaults(
@@ -58,6 +59,7 @@ class Gemma3nExtension(extension_lib.ModelExtension):
             'externalize_embedder': True,
             'single_token_embedder': not is_npu,
             'vision_encoder_quantization_recipe': 'weight_only_wi8_afp32',
+            'use_jinja_template': False,
         },
     )
 

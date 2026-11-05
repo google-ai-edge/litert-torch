@@ -47,5 +47,7 @@ class Lfm2Extension(extension_lib.ModelExtension):
             'quantization_recipe': (
                 'dynamic_wi8_afp32' if is_npu else 'dynamic_wi4b32_afp32'
             ),
+            'use_jinja_template': True,
+            'litert_lm_llm_metadata_override': 'lfm2',
         },
     )
