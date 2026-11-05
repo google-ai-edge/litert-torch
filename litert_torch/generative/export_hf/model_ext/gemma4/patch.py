@@ -31,10 +31,17 @@ import transformers
 class Gemma4RMSNorm(torch.nn.Module):
   """RMSNorm Layer."""
 
-  def __init__(self, dim: int, eps: float = 1e-6, with_scale: bool = True):
+  def __init__(
+      self,
+      dim: int,
+      eps: float = 1e-6,
+      with_scale: bool = True,
+      elide_final_scale: bool = False,
+  ):
     """RMSNorm Layer."""
     super().__init__()
     self.with_scale = with_scale
+    self.elide_final_scale = elide_final_scale
 
     if self.with_scale:
       self.weight = torch.nn.Parameter(torch.ones(dim), requires_grad=True)
@@ -49,25 +56,30 @@ class Gemma4RMSNorm(torch.nn.Module):
     # are no-ops when the model computes in fp32.
     original_dtype = hidden_states.dtype
     hidden_states = hidden_states.to(torch.float32)
-    return normalization.rms_norm_with_hlfb(
-        hidden_states,
+    w = (
         self.weight
         if self.with_scale
         else torch.ones(
             (self.hidden_size,),
             dtype=torch.float32,
             device=hidden_states.device,
-        ),
+        )
+    )
+    final_scale = patches_lib.maybe_ones_final_scale(
+        self.elide_final_scale, self.hidden_size, hidden_states.device
+    )
+    return normalization.rms_norm_with_hlfb(
+        hidden_states,
+        w,
         self.variance_epsilon,
-        torch.ones(
-            (self.hidden_size,),
-            dtype=torch.float32,
-            device=hidden_states.device,
-        ),
+        final_scale,
     ).to(original_dtype)
 
   def extra_repr(self):
-    return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+    return (
+        f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}, "
+        f"elide_final_scale={self.elide_final_scale}"
+    )
 
 
 def get_prefill_skip_cache_update_override(
@@ -677,12 +689,19 @@ try:
     use_rope = export_config.use_rope_composite
     use_qkv_norm_rope = export_config.use_qkv_norm_rope_composite
     use_swiglu = getattr(export_config, "use_swiglu_composite", False)
+    # `final_scale` is always all-ones in Gemma4, so tracing it just bloats
+    # the graph with redundant constants. Gemma4-only quirk, hence
+    # `extra_kwargs` instead of a first-class config field.
+    elide_final_scale = export_config.extra_kwargs.get(
+        "elide_rmsnorm_final_scale", False
+    )
     print(
         "Gemma4 model patch applied. "
         f"fuse_gate_up={fuse_gate_up}, fuse_qkv={fuse_qkv}, "
         f"use_rope_composite={use_rope}, "
         f"use_qkv_norm_rope_composite={use_qkv_norm_rope}, "
-        f"use_swiglu_composite={use_swiglu}"
+        f"use_swiglu_composite={use_swiglu}, "
+        f"elide_rmsnorm_final_scale={elide_final_scale}"
     )
 
     replaced_modules = []
@@ -719,12 +738,16 @@ try:
         else:
           replace_modules(child)
 
-    replace_modules(model)
-    try:
-      yield
-    finally:
-      for module, name, original in reversed(replaced_modules):
-        setattr(module, name, original)
+    # Flag norms before fusion; fused attention reuses them by reference.
+    with patches_lib.elide_final_scale_during_trace(
+        model, Gemma4RMSNorm, elide_final_scale
+    ):
+      replace_modules(model)
+      try:
+        yield
+      finally:
+        for module, name, original in reversed(replaced_modules):
+          setattr(module, name, original)
 
 
 except ImportError:
