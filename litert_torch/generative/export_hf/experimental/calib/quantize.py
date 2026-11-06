@@ -299,6 +299,7 @@ def quantize(
     default_meta = os.path.join(os.path.dirname(model_path), 'llm_metadata.pb')
     if os.path.exists(default_meta):
       llm_metadata_path = default_meta
+  executor_metadata_path = unpacked.get('ExecutorMetadata')
 
   if not model_path:
     raise ValueError('Must specify model_path or input_litertlm.')
@@ -450,6 +451,7 @@ def quantize(
         spm_path=spm_path,
         transformers_model_path=hf_path,
         llm_metadata_path=llm_metadata_path,
+        executor_metadata_path=executor_metadata_path,
     )
     print(f'Done packaging {output_litertlm}')
 

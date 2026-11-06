@@ -25,6 +25,7 @@ from litert_torch.generative.export_hf.experimental.calib.quantize import quanti
 from litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler import compile_litertlm as compile_func
 from litert_torch.generative.export_hf.experimental.npu_export.config_manager import NpuPipelineConfig
 from litert_torch.generative.export_hf.export import export as export_func
+from litert_torch.generative.export_hf.model_ext import metadata_builder
 
 # Mark absl flags as parsed to allow programmatic execution in environments
 # like Jupyter/VSCode Notebooks where absl.app.run is not used.
@@ -65,10 +66,19 @@ def npu_export(
     **kwargs: Any,
 ) -> str:
   """Runs Stage 1 Model Export bound to NpuPipelineConfig."""
+  # `export()` takes these through **kwargs, so `_bind_cfg` (which only binds
+  # named parameters) would drop them. Unset fields fall back to the defaults
+  # derived from the model type.
+  npu_executor_overrides = {
+      field: getattr(cfg, field)
+      for field in metadata_builder.NPU_EXECUTOR_SETTING_FIELDS
+      if getattr(cfg, field, None) is not None
+  }
   overrides = {
       "output_dir": output_dir,
       "split_cache": True,  # Mandatory for NPU backends
       "keep_temporary_files": keep_temporary_files,
+      **npu_executor_overrides,
       **kwargs,
   }
   bound_args = _bind_cfg(
