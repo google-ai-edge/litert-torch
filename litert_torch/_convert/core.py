@@ -51,6 +51,7 @@ def _run_convert_passes(
       fx_passes.OptimizeLayoutTransposesPass(),
       fx_passes.CanonicalizePass(),
       fx_passes.ReduceViewRankPass(),
+      fx_passes.LowerBroadcastToConcatPass(),
       fx_passes.BuildAtenCompositePass(),
       fx_passes.RemoveNonUserOutputsPass(),
       fx_passes.CastInputsBf16ToF32Pass(),
