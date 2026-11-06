@@ -211,6 +211,35 @@ def pre_split_model_experts(model: nn.Module) -> nn.Module:
   return model
 
 
+def _check_litert_moe_activations(model: nn.Module) -> None:
+  """Raises if an experts module uses an activation the `moe` op cannot compute.
+
+  The `moe` custom op always computes GELU with the tanh approximation, so
+  lowering experts with another activation (e.g. SiLU) would export a different
+  function without any error.
+
+  Args:
+    model: The model whose experts are lowered to the `moe` custom op.
+  """
+  for name, module in model.named_modules():
+    if not _is_moe_experts(module):
+      continue
+    act_fn = getattr(module, 'act_fn', None)
+    if act_fn is not None and moe.is_gelu_tanh(act_fn):
+      continue
+    act_name = (
+        getattr(act_fn, '__name__', type(act_fn).__name__)
+        if act_fn is not None
+        else 'unknown'
+    )
+    raise ValueError(
+        f'`{name}` ({type(module).__name__}) uses the `{act_name}` activation,'
+        ' but `moe_exports_implementation="litert_moe"` exports experts as'
+        ' the `moe` custom op, which only computes GELU (tanh approximation).'
+        ' Use `moe_exports_implementation="litert_moe_sequential"` instead.'
+    )
+
+
 def pre_flatten_model_experts(model: nn.Module) -> nn.Module:
   """Flattens 3D expert weight tensors into 4D delegate layout parameters to bypass LiteRT runtime slicing and reshaping."""
   for module in model.modules():
@@ -840,6 +869,7 @@ def load_model(
   if export_config.moe_exports_implementation == 'litert_moe_sequential':
     model = pre_split_model_experts(model)
   elif export_config.moe_exports_implementation == 'litert_moe':
+    _check_litert_moe_activations(model)
     model = pre_flatten_model_experts(model)
     model = moe.bind_per_expert_scale(model)
 
