@@ -17,6 +17,7 @@
 from typing import Any, Mapping
 
 from litert_torch.generative.export_hf.core import exportable_module
+from litert_torch.generative.export_hf.model_ext.gemma4 import vision_budgets
 
 from litert_lm_builder.runtime.proto import llm_metadata_pb2
 from litert_lm_builder.runtime.proto import llm_model_type_pb2
@@ -122,12 +123,13 @@ def build_llm_metadata(
     llm_metadata.llm_model_type.gemma4.end_of_image_token.token_str = eoi_token  # pyrefly: ignore[bad-assignment]
     llm_metadata.llm_model_type.gemma4.patch_width = image_processor.patch_size  # pyrefly: ignore[missing-attribute]
     llm_metadata.llm_model_type.gemma4.patch_height = image_processor.patch_size  # pyrefly: ignore[missing-attribute]
-    # TODO(weiyiw): Update the max_num_patches to the actual value.
-    # This is is hardcoded to 140 soft tokens for now.
+    # `max_num_patches` sets the default per-image budget used by the runtime
+    # preprocessor; use the largest exported budget (smaller budgets can still
+    # be requested at runtime via `visual_token_budget`).
+    pooling_kernel_size = getattr(image_processor, 'pooling_kernel_size', 3)
+    budgets = vision_budgets.get_vision_token_budgets(export_config.extra_kwargs)
     llm_metadata.llm_model_type.gemma4.max_num_patches = (
-        3
-        * 3
-        * export_config.extra_kwargs.get('gemma4_vision_max_soft_tokens', 140)
+        pooling_kernel_size * pooling_kernel_size * max(budgets)
     )
   if exported_model_artifacts.audio_encoder_model_path:
     feature_extractor = source_model_artifacts.feature_extractor

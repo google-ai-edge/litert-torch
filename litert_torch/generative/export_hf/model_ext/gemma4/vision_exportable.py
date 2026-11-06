@@ -16,6 +16,7 @@
 
 from litert_torch.generative.export_hf.core import attention as attention_lib
 from litert_torch.generative.export_hf.core import exportable_module as exportable_module_base
+from litert_torch.generative.export_hf.model_ext.gemma4 import vision_budgets
 import torch
 
 
@@ -84,17 +85,21 @@ class LiteRTExportableModuleForGemma4VisionEncoder(
       raise ValueError(
           'Image processor is required for Exporting Gemma4 vision encoder.'
       )
-    num_soft_tokens = kwargs.get('gemma4_vision_max_soft_tokens', 140)
-    dummy_image = image_processor(
-        images=[torch.zeros((1, 3, 224, 224))],
-        max_soft_tokens=num_soft_tokens,
-        return_tensors='pt',
-    )
-    inputs = {
-        'images': dummy_image.pixel_values,
-        'positions_xy': dummy_image.image_position_ids.int(),
-    }
-    return {f'vision_{num_soft_tokens}': (inputs, {})}
+    # One `vision_{N}` signature per soft-token budget `N`; the runtime picks
+    # the smallest signature that fits the preprocessed image.
+    sample_inputs = {}
+    for num_soft_tokens in vision_budgets.get_vision_token_budgets(kwargs):
+      dummy_image = image_processor(
+          images=[torch.zeros((1, 3, 224, 224))],
+          max_soft_tokens=num_soft_tokens,
+          return_tensors='pt',
+      )
+      inputs = {
+          'images': dummy_image.pixel_values,
+          'positions_xy': dummy_image.image_position_ids.int(),
+      }
+      sample_inputs[f'vision_{num_soft_tokens}'] = (inputs, {})
+    return sample_inputs
 
 
 class LiteRTExportableModuleForGemma4VisionAdapter(
@@ -124,18 +129,20 @@ class LiteRTExportableModuleForGemma4VisionAdapter(
       raise ValueError(
           'Image processor is required for Exporting Gemma4 vision adapter.'
       )
-    vision_output_length = kwargs.get('gemma4_vision_max_soft_tokens', 140)
-    dummy_image = image_processor(
-        images=[torch.zeros((1, 3, 224, 224))],
-        max_soft_tokens=vision_output_length,
-        return_tensors='pt',
-    ).pixel_values
-    hidden_size = dummy_image.shape[-1]
-    features = torch.zeros(
-        (1, vision_output_length, hidden_size), dtype=torch.float32
-    )
-    inputs = {'soft_tokens': features}
-    return {f'vision_adapter_{vision_output_length}': (inputs, {})}
+    sample_inputs = {}
+    for vision_output_length in vision_budgets.get_vision_token_budgets(kwargs):
+      dummy_image = image_processor(
+          images=[torch.zeros((1, 3, 224, 224))],
+          max_soft_tokens=vision_output_length,
+          return_tensors='pt',
+      ).pixel_values
+      hidden_size = dummy_image.shape[-1]
+      features = torch.zeros(
+          (1, vision_output_length, hidden_size), dtype=torch.float32
+      )
+      inputs = {'soft_tokens': features}
+      sample_inputs[f'vision_adapter_{vision_output_length}'] = (inputs, {})
+    return sample_inputs
 
 
 class LiteRTExportableModuleForGemma4EndOfImage(

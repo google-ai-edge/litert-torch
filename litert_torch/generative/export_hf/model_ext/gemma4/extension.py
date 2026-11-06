@@ -16,7 +16,9 @@
 
 Full-featured multimodal extension illustrating:
 - Custom architecture-specific export flag registration via `extra_kwargs_keys`
-  (`'gemma4_vision_max_soft_tokens'`).
+  (`'gemma4_vision_token_budgets'`, e.g. `--gemma4_vision_token_budgets=70,140`,
+  and the legacy single-budget `'gemma4_vision_max_soft_tokens'`; see
+  `gemma4/vision_budgets.py`).
 - Conditional custom prefill/decode exportables (both standard and split-cache)
   and `'per_layer_embedder'` auxiliary submodel when
   `hidden_size_per_layer_input` is active (`gemma4/exportable_module.py`,
@@ -38,6 +40,7 @@ from litert_torch.generative.export_hf.model_ext.gemma4 import metadata_builder 
 # Registers gemma4 patches.
 from litert_torch.generative.export_hf.model_ext.gemma4 import patch as _
 from litert_torch.generative.export_hf.model_ext.gemma4 import split_cache_exportable_module as gemma4_split_cache_exportable_module
+from litert_torch.generative.export_hf.model_ext.gemma4 import vision_budgets as gemma4_vision_budgets
 from litert_torch.generative.export_hf.model_ext.gemma4 import vision_exportable as gemma4_vision_exportable
 
 
@@ -49,7 +52,7 @@ class Gemma4Extension(extension_lib.ModelExtension):
       'gemma4',
       'gemma4_text',
   )
-  extra_kwargs_keys = ('gemma4_vision_max_soft_tokens',)
+  extra_kwargs_keys = gemma4_vision_budgets.EXTRA_KWARGS_KEYS
 
   def update_export_config(self, export_config, model_config):
     """See base class."""

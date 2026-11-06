@@ -29,6 +29,7 @@ from litert_torch.generative.export_hf.model_ext.gemma4 import vision_exportable
 from litert_torch.generative.layers import moe
 import torch
 import transformers
+from transformers.models.gemma4 import image_processing_gemma4
 from transformers.models.gemma4 import modeling_gemma4
 
 from absl.testing import absltest as googletest
@@ -974,6 +975,54 @@ class PatchTest(parameterized.TestCase):
           )
         else:
           set_attn.assert_not_called()
+
+  @parameterized.named_parameters(
+      ("default", {}, (140,)),
+      ("legacy_flag", {"gemma4_vision_max_soft_tokens": 70}, (70,)),
+      (
+          "all_budgets",
+          {"gemma4_vision_token_budgets": (1120, 560, 280, 140, 70)},
+          (70, 140, 280, 560, 1120),
+      ),
+  )
+  def test_vision_exportables_sample_inputs_per_budget(
+      self, extra_kwargs, expected_budgets
+  ):
+    image_processor = image_processing_gemma4.Gemma4ImageProcessor()
+    export_config = exportable_module_config.ExportableModuleConfig(
+        model="dummy", use_sdpa_composite_for_vision=False
+    )
+    model = mock.MagicMock()
+    encoder = vision_exportable.LiteRTExportableModuleForGemma4VisionEncoder(
+        model, export_config
+    )
+    adapter = vision_exportable.LiteRTExportableModuleForGemma4VisionAdapter(
+        model, export_config, tokenizer=None
+    )
+
+    encoder_inputs = encoder.get_sample_inputs(
+        None, image_processor=image_processor, **extra_kwargs
+    )
+    adapter_inputs = adapter.get_sample_inputs(
+        None, image_processor=image_processor, **extra_kwargs
+    )
+
+    self.assertEqual(
+        list(encoder_inputs), [f"vision_{n}" for n in expected_budgets]
+    )
+    self.assertEqual(
+        list(adapter_inputs),
+        [f"vision_adapter_{n}" for n in expected_budgets],
+    )
+    pooling = image_processor.pooling_kernel_size
+    for n in expected_budgets:
+      inputs, dynamic_shapes = encoder_inputs[f"vision_{n}"]
+      self.assertEqual(dynamic_shapes, {})
+      self.assertEqual(inputs["images"].shape[1], n * pooling * pooling)
+      self.assertEqual(inputs["positions_xy"].shape[1], n * pooling * pooling)
+      self.assertEqual(inputs["positions_xy"].dtype, torch.int32)
+      adapter_sig_inputs, _ = adapter_inputs[f"vision_adapter_{n}"]
+      self.assertEqual(adapter_sig_inputs["soft_tokens"].shape[1], n)
 
 
 if __name__ == "__main__":

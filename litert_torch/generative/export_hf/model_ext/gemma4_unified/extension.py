@@ -22,6 +22,7 @@ feature projection (`adapter_cls=None`) while exporting a dedicated end-of-image
 
 from litert_torch.generative.export_hf.model_ext import extension as extension_lib
 from litert_torch.generative.export_hf.model_ext.gemma4 import metadata_builder as gemma4_metadata_builder
+from litert_torch.generative.export_hf.model_ext.gemma4 import vision_budgets as gemma4_vision_budgets
 # Registers gemma4_unified patches.
 from litert_torch.generative.export_hf.model_ext.gemma4_unified import patch as _
 from litert_torch.generative.export_hf.model_ext.gemma4_unified import vision_exportable as gemma4_unified_vision_exportable
@@ -32,7 +33,7 @@ class Gemma4UnifiedExtension(extension_lib.ModelExtension):
   """Built-in extension for Gemma 4 Unified vision-language models."""
 
   model_types = ('gemma4_unified',)
-  extra_kwargs_keys = ('gemma4_vision_max_soft_tokens',)
+  extra_kwargs_keys = gemma4_vision_budgets.EXTRA_KWARGS_KEYS
 
   def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
     """See base class."""
