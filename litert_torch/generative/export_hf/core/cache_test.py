@@ -301,12 +301,53 @@ class CacheTest(googletest.TestCase):
     self.assertIsInstance(kv_cache.layers[0], cache_lib.LiteRTLMCacheLayer)
     self.assertIsInstance(kv_cache.layers[1], cache_lib.LiteRTLMConvCacheLayer)
 
+    key_dim = (
+        model_config.linear_key_head_dim * model_config.linear_num_key_heads
+    )
+    value_dim = (
+        model_config.linear_value_head_dim * model_config.linear_num_value_heads
+    )
+    conv_dim = 2 * key_dim + value_dim
+    state_len = model_config.linear_conv_kernel_dim - 1
+
     conv_layer = kv_cache.layers[1]
     self.assertIsNotNone(conv_layer.recurrent_states)
-    self.assertEqual(conv_layer.conv_states.shape, (1, 3, 2 * 16 * 2 + 4 * 16))
-    self.assertEqual(conv_layer.recurrent_states.shape, (1, 4, 16, 16))
+    self.assertEqual(conv_layer.conv_kernel_size, state_len)
+    self.assertEqual(conv_layer.conv_states.shape, (1, state_len, conv_dim))
+    self.assertEqual(
+        conv_layer.recurrent_states.shape,
+        (
+            1,
+            model_config.linear_num_value_heads,
+            model_config.linear_key_head_dim,
+            model_config.linear_value_head_dim,
+        ),
+    )
     self.assertEqual(conv_layer.conv_states.dtype, torch.float32)
     self.assertEqual(conv_layer.recurrent_states.dtype, torch.float32)
+
+    # Test channels-last update_conv_state (padded prefill + decode)
+    seq_len, num_valid = 6, 4
+    prefill_x = torch.arange(seq_len * conv_dim, dtype=torch.float32).reshape(
+        1, seq_len, conv_dim
+    )
+    valid_mask = torch.arange(seq_len).unsqueeze(0) < num_valid
+    conv_layer.update_conv_state(prefill_x, valid_mask=valid_mask)
+    # The state keeps the last `state_len` valid inputs.
+    torch.testing.assert_close(
+        conv_layer.conv_states,
+        prefill_x[:, num_valid - state_len : num_valid, :],
+    )
+
+    decode_x = torch.full((1, 1, conv_dim), 7.0)
+    conv_layer.update_conv_state(decode_x)
+    torch.testing.assert_close(
+        conv_layer.conv_states,
+        torch.cat(
+            [prefill_x[:, num_valid - state_len + 1 : num_valid, :], decode_x],
+            dim=1,
+        ),
+    )
 
     # Test that .to(torch.float16) keeps recurrent_states as float32
     conv_layer.to(torch.float16)
@@ -318,25 +359,6 @@ class CacheTest(googletest.TestCase):
     conv_layer.update_recurrent_state(new_r)
     self.assertTrue(torch.allclose(conv_layer.recurrent_states, new_r))
 
-    # Test update_conv_state (single-token decode)
-    conv_dim = conv_layer.conv_states.shape[-1]
-    initial_c = torch.randn(1, 3, conv_dim, dtype=torch.float16)
-    conv_layer.conv_states.copy_(initial_c)
-    new_token_c = torch.randn(1, 1, conv_dim, dtype=torch.float16)
-    updated_c = conv_layer.update_conv_state(new_token_c)
-    expected_c = torch.cat([initial_c[:, 1:, :], new_token_c], dim=1)
-    self.assertTrue(torch.allclose(updated_c, expected_c))
-
-    # Test update_conv_state (multi-token prefill with mask)
-    prefill_c = torch.randn(1, 5, conv_dim, dtype=torch.float16)
-    valid_mask = torch.tensor([[1.0, 1.0, 1.0, 1.0, 0.0]])
-    updated_prefill_c = conv_layer.update_conv_state(
-        prefill_c, valid_mask=valid_mask
-    )
-    padded_input = torch.cat([expected_c, prefill_c], dim=1)
-    expected_prefill_c = padded_input[:, 4:7, :]
-    self.assertTrue(torch.allclose(updated_prefill_c, expected_prefill_c))
-
     # Test flatten / unflatten roundtrip
     flattened, context = cache_lib._flatten_kvc_t(kv_cache)
     self.assertLen(flattened, 4)  # k_0, v_0, c_1, r_1
@@ -347,6 +369,7 @@ class CacheTest(googletest.TestCase):
     self.assertIsInstance(
         unflattened.layers[1], cache_lib.LiteRTLMConvCacheLayer
     )
+    self.assertEqual(unflattened.layers[1].conv_kernel_size, state_len)
     self.assertTrue(
         torch.allclose(
             unflattened.layers[1].conv_states, conv_layer.conv_states
@@ -358,7 +381,70 @@ class CacheTest(googletest.TestCase):
         )
     )
 
+  def test_lfm2_conv_cache_is_channels_last(self):
+    class MockLfm2Config:
+
+      def __init__(self):
+        self.num_hidden_layers = 2
+        self.layer_types = ["conv", "full_attention"]
+        self.hidden_size = 64
+        self.num_attention_heads = 4
+        self.num_key_value_heads = 2
+        self.head_dim = 16
+        self.conv_L_cache = 3
+
+    export_config = cache_lib.ExportableModuleConfig(
+        model="dummy_model",
+        cache_length=128,
+        batch_size=1,
+        k_ts_idx=2,
+        v_ts_idx=2,
+    )
+    model_config = MockLfm2Config()
+    kv_cache = cache_lib.LiteRTLMCache.create_from_config(
+        model_config, export_config
+    )
+    hidden_size = model_config.hidden_size
+    state_len = model_config.conv_L_cache - 1
+
+    conv_layer = kv_cache.layers[0]
+    self.assertIsInstance(conv_layer, cache_lib.LiteRTLMConvCacheLayer)
+    self.assertIsNone(conv_layer.recurrent_states)
+    self.assertEqual(conv_layer.conv_kernel_size, state_len)
+    self.assertEqual(conv_layer.conv_states.shape, (1, state_len, hidden_size))
+
+    # Padded prefill keeps the last `state_len` valid inputs; decode appends
+    # one.
+    seq_len, num_valid = 5, 3
+    prefill_x = torch.arange(
+        seq_len * hidden_size, dtype=torch.float32
+    ).reshape(1, seq_len, hidden_size)
+    conv_layer.update_conv_state(
+        prefill_x,
+        valid_mask=torch.arange(seq_len).unsqueeze(0) < num_valid,
+    )
+    torch.testing.assert_close(
+        conv_layer.conv_states,
+        prefill_x[:, num_valid - state_len : num_valid, :],
+    )
+    decode_x = torch.full((1, 1, hidden_size), 7.0)
+    conv_layer.update_conv_state(decode_x)
+    torch.testing.assert_close(
+        conv_layer.conv_states,
+        torch.cat(
+            [prefill_x[:, num_valid - state_len + 1 : num_valid, :], decode_x],
+            dim=1,
+        ),
+    )
+
+    # Channels-first inputs are rejected.
+    with self.assertRaises(ValueError):
+      conv_layer.update_conv_state(torch.zeros(1, hidden_size, 1))
+    with self.assertRaises(ValueError):
+      cache_lib.LiteRTLMConvCacheLayer(
+          torch.zeros(1, hidden_size), layer_type="conv"
+      )
+
 
 if __name__ == "__main__":
   googletest.main()
-

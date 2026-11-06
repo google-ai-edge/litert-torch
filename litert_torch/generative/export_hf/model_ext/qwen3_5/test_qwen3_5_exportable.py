@@ -150,10 +150,11 @@ class Qwen35ExportableTest(absltest.TestCase):
         hf_conv = hf_conv[0] if isinstance(hf_conv, dict) else hf_conv
         hf_rec = getattr(hf_cache.layers[i], "recurrent_states")
         hf_rec = hf_rec[0] if isinstance(hf_rec, dict) else hf_rec
-        ref_conv = hf_conv[:, :, -conv_L:]
-        ref_conv = ref_conv.transpose(1, 2)
         torch.testing.assert_close(
-            export_cache.layers[i].conv_states, ref_conv, rtol=1e-3, atol=1e-3
+            export_cache.layers[i].conv_states,
+            hf_conv[:, :, -conv_L:].transpose(1, 2),
+            rtol=1e-3,
+            atol=1e-3,
         )
         torch.testing.assert_close(export_cache.layers[i].recurrent_states, hf_rec, rtol=1e-3, atol=1e-3)
       else:

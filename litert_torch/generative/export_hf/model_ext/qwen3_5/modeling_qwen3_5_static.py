@@ -231,7 +231,6 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
   ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Applies causal short conv, L2 norm, GDN recurrence, and gated RMSNorm."""
     batch_size, seq_len, _ = mixed_qkv.shape
-    state_len = self.conv_kernel_size - 1
     has_valid_mask = valid_mask is not None and valid_mask.numel() > 0
 
     valid_len: Optional[torch.Tensor] = None
@@ -276,23 +275,15 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
           use_silu=True,
       )
     else:
-      # conv_state is channels-last (NWC): [batch, state_len, conv_dim].
-      full_qkv = torch.cat([conv_state, mixed_qkv], dim=1)
-      conv_out = F.conv1d(
-          full_qkv.transpose(1, 2),
-          self.conv1d.weight,
-          self.conv1d.bias,
-          padding=0,
-          groups=self.conv_dim,
+      conv_out, new_conv_state = short_conv_composite.short_conv(
+          in_proj_out=mixed_qkv,
+          conv_state=conv_state,
+          conv_weight=self.conv1d.weight,
+          conv_bias=self.conv1d.bias,
+          num_valid_tokens=num_valid_tokens,
+          is_gated=False,
+          use_silu=True,
       )
-      conv_out = F.silu(conv_out[:, :, -seq_len:]).transpose(1, 2)
-      if num_valid_tokens is not None:
-        indices = num_valid_tokens + torch.arange(
-            state_len, device=full_qkv.device, dtype=torch.int32
-        )
-        new_conv_state = torch.ops.tfl.gather(full_qkv, indices, 1)
-      else:
-        new_conv_state = full_qkv[:, -state_len:, :]
 
     query, key, value = torch.split(
         conv_out, [self.key_dim, self.key_dim, self.value_dim], dim=-1
