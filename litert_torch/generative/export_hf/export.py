@@ -1022,81 +1022,95 @@ def export(
   else:
     work_dir = output_dir
 
-  plan = _resolve_plan(
-      model,
-      task=task,
-      target=target,
-      extension_modules=extension_modules,
-      overrides=provided_args,
-  )
-  resolved_task = ExportTask(plan.task)
+  keep_temp = keep_temporary_files
+  export_succeeded = False
+  try:
 
-  valid_fields = {
-      f.name
-      for f in dataclasses.fields(exportable_module.ExportableModuleConfig)
-  }
-  config_args = {}
-  extra_args = {}
-  for key, value in plan.export_kwargs.items():
-    if key == 'extra_kwargs':
-      if isinstance(value, dict):
-        extra_args.update(value)
-    elif key in valid_fields:
-      config_args[key] = value
-    else:
-      extra_args[key] = value
-
-  export_config = exportable_module.ExportableModuleConfig(
-      model=model,
-      output_dir=output_dir,
-      work_dir=work_dir,
-      task=resolved_task,
-      extra_kwargs=extra_args,
-      **config_args,
-  )
-
-  export_config.print_summary()
-
-  export_utils.validate_pipeline_config(export_config)
-
-  # TODO(weiyiw): Move this to the exportable module config.
-  export_tasks, legacy_compile_triggered = _build_export_tasks(export_config)
-  _warn_if_legacy_compile(resolved_task, legacy_compile_triggered)
-
-  run_compilation_pipeline = _should_run_compilation_pipeline(export_config)
-
-  orig_keep_temp = export_config.keep_temporary_files
-  if run_compilation_pipeline:
-    export_config.keep_temporary_files = True
-
-  exported_model_artifacts = run_export_tasks(
-      export_tasks,
-      export_config,
-  )
-
-  run_compilation_pipeline = _should_run_compilation_pipeline(export_config)
-
-  if run_compilation_pipeline:
-    temp_litertlm = exported_model_artifacts.litert_lm_model_path
-    if not temp_litertlm:
-      raise RuntimeError(
-          'NPU compilation pipeline requires bundle_litert_lm = True.'
-      )
-
-    export_utils.run_npu_compilation_pipeline(
-        export_config=export_config,
-        input_litertlm=temp_litertlm,
-        work_dir=work_dir,
-        output_dir=output_dir,
+    plan = _resolve_plan(
+        model,
+        task=task,
+        target=target,
+        extension_modules=extension_modules,
+        overrides=provided_args,
     )
-    export_config.keep_temporary_files = orig_keep_temp
+    resolved_task = ExportTask(plan.task)
 
-  keep_temp = export_config.keep_temporary_files
-  if not export_config.bundle_litert_lm:
-    keep_temp = True
-  if not keep_temp:
-    print('Cleaning up temporary files.')
-    shutil.rmtree(work_dir)
+    valid_fields = {
+        f.name
+        for f in dataclasses.fields(exportable_module.ExportableModuleConfig)
+    }
+    config_args = {}
+    extra_args = {}
+    for key, value in plan.export_kwargs.items():
+      if key == 'extra_kwargs':
+        if isinstance(value, dict):
+          extra_args.update(value)
+      elif key in valid_fields:
+        config_args[key] = value
+      else:
+        extra_args[key] = value
+
+    export_config = exportable_module.ExportableModuleConfig(
+        model=model,
+        output_dir=output_dir,
+        work_dir=work_dir,
+        task=resolved_task,
+        extra_kwargs=extra_args,
+        **config_args,
+    )
+
+    export_config.print_summary()
+
+    export_utils.validate_pipeline_config(export_config)
+
+    # TODO(weiyiw): Move this to the exportable module config.
+    export_tasks, legacy_compile_triggered = _build_export_tasks(export_config)
+    _warn_if_legacy_compile(resolved_task, legacy_compile_triggered)
+
+    run_compilation_pipeline = _should_run_compilation_pipeline(export_config)
+
+    orig_keep_temp = export_config.keep_temporary_files
+    if run_compilation_pipeline:
+      export_config.keep_temporary_files = True
+
+    exported_model_artifacts = run_export_tasks(
+        export_tasks,
+        export_config,
+    )
+
+    run_compilation_pipeline = _should_run_compilation_pipeline(export_config)
+
+    if run_compilation_pipeline:
+      temp_litertlm = exported_model_artifacts.litert_lm_model_path
+      if not temp_litertlm:
+        raise RuntimeError(
+            'NPU compilation pipeline requires bundle_litert_lm = True.'
+        )
+
+      export_utils.run_npu_compilation_pipeline(
+          export_config=export_config,
+          input_litertlm=temp_litertlm,
+          work_dir=work_dir,
+          output_dir=output_dir,
+      )
+      export_config.keep_temporary_files = orig_keep_temp
+
+    keep_temp = export_config.keep_temporary_files
+    if not export_config.bundle_litert_lm:
+      keep_temp = True
+    export_succeeded = True
+  finally:
+
+    should_cleanup_work_dir = (
+        work_dir != output_dir
+        and os.path.exists(work_dir)
+        and (not keep_temp if export_succeeded else not keep_temporary_files)
+    )
+    if should_cleanup_work_dir:
+      if export_succeeded:
+        print('Cleaning up temporary files.')
+      shutil.rmtree(work_dir, ignore_errors=True)
+
   print(
       'Export complete. Model saved to:'
       f' {exported_model_artifacts.litert_lm_model_path or output_dir}'

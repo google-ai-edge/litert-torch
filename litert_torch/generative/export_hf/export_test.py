@@ -1139,6 +1139,59 @@ class ExportPlanAndPresetResolutionTest(parameterized.TestCase):
     self.assertEqual(passed_config.input_sec, 10.0)
     self.assertEqual(plan.sources["input_sec"], "user")
 
+  def test_failed_export_cleans_up_temporary_work_dir(self):
+    import os  # pylint: disable=g-import-not-at-top
+
+    model = self._checkpoint({"model_type": "whisper"})
+    out_dir = self.create_tempdir().full_path
+
+    with mock.patch.object(
+        export,
+        "run_export_tasks",
+        autospec=True,
+        side_effect=ModuleNotFoundError("No module named 'nemo'"),
+    ):
+      with self.assertRaises(ModuleNotFoundError):
+        export.export(model, out_dir)
+
+    self.assertEqual(os.listdir(out_dir), [])
+
+  def test_failed_export_with_keep_temporary_files_preserves_output_dir(self):
+    import os  # pylint: disable=g-import-not-at-top
+
+    model = self._checkpoint({"model_type": "whisper"})
+    out_dir = self.create_tempdir().full_path
+    sentinel = os.path.join(out_dir, "keep.txt")
+    with open(sentinel, "w") as f:
+      f.write("keep")
+
+    with mock.patch.object(
+        export,
+        "run_export_tasks",
+        autospec=True,
+        side_effect=RuntimeError("export failed"),
+    ):
+      with self.assertRaises(RuntimeError):
+        export.export(model, out_dir, keep_temporary_files=True)
+
+    self.assertTrue(os.path.exists(sentinel))
+
+  def test_auto_docstring_undocumented_parameter_errors_are_silenced(self):
+    import contextlib  # pylint: disable=g-import-not-at-top
+    import importlib  # pylint: disable=g-import-not-at-top
+    import io  # pylint: disable=g-import-not-at-top
+    from litert_torch.generative.export_hf.model_ext.qwen3_tts.tokenizer_v2 import (  # pylint: disable=g-import-not-at-top
+        modeling_qwen3_tts_tokenizer_v2,
+    )
+    from transformers.models.qwen3_5 import configuration_qwen3_5  # pylint: disable=g-import-not-at-top
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+      importlib.reload(configuration_qwen3_5)
+      importlib.reload(modeling_qwen3_tts_tokenizer_v2)
+
+    self.assertNotIn("not documented", buf.getvalue())
+
 
 if __name__ == "__main__":
   absltest.main()
