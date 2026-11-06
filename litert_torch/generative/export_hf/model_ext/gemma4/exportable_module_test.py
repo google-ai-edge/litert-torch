@@ -14,6 +14,7 @@
 # ==============================================================================
 """Tests for Gemma 4 exportable modules, extension hooks, and attention fixes."""
 
+import dataclasses
 import os
 from unittest import mock
 
@@ -22,6 +23,7 @@ from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module_config
 from litert_torch.generative.export_hf.core import weights_loader
 from litert_torch.generative.export_hf.core.external_rope import preprocess_model as external_rope_preprocess_model
+from litert_torch.generative.export_hf.core.split_cache import attention as split_cache_attention
 from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope
 import litert_torch.generative.export_hf.model_ext as _
 from litert_torch.generative.export_hf.model_ext import extension as extension_lib
@@ -613,6 +615,142 @@ class Gemma4ExportableModuleTest(parameterized.TestCase):
         self.assertTrue(os.path.exists(out_tflite))
         self.assertGreater(os.path.getsize(out_tflite), 0)
 
+  @parameterized.product(
+      signature=["prefill_8", "decode"],
+      # (layers, KV-shared layers, ring buffer size, attention calls over a
+      # cache with the full length). The last layer is forced to be global, so
+      # 3 layers are [sliding, global, global] and 4 layers are [sliding,
+      # global, sliding, global]. Without a ring buffer every cache has the
+      # full 64 slots; with a 32-slot ring buffer only the global caches do.
+      # With KV sharing (as in the E-series models) the last 2 layers attend
+      # over the caches of earlier layers of the same type, so they count too.
+      layers_shared_ring_blocked=[
+          (3, 0, None, 3),
+          (3, 0, 32, 2),
+          (4, 2, None, 4),
+          (4, 2, 32, 2),
+      ],
+  )
+  def test_split_cache_blocked_attention_matches_plain(
+      self, signature, layers_shared_ring_blocked
+  ):
+    # Layers whose cache has the full 64 slots attend over it in 4 blocks of 16
+    # slots; ring-buffer layers keep plain attention.
+    num_layers, num_shared, ring_size, blocked_layers = (
+        layers_shared_ring_blocked
+    )
+    torch.manual_seed(4)
+    with gemma4_patch.gemma4_litert_patch():
+      cfg = _make_small_text_config(
+          num_hidden_layers=num_layers, num_kv_shared_layers=num_shared
+      )
+      model = modeling_gemma4.Gemma4ForCausalLM(cfg).eval()
+    model = external_rope_preprocess_model.inject_rotary_position_embedding(
+        model
+    )
+    model.set_attn_implementation("lrt_split_cache_attention")
+    model.config._attn_implementation = "lrt_split_cache_attention"
+    text_cfg = cfg.get_text_config()
+    outputs = {}
+    inputs = None
+    for block_size in (None, 16):
+      export_cfg = exportable_module_config.ExportableModuleConfig(
+          model="dummy",
+          split_cache=True,
+          attention_kv_block_size=block_size,
+          cache_length=64,
+          sliding_window_ring_buffer_size=ring_size,
+          prefill_lengths=[8],
+      )
+      with gemma4_patch.patch_gemma4_model(model, export_cfg):
+        if signature.startswith("prefill"):
+          mod_cls = (
+              gemma4_split_cache.LiteRTSplitCacheExportableModuleForDecoderOnlyLMPrefill
+          )
+        else:
+          mod_cls = (
+              gemma4_split_cache.LiteRTSplitCacheExportableModuleForDecoderOnlyLMGenerate
+          )
+        mod = mod_cls(model, export_cfg).eval()
+        kwargs = mod.attention_kwargs()
+        if block_size is None:
+          self.assertNotIn("attention_kv_block_size", kwargs)
+        else:
+          self.assertEqual(kwargs["attention_kv_block_size"], 16)
+          self.assertEqual(kwargs["attention_kv_block_cache_length"], 64)
+        if inputs is None:
+          # Random cache contents and embeddings, shared by both builds.
+          inputs, _ = mod.get_sample_inputs(text_cfg)[signature]
+          for layer in inputs["kv_cache"].layers:
+            layer.keys[0].normal_()
+            layer.values[0].normal_()
+          inputs["embeddings"].normal_()
+        with (
+            torch.no_grad(),
+            mock.patch.object(
+                split_cache_attention,
+                "_blocked_attention",
+                wraps=split_cache_attention._blocked_attention,
+            ) as spy,
+        ):
+          outputs[block_size] = mod(**inputs)
+        self.assertEqual(
+            spy.call_count, 0 if block_size is None else blocked_layers
+        )
+
+    plain, blocked = outputs[None], outputs[16]
+    for key in ("kv_slice_k", "kv_slice_v"):
+      for got, want in zip(blocked[key], plain[key]):
+        torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
+    if "logits" in plain:
+      torch.testing.assert_close(
+          blocked["logits"], plain["logits"], rtol=1e-5, atol=1e-5
+      )
+
+  @parameterized.parameters(32, 64)
+  def test_split_cache_blocked_attention_per_bucket(self, cache_length):
+    # Mirrors export_lib, which builds one config per cache-length bucket with
+    # dataclasses.replace: each bucket blocks the caches of its own length.
+    torch.manual_seed(4)
+    with gemma4_patch.gemma4_litert_patch():
+      cfg = _make_small_text_config(num_hidden_layers=3, num_kv_shared_layers=0)
+      model = modeling_gemma4.Gemma4ForCausalLM(cfg).eval()
+    model = external_rope_preprocess_model.inject_rotary_position_embedding(
+        model
+    )
+    model.set_attn_implementation("lrt_split_cache_attention")
+    model.config._attn_implementation = "lrt_split_cache_attention"
+    export_cfg = exportable_module_config.ExportableModuleConfig(
+        model="dummy",
+        split_cache=True,
+        attention_kv_block_size=16,
+        cache_length=64,
+        cache_lengths=[32, 64],
+        prefill_lengths=[8],
+    )
+    bucket_cfg = dataclasses.replace(export_cfg, cache_length=cache_length)
+    with gemma4_patch.patch_gemma4_model(model, bucket_cfg):
+      mod = gemma4_split_cache.LiteRTSplitCacheExportableModuleForDecoderOnlyLMGenerate(
+          model, bucket_cfg
+      ).eval()
+      kwargs = mod.attention_kwargs()
+      self.assertEqual(kwargs["attention_kv_block_size"], 16)
+      self.assertEqual(kwargs["attention_kv_block_cache_length"], cache_length)
+      inputs, _ = mod.get_sample_inputs(cfg.get_text_config())["decode"]
+      with (
+          torch.no_grad(),
+          mock.patch.object(
+              split_cache_attention,
+              "_blocked_attention",
+              wraps=split_cache_attention._blocked_attention,
+          ) as spy,
+      ):
+        mod(**inputs)
+    # No ring buffer: all 3 cache layers have the bucket's full length.
+    self.assertEqual(spy.call_count, 3)
+    # Positional args: (query, key_past, ..., k_ts_idx, ...).
+    key_past, k_ts_idx = spy.call_args.args[1], spy.call_args.args[9]
+    self.assertEqual(key_past.shape[k_ts_idx], cache_length)
 
 if __name__ == "__main__":
   googletest.main()

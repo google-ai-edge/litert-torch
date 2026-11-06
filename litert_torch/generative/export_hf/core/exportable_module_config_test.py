@@ -14,6 +14,7 @@
 # ==============================================================================
 """Tests for SDPA composite normalization, GPU optimizations, and extra_kwargs validation."""
 
+import dataclasses
 from unittest import mock
 import warnings
 
@@ -337,6 +338,108 @@ class ConverterV2OptionsTest(parameterized.TestCase):
         ValueError, f"`use_v2=True` does not support: .*{expected_option}"
     ):
       _config(use_v2=True, **kwargs)
+
+
+class AttentionKvBlockSizeTest(parameterized.TestCase):
+
+  def test_unset_by_default(self):
+    self.assertIsNone(_config(split_cache=True).attention_kv_block_size)
+
+  @parameterized.named_parameters(
+      ("single_bucket", dict(cache_length=4096)),
+      # Buckets not larger than the block size use plain attention.
+      (
+          "small_bucket_plain",
+          dict(cache_length=8192, cache_lengths=[1024, 8192]),
+      ),
+      (
+          "dividing_buckets",
+          dict(cache_length=32768, cache_lengths=[8192, 32768]),
+      ),
+  )
+  def test_valid(self, kwargs):
+    config = _config(split_cache=True, attention_kv_block_size=1024, **kwargs)
+    self.assertEqual(config.attention_kv_block_size, 1024)
+
+  @parameterized.named_parameters(
+      ("no_split_cache", dict(), "requires split_cache"),
+      (
+          "zero",
+          dict(split_cache=True, attention_kv_block_size=0),
+          "positive int",
+      ),
+      (
+          "negative",
+          dict(split_cache=True, attention_kv_block_size=-8),
+          "positive int",
+      ),
+      (
+          "not_int",
+          dict(split_cache=True, attention_kv_block_size=512.0),
+          "positive int",
+      ),
+      (
+          "bool",
+          dict(split_cache=True, attention_kv_block_size=True),
+          "positive int",
+      ),
+      (
+          "not_dividing",
+          dict(split_cache=True, attention_kv_block_size=1000),
+          "must divide",
+      ),
+      (
+          "not_dividing_bucket",
+          dict(
+              split_cache=True,
+              attention_kv_block_size=3072,
+              cache_length=6144,
+              cache_lengths=[4096, 6144],
+          ),
+          "must divide",
+      ),
+      (
+          "not_smaller",
+          dict(split_cache=True, attention_kv_block_size=4096),
+          "smaller than the cache length",
+      ),
+      (
+          "dynamic_shape",
+          dict(split_cache=True, enable_dynamic_shape=True),
+          "static cache length",
+      ),
+      (
+          "gpu_dynamic_cache",
+          dict(split_cache=True, enable_gpu_dynamic_cache=True),
+          "static cache length",
+      ),
+  )
+  def test_invalid_raises(self, kwargs, message):
+    kwargs = dict(attention_kv_block_size=1024, cache_length=4096) | kwargs
+    with self.assertRaisesRegex(ValueError, message):
+      _config(**kwargs)
+
+  @parameterized.parameters(16, 32, 64)
+  def test_per_bucket_config_validates(self, cache_length):
+    # export_lib builds one config per bucket with dataclasses.replace, which
+    # reruns the validation; buckets no larger than the block size are fine.
+    config = _config(
+        split_cache=True,
+        attention_kv_block_size=16,
+        cache_length=64,
+        cache_lengths=[16, 32, 64],
+    )
+    bucket = dataclasses.replace(config, cache_length=cache_length)
+    self.assertEqual(bucket.cache_length, cache_length)
+    self.assertEqual(bucket.attention_kv_block_size, 16)
+
+  def test_unsupported_task_names_task(self):
+    with self.assertRaisesRegex(ValueError, "text_to_speech"):
+      _config(
+          split_cache=True,
+          attention_kv_block_size=1024,
+          task=exportable_module_config.ExportTask.TEXT_TO_SPEECH,
+      )
 
 
 if __name__ == "__main__":

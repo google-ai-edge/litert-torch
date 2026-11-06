@@ -758,6 +758,7 @@ def export(
     k_ts_idx: int | None = None,
     v_ts_idx: int | None = None,
     split_cache: bool | None = None,
+    attention_kv_block_size: int | None = None,
     cache_implementation: str | None = None,
     auto_model_override: str | None = None,
     use_jinja_template: bool | None = None,
@@ -894,6 +895,14 @@ def export(
     k_ts_idx: The index of time step dimension in the key tensor.
     v_ts_idx: The index of time step dimension in the value tensor.
     split_cache: Whether to use split cache attention.
+    attention_kv_block_size: (Experimental, requires split_cache) If set, the
+      layers whose KV cache length equals the signature's (bucket's)
+      cache_length (global layers, and sliding layers without a ring buffer)
+      attend over it in blocks of this many slots (each block normalized with
+      its own max, combined exactly at the end). Must be a positive int that
+      divides every cache length larger than it; smaller buckets and caches of
+      any other length (ring buffers, even one larger than a small bucket) use
+      plain attention.
     cache_implementation: The cache implementation to use.
     auto_model_override: Overriding the AutoModel class to use for export.
     use_jinja_template: Whether to use jinja template.
