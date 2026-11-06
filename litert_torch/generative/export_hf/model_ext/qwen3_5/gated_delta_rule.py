@@ -15,11 +15,14 @@
 """Custom operators and lowerings for Gated Delta Net linear attention."""
 
 from flatbuffers import flexbuffers
+from litert_torch.backend import composite
 from litert_torch.backend import lowerings
-from litert_torch.backend.torch_tfl import _ops as _
 from litert_torch.backend.lowerings import utils as lowering_utils
+from litert_torch.backend.torch_tfl import _ops as _
 from litert_converter.mlir import ir
+from litert_converter.mlir.dialects import stablehlo
 import torch
+import torch.nn.functional as F
 
 
 def _gated_delta_update_custom_options(
@@ -332,20 +335,28 @@ def _gated_delta_update_lower(
     valid_len: ir.Value | None = None,
     mode: int = 0,
 ):
-  """Lowers gdn_attention to tfl.custom."""
+  """Lowers gated_delta_update to tfl.custom.
+
+  The op is emitted in the side-effect-free StableHLO CustomCall carrier of TFL
+  ops, which is legalized to `tfl.custom`. Being side-effect free matters inside
+  `odml.gated_delta_block`: once the composite is outlined, the original copy of
+  its decomposition left in the caller is dead and must be removable by DCE.
+  """
   operands = [q_t, k_t, v_t, beta_t, g_t, recurrent_state]
   if valid_len is not None:
     operands.append(valid_len)
-  op = ir.Operation.create(
-      "tfl.custom",
-      results=lowering_utils.node_meta_to_ir_types(lctx.node),
-      operands=operands,
-      attributes={
-          "custom_code": ir.StringAttr.get("gated_delta_update"),
-          "custom_option": _const_bytes_attr(
-              _gated_delta_update_custom_options(mode=mode)
-          ),
-      },
+  attributes = ir.DictAttr.get({
+      "custom_code": ir.StringAttr.get("gated_delta_update"),
+      "custom_option": _const_bytes_attr(
+          _gated_delta_update_custom_options(mode=mode)
+      ),
+  })
+  op = stablehlo.CustomCallOp(
+      result=lowering_utils.node_meta_to_ir_types(lctx.node),
+      inputs=operands,
+      call_target_name=ir.StringAttr.get("tfl.custom"),
+      has_side_effect=ir.BoolAttr.get(False),
+      backend_config=ir.StringAttr.get(str(attributes)),
   )
   return tuple(op.results)
 
@@ -417,3 +428,219 @@ def apply_gated_delta_rule(
       valid_mask=valid_mask,
       valid_len=valid_len,
   )
+
+
+def _l2norm_last_dim(x: torch.Tensor, eps: float, scale: float) -> torch.Tensor:
+  """Returns `x * scale / sqrt(sum(x^2) + eps)` along the last dimension."""
+  head_dim = x.shape[-1]
+  xf = x.float()
+  normed = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps / head_dim)
+  return normed.type_as(x) * (scale / head_dim**0.5)
+
+
+def _rms_norm_last_dim(
+    x: torch.Tensor, weight: torch.Tensor, eps: float
+) -> torch.Tensor:
+  """RMS norm along the last dimension, matching `rms_norm_with_hlfb`."""
+  xf = x.float()
+  normed = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)
+  return normed.type_as(x) * weight
+
+
+def _gated_delta_block_dims(
+    conv_out: torch.Tensor, recurrent_state: torch.Tensor
+) -> tuple[int, int, int, int]:
+  """Derives the block's head counts and dims from its operand shapes.
+
+  Args:
+    conv_out: Short conv output [batch, seq_len, 2 * key_dim + value_dim].
+    recurrent_state: [batch, num_v_heads, head_k_dim, head_v_dim].
+
+  Returns:
+    `(num_k_heads, num_v_heads, head_k_dim, head_v_dim)`.
+  """
+  _, num_v_heads, head_k_dim, head_v_dim = recurrent_state.shape
+  value_dim = num_v_heads * head_v_dim
+  key_dim, rem = divmod(conv_out.shape[-1] - value_dim, 2)
+  if rem or key_dim <= 0 or key_dim % head_k_dim:
+    raise ValueError(
+        f"conv_out channels {conv_out.shape[-1]} do not match recurrent_state"
+        f" shape {tuple(recurrent_state.shape)}"
+    )
+  return key_dim // head_k_dim, num_v_heads, head_k_dim, head_v_dim
+
+
+def gated_delta_block(
+    conv_out: torch.Tensor,
+    zba: torch.Tensor,
+    a_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    norm_weight: torch.Tensor,
+    recurrent_state: torch.Tensor,
+    valid_mask: torch.Tensor | None = None,
+    *,
+    eps: float = 1e-6,
+    norm_eps: float = 1e-6,
+    mode: int = 0,
+    use_fused_gdn: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+  """Post-conv GatedDeltaNet block, the decomposition of `odml.gated_delta_block`.
+
+  Splits q/k/v and z/b/a, computes the beta and g gates, applies token masks,
+  L2-normalizes q (with `1 / sqrt(head_k_dim)` folded in) and k, updates the
+  recurrent state, and applies gated RMSNorm. Head counts and head dims are
+  derived from the `recurrent_state` and `conv_out` shapes.
+
+  Args:
+    conv_out: Short conv output [batch, seq_len, 2 * key_dim + value_dim].
+    zba: Fused projection output [z | b | a], [batch, seq_len, value_dim + 2 *
+      num_v_heads].
+    a_log: [num_v_heads].
+    dt_bias: [num_v_heads].
+    norm_weight: Gated RMSNorm weight [head_v_dim].
+    recurrent_state: [batch, num_v_heads, head_k_dim, head_v_dim], float32.
+    valid_mask: Optional [batch, seq_len] mask in the activation dtype.
+    eps: Epsilon of the q/k L2 norm.
+    norm_eps: Epsilon of the gated RMSNorm.
+    mode: `mode` attribute of the `gated_delta_update` recurrence.
+    use_fused_gdn: Whether the recurrence is emitted as the `gated_delta_update`
+      custom op (export) or computed in PyTorch (reference).
+
+  Returns:
+    The gated, normalized output [batch, seq_len, value_dim] and the new
+    float32 recurrent state.
+  """
+  batch_size, seq_len, _ = conv_out.shape
+  num_k_heads, num_v_heads, head_k_dim, head_v_dim = _gated_delta_block_dims(
+      conv_out, recurrent_state
+  )
+  key_dim = num_k_heads * head_k_dim
+  value_dim = num_v_heads * head_v_dim
+  query, key, value = torch.split(
+      conv_out, [key_dim, key_dim, value_dim], dim=-1
+  )
+  query = query.reshape(batch_size, seq_len, num_k_heads, head_k_dim)
+  key = key.reshape(batch_size, seq_len, num_k_heads, head_k_dim)
+  value = value.reshape(batch_size, seq_len, num_v_heads, head_v_dim)
+  z, b, a = torch.split(zba, [value_dim, num_v_heads, num_v_heads], dim=-1)
+
+  beta = b.float().sigmoid().to(conv_out.dtype)
+  a_val = a.to(torch.float32) + dt_bias.to(torch.float32)
+  g = -a_log.to(torch.float32).exp() * (
+      torch.relu(a_val) + torch.log1p(torch.exp(-a_val.abs()))
+  )
+
+  valid_len: torch.Tensor | None = None
+  if valid_mask is not None:
+    query = query * valid_mask.view(batch_size, seq_len, 1, 1).to(query.dtype)
+    beta = beta * valid_mask.view(batch_size, seq_len, 1).to(beta.dtype)
+    g = g * valid_mask.view(batch_size, seq_len, 1).to(g.dtype)
+    if seq_len > 1:
+      positions = torch.arange(
+          1, seq_len + 1, dtype=torch.float32, device=valid_mask.device
+      )
+      valid_len = ((valid_mask.to(torch.float32) * positions).amax(dim=-1)).to(
+          torch.int32
+      )
+
+  query = _l2norm_last_dim(query, eps, 1.0 / (head_k_dim**0.5))
+  key = _l2norm_last_dim(key, eps, 1.0)
+
+  core_attn_out, new_state = apply_gated_delta_rule(
+      query,
+      key,
+      value,
+      beta,
+      g,
+      recurrent_state,
+      valid_mask=valid_mask,
+      valid_len=valid_len,
+      use_fused_gdn=use_fused_gdn,
+      gdn_mode=mode,
+      use_fp32=True,
+  )
+  core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(conv_out.dtype)
+  z = z.reshape(batch_size, seq_len, num_v_heads, head_v_dim)
+  out = _rms_norm_last_dim(core_attn_out, norm_weight, norm_eps) * F.silu(z)
+  if valid_mask is not None:
+    out = out * (valid_mask != 0).view(batch_size, seq_len, 1, 1).to(out.dtype)
+  return out.reshape(batch_size, seq_len, value_dim), new_state.to(
+      torch.float32
+  )
+
+
+def apply_gated_delta_block(
+    conv_out: torch.Tensor,
+    zba: torch.Tensor,
+    recurrent_state: torch.Tensor,
+    a_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    norm_weight: torch.Tensor,
+    valid_mask: torch.Tensor | None = None,
+    *,
+    eps: float,
+    norm_eps: float,
+    use_fp32: bool = True,
+    gdn_mode: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+  """Emits the post-conv GatedDeltaNet block as `odml.gated_delta_block`.
+
+  The composite covers everything between the short conv and `out_proj` (see
+  `gated_delta_block`). GPU delegates run it as one fused kernel. Elsewhere it
+  runs its decomposition: standard ops around the `gated_delta_update`
+  recurrence custom op, so CPU needs no block-specific kernel.
+
+  Composite operands, in order: conv_out, zba, a_log, dt_bias, norm_weight,
+  recurrent_state and the optional valid_mask. Results: the gated output and
+  the new recurrent state. Attributes: `mode`, `eps` and `norm_eps`; head counts
+  and head dims follow from the conv_out and recurrent_state shapes.
+
+  Args:
+    conv_out: Short conv output [batch, seq_len, 2 * key_dim + value_dim].
+    zba: Fused projection output [z | b | a], [batch, seq_len, value_dim + 2 *
+      num_v_heads].
+    recurrent_state: [batch, num_v_heads, head_k_dim, head_v_dim], float32.
+    a_log: [num_v_heads].
+    dt_bias: [num_v_heads].
+    norm_weight: Gated RMSNorm weight [head_v_dim].
+    valid_mask: Optional [batch, seq_len] mask in the activation dtype.
+    eps: Epsilon of the q/k L2 norm.
+    norm_eps: Epsilon of the gated RMSNorm.
+    use_fp32: Whether activations are cast to float32 at the composite boundary.
+    gdn_mode: `mode` attribute of the `gated_delta_update` recurrence.
+
+  Returns:
+    The gated, normalized output [batch, seq_len, value_dim] and the new
+    recurrent state.
+  """
+  initial_dtype = conv_out.dtype
+  compute_dtype = torch.float32 if use_fp32 else initial_dtype
+  operands = [
+      conv_out.to(compute_dtype),
+      zba.to(compute_dtype),
+      a_log.to(torch.float32),
+      dt_bias.to(torch.float32),
+      norm_weight.to(torch.float32),
+      recurrent_state.to(torch.float32),
+  ]
+  if valid_mask is not None:
+    operands.append(valid_mask.to(compute_dtype))
+  builder = composite.StableHLOCompositeBuilder(
+      name="odml.gated_delta_block",
+      attr={
+          "mode": int(gdn_mode),
+          "eps": float(eps),
+          "norm_eps": float(norm_eps),
+      },
+  )
+  operands = builder.mark_inputs(*operands)
+  out, new_state = gated_delta_block(
+      *operands[:6],
+      valid_mask=operands[6] if len(operands) > 6 else None,
+      eps=float(eps),
+      norm_eps=float(norm_eps),
+      mode=int(gdn_mode),
+      use_fused_gdn=True,
+  )
+  out, new_state = builder.mark_outputs(out, new_state)
+  return out.to(initial_dtype), new_state
