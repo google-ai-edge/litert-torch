@@ -616,6 +616,7 @@ class LiteRTLMConvCacheLayer(
         "model_config must have layer_types attribute for ConvCacheLayer."
     )
     layer_type = model_config.layer_types[layer_index]
+    kwargs.pop("layer_type", None)
     assert layer_type in (
         "conv",
         "linear_attention",
