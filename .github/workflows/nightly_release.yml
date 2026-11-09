@@ -26,11 +26,13 @@ jobs:
   build-and-release-nightly:
     needs: run-unittests-python
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
 
     name: Build and Release litert-torch-nightly
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Get and set nightly date
         id: date
         run: |
@@ -39,7 +41,7 @@ jobs:
           echo "date=${DATE}" >> $GITHUB_OUTPUT
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
         with:
           python-version: "3.11"
 
@@ -59,8 +61,28 @@ jobs:
       - name: List the contents of litert_torch wheel
         run: python -m zipfile --list dist/*.whl
 
-      - name: Upload to PyPI
-        run: twine upload dist/* --non-interactive -p ${{ secrets.PYPI_UPLOAD_TOKEN }}
+      - name: Install OSS Exit Gate staging dependencies
+        run: python3 -m pip install --upgrade pip keyring twine keyrings.google-artifactregistry-auth
+      - name: Authenticate to Google Cloud (OSS Exit Gate WIF)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: 'projects/305452601764/locations/global/workloadIdentityPools/builders/providers/github'
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+      - name: Stage package in OSS Exit Gate Artifact Registry
+        run: |
+          python3 -m twine upload \
+            --repository-url https://us-python.pkg.dev/oss-exit-gate-prod/litert-torch--pypi \
+            dist/*
+      - name: Trigger OSS Exit Gate release
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          echo '{"publish_all": true}' > publish_all.json
+          unset CLOUDSDK_CORE_PROJECT
+          gcloud storage cp publish_all.json \
+            "gs://oss-exit-gate-prod-projects-bucket/litert-torch/pypi/manifests/manifest-${RUN_ID}-${RUN_ATTEMPT}.json"
 
   run-pip-install-and-import-test:
     needs: build-and-release-nightly
@@ -74,7 +96,7 @@ jobs:
     container:
       image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
     steps:
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
         with:
           python-version: ${{ matrix.python-version }}
 
