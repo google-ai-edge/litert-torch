@@ -1024,6 +1024,32 @@ class PatchTest(parameterized.TestCase):
       adapter_sig_inputs, _ = adapter_inputs[f"vision_adapter_{n}"]
       self.assertEqual(adapter_sig_inputs["soft_tokens"].shape[1], n)
 
+  def test_vision_adapter_sample_inputs_uses_vision_hidden_size(self):
+    # Gemma 4 26B-A4B / 31B have vision_config.hidden_size=1152 while
+    # patchified pixel_values have last dim 3 * 16 * 16 = 768.
+    model = mock.MagicMock()
+    model_config = mock.MagicMock()
+    model_config.vision_config.hidden_size = 1152
+    image_processor = mock.MagicMock()
+    image_processor.return_value.pixel_values = torch.zeros((1, 2520, 768))
+    export_config = exportable_module_config.ExportableModuleConfig(
+        model="dummy"
+    )
+    adapter = vision_exportable.LiteRTExportableModuleForGemma4VisionAdapter(
+        model, export_config, tokenizer=mock.MagicMock()
+    )
+    sample_inputs = adapter.get_sample_inputs(
+        model_config,
+        image_processor=image_processor,
+        gemma4_vision_token_budgets=(70, 280),
+    )
+    self.assertEqual(
+        list(sample_inputs), ["vision_adapter_70", "vision_adapter_280"]
+    )
+    for n in (70, 280):
+      inputs_dict, _ = sample_inputs[f"vision_adapter_{n}"]
+      self.assertEqual(tuple(inputs_dict["soft_tokens"].shape), (1, n, 1152))
+
 
 if __name__ == "__main__":
   googletest.main()

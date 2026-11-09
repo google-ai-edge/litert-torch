@@ -129,14 +129,26 @@ class LiteRTExportableModuleForGemma4VisionAdapter(
       raise ValueError(
           'Image processor is required for Exporting Gemma4 vision adapter.'
       )
+    vision_config = getattr(model_config, 'vision_config', None)
+    if vision_config is None:
+      vision_tower = getattr(
+          getattr(self.model, 'model', None), 'vision_tower', None
+      )
+      vision_config = getattr(vision_tower, 'config', None)
+    config_hidden_size = getattr(vision_config, 'hidden_size', None)
     sample_inputs = {}
     for vision_output_length in vision_budgets.get_vision_token_budgets(kwargs):
-      dummy_image = image_processor(
-          images=[torch.zeros((1, 3, 224, 224))],
-          max_soft_tokens=vision_output_length,
-          return_tensors='pt',
-      ).pixel_values
-      hidden_size = dummy_image.shape[-1]
+      if isinstance(config_hidden_size, int) and not isinstance(
+          config_hidden_size, bool
+      ):
+        hidden_size = config_hidden_size
+      else:
+        dummy_image = image_processor(
+            images=[torch.zeros((1, 3, 224, 224))],
+            max_soft_tokens=vision_output_length,
+            return_tensors='pt',
+        ).pixel_values
+        hidden_size = dummy_image.shape[-1]
       features = torch.zeros(
           (1, vision_output_length, hidden_size), dtype=torch.float32
       )
