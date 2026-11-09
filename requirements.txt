@@ -14,6 +14,12 @@ tabulate
 safetensors
 kagglehub
 transformers
+# typer>=0.29 (pulled in by transformers) depends on pydantic. Because
+# ai-edge-litert-nightly[model-utils] pins xdsl==0.28.0, which requires
+# typing-extensions<4.13, pip backtracks to pydantic 2.11 / pydantic-core 2.33,
+# which has no Python 3.14 wheel and fails to build from source. Drop this pin
+# once xdsl is bumped upstream.
+typer<0.29
 multipledispatch
 jaxtyping
 fire

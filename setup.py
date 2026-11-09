@@ -94,6 +94,10 @@ setup(
         "safetensors",
         "multipledispatch",
         "transformers",
+        # typer>=0.29 (via transformers) pulls in pydantic, which cannot be
+        # installed on Python 3.14 while ai-edge-litert-nightly[model-utils]
+        # pins xdsl==0.28.0 (typing-extensions<4.13). See requirements.txt.
+        "typer<0.29",
         "kagglehub",
         "tabulate",
         "torch>=2.4.0",
