@@ -104,7 +104,11 @@ def _aten_select(x, dim, indexes):
 def _aten_index_select(x, dim, index):
   if x.shape == ():
     return x
-  return jnp.take(x, index, dim)
+  # aten.index_select requires in-range indices, so clamping is a valid
+  # realization. mode='clip' is StableHLO gather's native semantics; the default
+  # mode='fill' emits NumPy-compat out-of-bounds machinery that becomes ~9
+  # extra TFLite ops around the gather.
+  return jnp.take(x, index, dim, mode='clip')
 
 
 @op(torch.ops.aten.mean)
@@ -293,13 +297,15 @@ def _aten_bmm(x, y):
 def _aten_embedding(
     a, w, padding_idx=-1, scale_grad_by_freq=False, sparse=False
 ):
+  # aten.embedding requires in-range indices (see _aten_index_select for why
+  # mode='clip' is used).
   if padding_idx == -1:
-    return jnp.take(a, w, axis=0)
+    return jnp.take(a, w, axis=0, mode='clip')
 
   if padding_idx is not None and padding_idx != -1:
     a = a.at[padding_idx].set(0.0)
 
-  return jnp.take(a, w, axis=0)
+  return jnp.take(a, w, axis=0, mode='clip')
 
 
 @op(torch.ops.aten.rsqrt)
