@@ -151,18 +151,26 @@ pt2e_torch_model = convert_pt2e(pt2e_torch_model, fold_quantize=False)
 pt2e_drq_model = litert_torch.convert(pt2e_torch_model, sample_args, quant_config=QuantConfig(pt2e_quantizer=pt2e_quantizer))
 ```
 
-Following is the code snippet to quantize a model with [TensorFlow Lite Quantization](https://www.tensorflow.org/lite/performance/model_optimization).
+To quantize a converted model, use [LiteRT
+Quantizer](https://github.com/google-ai-edge/LiteRT/tree/main/litert_quantizer):
 
 ```python
-import tensorflow as tf
+import litert_torch
+from litert_quantizer import quantizer, recipe
 
-# Pass TfLite Converter quantization flags to _ai_edge_converter_flags parameter.
-tfl_converter_flags = {'optimizations': [tf.lite.Optimize.DEFAULT]}
+# Step 1: Convert the PyTorch model to a float32 LiteRT model.
+edge_model = litert_torch.convert(torch_model, sample_args)
+edge_model.export("model_float32.tflite")
 
-tfl_drq_model = litert_torch.convert(
-    torch_model, sample_args, _ai_edge_converter_flags=tfl_converter_flags
-)
+# Step 2: Quantize the float32 model with LiteRT Quantizer.
+qt = quantizer.Quantizer("model_float32.tflite")
+qt.load_quantization_recipe(recipe.dynamic_wi8_afp32())
+qt.quantize().export_model("model_quantized.tflite")
 ```
+
+Post-training quantization through TFLite converter flags
+(`_ai_edge_converter_flags`) is deprecated. See the [migration
+guide](https://developers.google.com/edge/litert/quantization/tflq_to_litertq_migration).
 
 ## Providing a Wrapper
 
