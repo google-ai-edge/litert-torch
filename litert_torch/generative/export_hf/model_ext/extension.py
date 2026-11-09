@@ -82,6 +82,7 @@ import hashlib
 import importlib
 from importlib import metadata as importlib_metadata
 from importlib import util as importlib_util
+import inspect
 import os
 import sys
 import types
@@ -737,6 +738,8 @@ class ModelExtension:
       self,
       param_name: str,
       try_load: Callable[[str], Any],
+      model_config: Any = None,
+      export_config: Any = None,
   ) -> Any | None:
     """Resolves a custom parameter tensor during Converter V2 weight streaming.
 
@@ -745,18 +748,27 @@ class ModelExtension:
     `fused_weight_specs` lookups. Use this hook when a patched module splits,
     slices, transposes, or rescales checkpoint tensors in ways not expressible
     via `checkpoint_key_prefixes` or `fused_weight_specs` (compare
+    `Qwen3_5Extension` in `model_ext/qwen3_5/extension.py` or
     `_MiniCpmOLlmWeightsLoader` in `model_ext/minicpm_o/minicpm_o.py`).
+
+    Subclasses may define either the legacy 2-argument signature
+    `(self, param_name, try_load)` or the 4-argument signature
+    `(self, param_name, try_load, model_config=None, export_config=None)`.
 
     Args:
       param_name: Export module parameter name requested by the converter.
       try_load: Helper callable `(key_or_param_name) -> Tensor | None` that
         searches candidate checkpoint prefixes in safetensors shards.
+      model_config: Optional loaded `PretrainedConfig` for architecture-specific
+        layout parameters (e.g. head counts or partial rotary factors).
+      export_config: Optional `ExportableModuleConfig` controlling active
+        composite or fusion weight layouts.
 
     Returns:
       A materialized `torch.Tensor` if handled by this extension, or `None` to
       fall back to standard `HFCheckpointWeightsLoader` resolution.
     """
-    del param_name, try_load
+    del param_name, try_load, model_config, export_config
     return None
 
   def load_config(
@@ -818,6 +830,31 @@ class ModelExtension:
     """
     del task, model_config, export_config
     return None
+
+
+def invoke_tensor_resolver(
+    resolver: Callable[..., Any],
+    param_name: str,
+    try_load: Callable[[str], Any],
+    model_config: Any = None,
+    export_config: Any = None,
+) -> Any | None:
+  """Calls `resolver`, forwarding config args only when its signature allows."""
+  try:
+    params = tuple(inspect.signature(resolver).parameters.values())
+  except (TypeError, ValueError):
+    return resolver(param_name, try_load)
+  accepts_varargs = any(
+      p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in params
+  )
+  positional = [
+      p
+      for p in params
+      if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+  ]
+  if accepts_varargs or len(positional) >= 4:
+    return resolver(param_name, try_load, model_config, export_config)
+  return resolver(param_name, try_load)
 
 
 class CompositeModelExtension(ModelExtension):
@@ -1100,10 +1137,18 @@ class CompositeModelExtension(ModelExtension):
       self,
       param_name: str,
       try_load: Callable[[str], Any],
+      model_config: Any = None,
+      export_config: Any = None,
   ) -> Any | None:
     """See base class."""
     for ext in reversed(self._extensions):
-      res = ext.resolve_checkpoint_tensor(param_name, try_load)
+      res = invoke_tensor_resolver(
+          ext.resolve_checkpoint_tensor,
+          param_name,
+          try_load,
+          model_config=model_config,
+          export_config=export_config,
+      )
       if res is not None:
         return res
     return None
