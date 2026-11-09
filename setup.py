@@ -92,6 +92,7 @@ setup(
         "numpy",
         "scipy",
         "safetensors",
+        "huggingface_hub",
         "multipledispatch",
         "transformers",
         "kagglehub",

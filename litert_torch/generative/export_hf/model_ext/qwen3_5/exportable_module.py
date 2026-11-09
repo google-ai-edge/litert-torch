@@ -59,10 +59,12 @@ class Qwen3_5StaticModelHFWrapper(nn.Module):
     super().__init__()
     if isinstance(hf_model, Qwen3_5StaticForCausalLM):
       self.static_model = hf_model
-      self.original_hf_model = None
+      self.__dict__["original_hf_model"] = None
       cfg = hf_model.config
     else:
-      self.original_hf_model = hf_model
+      # Store outside `self._modules` so `named_parameters()` and
+      # `named_buffers()` only expose `static_model` tensors.
+      self.__dict__["original_hf_model"] = hf_model
       self.static_model = Qwen3_5StaticForCausalLM.from_hf_model(hf_model)
       cfg = self.static_model.config
     self.config = getattr(cfg, "text_config", cfg)
@@ -172,10 +174,18 @@ class Qwen3_5ExportableMixin:
       source_model_artifacts: Any = None,
   ):
     if not isinstance(model, Qwen3_5StaticModelHFWrapper):
-      model = Qwen3_5StaticModelHFWrapper(model)
-      qwen3_5_patch.apply_qwen3_5_model_patches(
-          model.static_model, export_config
-      )
+      model_id = id(model)
+      cached_wrapper = qwen3_5_patch.CACHED_STATIC_WRAPPERS.get(model_id)
+      if cached_wrapper is not None:
+        model = cached_wrapper
+      else:
+        wrapper = Qwen3_5StaticModelHFWrapper(model)
+        qwen3_5_patch.apply_qwen3_5_model_patches(
+            wrapper.static_model, export_config
+        )
+        if model_id in qwen3_5_patch.CACHED_STATIC_WRAPPERS:
+          qwen3_5_patch.CACHED_STATIC_WRAPPERS[model_id] = wrapper
+        model = wrapper
     super().__init__(model, export_config, source_model_artifacts)  # pyrefly: ignore[bad-argument-count]
     if (
         getattr(export_config, "split_cache", False)

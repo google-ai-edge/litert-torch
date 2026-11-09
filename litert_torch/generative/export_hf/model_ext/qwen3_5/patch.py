@@ -172,7 +172,7 @@ class FusedQwen3_5Attention(torch.nn.Module):
 
         _, partial_factor = self._get_rope_params()
         rotary_dim = int(self.head_dim * partial_factor)
-        if 0 < rotary_dim < self.head_dim:
+        if 0 < rotary_dim < self.head_dim and not q_only_w.is_meta:
           # Align Qwen3.5 partial RoPE channel pairs (i, i + rotary_dim // 2)
           # with odml.qkv_norm_rope's half-head layout (i, i + head_dim // 2).
           perm = self._get_partial_rope_perm(rotary_dim, q_only_w.device)
@@ -216,7 +216,7 @@ class FusedQwen3_5Attention(torch.nn.Module):
               self.num_key_value_heads, self.head_dim
           ).clone()
           v_b = original_attn.v_proj.bias.data
-          if perm is not None:
+          if perm is not None and not q_only_b.is_meta:
             q_only_b = q_only_b[:, perm]
             k_b = k_b[:, perm]
           fused_bias = torch.cat(
@@ -273,7 +273,7 @@ class FusedQwen3_5Attention(torch.nn.Module):
         (modeling_qwen3_5.Qwen3_5RMSNorm, modular_qwen3_5.Qwen3_5RMSNorm),
     ):
       weight = weight + 1.0
-    if perm is not None:
+    if perm is not None and not weight.is_meta:
       weight = weight[perm]
     composite_norm = Qwen3_5RMSNorm(weight.shape[0], eps=eps)
     composite_norm.weight = torch.nn.Parameter(weight)
@@ -527,6 +527,12 @@ def qwen3_5_litert_patch():
   yield
 
 
+# Maps `id(hf_model)` to a shared `Qwen3_5StaticModelHFWrapper` within an
+# active `patch_qwen3_5_model` context so prefill and decode signatures share
+# identical `nn.Parameter` and buffer instances.
+CACHED_STATIC_WRAPPERS: dict[int, Any] = {}
+
+
 @patches_lib.register_model_patch(
     ["qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"]
 )
@@ -538,12 +544,17 @@ def patch_qwen3_5_model(model: torch.nn.Module, export_config: Any):
   # apply_qwen3_5_model_patches to model.static_model. Mutating the source HF
   # model before from_hf_model() runs causes state_dict keys (gate_up_proj,
   # qkv_proj) to mismatch the unfused static model during load_state_dict().
-  if type(model).__name__ == "Qwen3_5StaticForCausalLM":
+  model_id = id(model)
+  cache_wrapper = type(model).__name__ != "Qwen3_5StaticForCausalLM"
+  if not cache_wrapper:
     replaced_modules = apply_qwen3_5_model_patches(model, export_config)
   else:
     replaced_modules = []
+    CACHED_STATIC_WRAPPERS[model_id] = None
   try:
     yield
   finally:
+    if cache_wrapper:
+      CACHED_STATIC_WRAPPERS.pop(model_id, None)
     for module, name, original in reversed(replaced_modules):
       setattr(module, name, original)

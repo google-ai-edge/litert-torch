@@ -12,6 +12,7 @@ scipy
 numpy
 tabulate
 safetensors
+huggingface_hub
 kagglehub
 transformers
 multipledispatch

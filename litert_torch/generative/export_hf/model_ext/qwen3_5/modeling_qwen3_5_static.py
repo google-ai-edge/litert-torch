@@ -219,8 +219,7 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
         device=weight.device,
         dtype=weight.dtype,
     )
-    with torch.no_grad():
-      fused.weight.copy_(weight)
+    fused.weight = nn.Parameter(weight)
     self.in_proj_zba = fused
 
   def _forward_from_projections(
@@ -730,8 +729,23 @@ class Qwen3_5StaticForCausalLM(nn.Module):
   @classmethod
   def from_hf_model(cls, hf_model: Any) -> "Qwen3_5StaticForCausalLM":
     config = copy.deepcopy(_unwrap_config(hf_model.config))
-    static_model = cls(config)
-    static_model.load_state_dict(hf_model.state_dict(), strict=False)
+    has_meta = any(p.is_meta for p in hf_model.parameters())
+    if has_meta:
+      with torch.device("meta"):
+        static_model = cls(config)
+      static_model.model.rotary_emb = Qwen3_5StaticRotaryEmbedding(
+          config=config, device=torch.device("cpu")
+      )
+      static_model.load_state_dict(
+          hf_model.state_dict(), strict=False, assign=True
+      )
+    else:
+      static_model = cls(config)
+      static_model.load_state_dict(hf_model.state_dict(), strict=False)
+    if getattr(config, "tie_word_embeddings", False) or getattr(
+        hf_model.config, "tie_word_embeddings", False
+    ):
+      static_model.lm_head.weight = static_model.model.embed_tokens.weight
     return static_model
 
   def get_input_embeddings(self) -> nn.Module:
