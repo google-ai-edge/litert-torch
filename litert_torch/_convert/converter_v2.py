@@ -542,22 +542,23 @@ def export_to_dir(
   registry = ParameterRegistry()
 
   t_torch_start = time.perf_counter()
-  exported_programs = []
+  exported_programs: list[Any] = []
   for sig in signatures:
     with progress.task(f"Torch Export: {sig.name}"):
-      exported_program = core.export_torch_signature(
-          sig, strict_export=strict_export, run_decompositions=False
+      exported_programs.append(
+          core.export_torch_signature(
+              sig, strict_export=strict_export, run_decompositions=False
+          )
       )
-    exported_programs.append(exported_program)
   t_torch_export = time.perf_counter() - t_torch_start
 
   t_python_rest_start = time.perf_counter()
-  # Apply default fx passes
-  with progress.task("Run FX Passes"):
-    exported_programs = list(map(core._run_convert_passes, exported_programs))
-
   # Lower each exported program to MLIR without inlining constants
-  for sig, exported_program in zip(signatures, exported_programs):
+  for i, sig in enumerate(signatures):
+    exported_program = exported_programs[i]
+    exported_programs[i] = None
+    with progress.task(f"Run FX Passes: {sig.name}"):
+      exported_program = core._run_convert_passes(exported_program)  # pylint: disable=protected-access
     ir_context = backend.export_utils.create_ir_context()
     with progress.task(f"Lower to MLIR (V2): {sig.name}"):
       lowered = backend.export.exported_program_to_mlir(
@@ -580,6 +581,11 @@ def export_to_dir(
         output_names=output_names,
         module=sig.module,
     )
+    del lowered
+    del ir_context
+    del exported_program
+  del exported_programs
+  _trim_memory()
 
   # Save params.bin and metadata JSON
   with progress.task("Save Params Bin & Metadata"):
@@ -839,6 +845,7 @@ def convert_signatures_v2(
     with progress.task("MLIR Pipeline Execution"):
       _convert_mlir_bytecode(conversion_flags, export_dir, target_path)
     t_mlir_duration = time.perf_counter() - t_mlir_start
+    _trim_memory()
     t_total_convert = time.perf_counter() - t_conv_start
 
     _log_benchmark_summary(
@@ -908,6 +915,7 @@ def convert_signatures_v2(
       with progress.task("MLIR Pipeline Execution"):
         _convert_mlir_bytecode(conversion_flags, temp_dir, target_path)
       t_mlir_duration = time.perf_counter() - t_mlir_start
+      _trim_memory()
       t_total_convert = time.perf_counter() - t_conv_start
 
       _log_benchmark_summary(
