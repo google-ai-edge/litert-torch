@@ -19,6 +19,8 @@ through the `model_ext` registry) can quantize their own artifacts without an
 import cycle.
 """
 
+import gc
+
 from litert_torch import progress
 
 from litert_quantizer import quantizer as quantizer_lib
@@ -136,7 +138,7 @@ def quantize_model(
       model_path.removesuffix('.tflite').removesuffix('_quantized')
       + '_quantized.tflite'
   )
-  qt = quantizer_lib.Quantizer(model_path)
+  qt = quantizer_lib.Quantizer(model_path, stream_weights=True)
   try:
     if quantization_recipe.endswith('.json'):
       recipe = quantization_recipe
@@ -150,5 +152,9 @@ def quantize_model(
         f'Invalid quantization recipe: {quantization_recipe}. Please check'
         ' the recipe name.'
     ) from e
-  qt.quantize().export_model(quantized_model_path, overwrite=True)
+  qt.quantize(
+      serialize_to_path=quantized_model_path, stream_weights=True
+  ).export_model(quantized_model_path, overwrite=True)
+  del qt
+  gc.collect()
   return quantized_model_path

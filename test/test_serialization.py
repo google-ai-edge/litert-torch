@@ -49,10 +49,10 @@ class TestSerialization(googletest.TestCase):
       edge_model.export(os.path.join(tmp_dir_name, "test.model"))
       loaded_model = litert_torch.load(os.path.join(tmp_dir_name, "test.model"))
 
-    result = model_coverage.compare_tflite_torch(
-        loaded_model, resnet18, sample_input
-    )
-    self.assertTrue(result)
+      result = model_coverage.compare_tflite_torch(
+          loaded_model, resnet18, sample_input
+      )
+      self.assertTrue(result)
 
 
 if __name__ == "__main__":
