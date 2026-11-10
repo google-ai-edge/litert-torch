@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""MiniCPM-o 4.5 (openbmb/MiniCPM-o-4_5) multimodal Any2Any export for LiteRT."""
+"""MiniCPM-o 4.5 (openbmb/MiniCPM-o-4_5) multimodal Any2Any LiteRT export."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ import dataclasses
 import gc
 import json
 import logging
-import math
 import os
 import shutil
 from typing import Any
@@ -33,16 +32,16 @@ from litert_torch._convert import interface as converter_utils
 from litert_torch.generative.export_hf.core import attention as _  # pylint: disable=unused-import
 from litert_torch.generative.export_hf.core import cache as _  # pylint: disable=unused-import
 from litert_torch.generative.export_hf.core import exportable_module_config
-from litert_torch.generative.export_hf.core import quantization
 from litert_torch.generative.export_hf.core import weights_loader as weights_loader_lib
 from litert_torch.generative.export_hf.core.external_emb import exportable_module as external_emb_module
 from litert_torch.generative.export_hf.model_ext import patches as model_ext_patches
+from litert_torch.generative.export_hf.model_ext.minicpm_o import encoders
+from litert_torch.generative.export_hf.model_ext.minicpm_o import tts
+from litert_torch.generative.export_hf.model_ext.minicpm_o import vocoder
+from litert_torch.generative.export_hf.model_ext.minicpm_o import weights_utils
 from litert_torch.generative.export_hf.model_ext.qwen3 import patch as _  # pylint: disable=unused-import
 import safetensors
-import safetensors.torch
 import torch
-from torch import nn
-import torch.nn.functional as F
 import transformers
 
 try:
@@ -52,63 +51,47 @@ except ImportError:
   any2any_metadata_pb2 = None
   any2any_model_type_pb2 = None
 
-_LARGE_TENSOR_NUMEL_THRESHOLD = 1_000_000
+# Re-export public module classes and helpers for backward compatibility.
+_LARGE_TENSOR_NUMEL_THRESHOLD = weights_utils.LARGE_TENSOR_NUMEL_THRESHOLD
+_make_linear = weights_utils.make_linear
+_make_embedding = weights_utils.make_embedding
+_build_1d_sincos_pos_embed = encoders.build_1d_sincos_pos_embed
+_build_2d_sincos_pos_embed = encoders.build_2d_sincos_pos_embed
+_rotate_half = tts.rotate_half
+# pylint: disable=protected-access
+_build_slaney_mel_basis = vocoder._build_slaney_mel_basis
+_extract_ref_mel_24k = vocoder._extract_ref_mel_24k
+# pylint: enable=protected-access
 
+MiniCpmOGeluTransformerBlock = encoders.MiniCpmOGeluTransformerBlock
+MiniCpmOVisionEncoderModule = encoders.MiniCpmOVisionEncoderModule
+MiniCpmOAudioEncoderModule = encoders.MiniCpmOAudioEncoderModule
+MiniCpmOTextEmbedderModule = encoders.MiniCpmOTextEmbedderModule
+MiniCpmORMSNorm = tts.MiniCpmORMSNorm
+MiniCpmOTtsTransformerBlock = tts.MiniCpmOTtsTransformerBlock
+MiniCpmOTtsProjectorModule = tts.MiniCpmOTtsProjectorModule
+MiniCpmOTtsDecoderModule = tts.MiniCpmOTtsDecoderModule
+MiniCpmOAudioVocoderModule = vocoder.MiniCpmOAudioVocoderModule
 
-def _make_linear(
-    in_features: int, out_features: int, bias: bool = True
-) -> nn.Linear:
-  """Creates an nn.Linear, skipping slow CPU RNG init for large matrices."""
-  if in_features * out_features <= _LARGE_TENSOR_NUMEL_THRESHOLD:
-    return nn.Linear(in_features, out_features, bias=bias)
-  linear = nn.Linear(in_features, out_features, bias=bias, device="meta")
-  linear.weight = nn.Parameter(
-      torch.zeros(out_features, in_features, dtype=torch.float32)
-  )
-  if bias:
-    linear.bias = nn.Parameter(torch.zeros(out_features, dtype=torch.float32))
-  return linear
-
-
-def _make_embedding(num_embeddings: int, embedding_dim: int) -> nn.Embedding:
-  """Creates an nn.Embedding, skipping slow CPU RNG init for large tables."""
-  if num_embeddings * embedding_dim <= _LARGE_TENSOR_NUMEL_THRESHOLD:
-    return nn.Embedding(num_embeddings, embedding_dim)
-  return nn.Embedding(
-      num_embeddings,
-      embedding_dim,
-      _weight=torch.zeros(num_embeddings, embedding_dim, dtype=torch.float32),
-  )
-
-
-def _build_1d_sincos_pos_embed(
-    embed_dim: int, pos: torch.Tensor
-) -> torch.Tensor:
-  """Builds 1D sin-cos positional embeddings for flattened positions `pos`."""
-  half = max(1, embed_dim // 2)
-  omega = torch.arange(half, dtype=torch.float32) / float(half)
-  omega = 1.0 / (10000.0**omega)
-  out = torch.outer(pos.reshape(-1).to(torch.float32), omega)
-  emb = torch.cat([torch.sin(out), torch.cos(out)], dim=1)
-  if emb.shape[1] < embed_dim:
-    emb = F.pad(emb, (0, embed_dim - emb.shape[1]))
-  return emb[:, :embed_dim]
-
-
-def _build_2d_sincos_pos_embed(
-    embed_dim: int, grid_size: int = 70
-) -> torch.Tensor:
-  """Builds 2D sin-cos positional embeddings matching MiniCPM-o Resampler."""
-  grid_h = torch.arange(grid_size, dtype=torch.float32)
-  grid_w = torch.arange(grid_size, dtype=torch.float32)
-  # Match np.meshgrid(grid_w, grid_h) in MiniCPM-o resampler.py:
-  # first half encodes column (w), second half encodes row (h).
-  grid_y, grid_x = torch.meshgrid(grid_h, grid_w, indexing="ij")
-  half_dim = embed_dim // 2
-  emb_x = _build_1d_sincos_pos_embed(half_dim, grid_x)
-  emb_y = _build_1d_sincos_pos_embed(embed_dim - half_dim, grid_y)
-  return torch.cat([emb_x, emb_y], dim=1)
-
+_MINICPMO_EXTRA_KWARGS = (
+    "generate_audio",
+    "include_decode_hidden_states",
+    "min_tts_steps",
+    "tts_max_cache_len",
+    "tts_num_layers",
+    "vocoder_cfg_rate",
+    "vocoder_chunk_frames",
+    "vocoder_flow_dim",
+    "vocoder_flow_heads",
+    "vocoder_flow_layers",
+    "vocoder_hidden_channels",
+    "vocoder_input_tokens",
+    "vocoder_mel_bins",
+    "vocoder_n_timesteps",
+    "vocoder_prompt_tokens",
+    "vocoder_up_layers",
+)
+exportable_module_config.register_extra_kwargs_keys(_MINICPMO_EXTRA_KWARGS)
 
 _DEFAULT_MINICPMO_CONFIG: dict[str, Any] = {
     "model_type": "minicpmo",
@@ -155,371 +138,103 @@ _DEFAULT_MINICPMO_CONFIG: dict[str, Any] = {
 }
 
 
-class MiniCpmOGeluTransformerBlock(nn.Module):
-  """Self-attention + GELU MLP transformer block for SigLIP and Whisper."""
-
-  def __init__(
-      self,
-      hidden_size: int,
-      num_heads: int,
-      intermediate_size: int,
-      k_bias: bool = True,
-      tanh_gelu: bool = False,
-      layer_norm_eps: float = 1e-6,
-  ):
-    super().__init__()
-    self.hidden_size = hidden_size
-    self.num_heads = num_heads
-    self.head_dim = hidden_size // num_heads
-    self.tanh_gelu = tanh_gelu
-    self.norm1 = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
-    self.q_proj = _make_linear(hidden_size, hidden_size, bias=True)
-    self.k_proj = _make_linear(hidden_size, hidden_size, bias=k_bias)
-    self.v_proj = _make_linear(hidden_size, hidden_size, bias=True)
-    self.o_proj = _make_linear(hidden_size, hidden_size, bias=True)
-    self.norm2 = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
-    self.fc1 = _make_linear(hidden_size, intermediate_size, bias=True)
-    self.fc2 = _make_linear(intermediate_size, hidden_size, bias=True)
-
-  def forward(
-      self, x: torch.Tensor, attn_mask: torch.Tensor | None = None
-  ) -> torch.Tensor:
-    b, s, d = x.shape
-    h = self.norm1(x)
-    q = (
-        self.q_proj(h)
-        .reshape(b, s, self.num_heads, self.head_dim)
-        .permute(0, 2, 1, 3)
-    )
-    k = (
-        self.k_proj(h)
-        .reshape(b, s, self.num_heads, self.head_dim)
-        .permute(0, 2, 3, 1)
-    )
-    v = (
-        self.v_proj(h)
-        .reshape(b, s, self.num_heads, self.head_dim)
-        .permute(0, 2, 1, 3)
-    )
-    scores = torch.matmul(q, k) * (1.0 / math.sqrt(float(self.head_dim)))
-    if attn_mask is not None:
-      scores = scores + attn_mask
-    probs = F.softmax(scores, dim=-1)
-    attn_out = torch.matmul(probs, v).permute(0, 2, 1, 3).reshape(b, s, d)
-    x = x + self.o_proj(attn_out)
-    h2 = self.norm2(x)
-    act = F.gelu(self.fc1(h2), approximate="tanh" if self.tanh_gelu else "none")
-    return x + self.fc2(act)
+def _resolve_targets(
+    export_config: exportable_module_config.ExportableModuleConfig,
+) -> set[str]:
+  """Normalizes `extra_kwargs['targets']` into a set of target names."""
+  raw_targets = export_config.extra_kwargs.get("targets", ["all"])
+  if isinstance(raw_targets, str):
+    return {t.strip() for t in raw_targets.split(",") if t.strip()}
+  return set(raw_targets)
 
 
-class MiniCpmOVisionEncoderModule(nn.Module):
-  """SigLIP vision encoder + 64-query perceiver resampler for MiniCPM-o 4.5.
-
-  Inputs:
-    pixel_values: [1, 3, patch_size, patch_size * num_patches] float32 strip.
-    position_ids: [1, num_patches] int32 patch position IDs (-1 for padding;
-      for valid patches, encodes `resampler_pos_id * 10000 + vit_pos_id`).
-  Output:
-    vision_embeds: [1, query_num, llm_hidden_size] float32 embeddings.
-  """
-
-  resampler_pos_embed: torch.Tensor
-
-  def __init__(
-      self,
-      vision_hidden_size: int = 1152,
-      vision_intermediate_size: int = 4304,
-      vision_num_layers: int = 2,
-      vision_num_heads: int = 16,
-      patch_size: int = 14,
-      max_patches: int = 4900,
-      query_num: int = 64,
-      llm_hidden_size: int = 4096,
-  ):
-    super().__init__()
-    self.patch_size = patch_size
-    self.query_num = query_num
-    self.vision_hidden_size = vision_hidden_size
-    self.llm_hidden_size = llm_hidden_size
-    self.resampler_heads = (
-        llm_hidden_size // 128
-        if llm_hidden_size >= 128 and llm_hidden_size % 128 == 0
-        else vision_num_heads
-    )
-    self.resampler_head_dim = llm_hidden_size // self.resampler_heads
-
-    self.patch_embedding = nn.Conv2d(
-        3,
-        vision_hidden_size,
-        kernel_size=(patch_size, patch_size),
-        stride=(patch_size, patch_size),
-        bias=True,
-    )
-    self.pos_embedding = _make_embedding(max_patches, vision_hidden_size)
-    self.blocks = nn.ModuleList([
-        MiniCpmOGeluTransformerBlock(
-            vision_hidden_size,
-            vision_num_heads,
-            vision_intermediate_size,
-            k_bias=True,
-            tanh_gelu=True,
-        )
-        for _ in range(vision_num_layers)
-    ])
-    self.post_layernorm = nn.LayerNorm(vision_hidden_size, eps=1e-6)
-
-    # Perceiver resampler: cross-attention from `query_num` learned queries into
-    # patch embeddings + 2D sin-cos positional embeddings, followed by
-    # projection to `llm_hidden_size`.
-    grid_size = max(1, int(math.isqrt(max_patches)))
-    self.register_buffer(
-        "resampler_pos_embed",
-        _build_2d_sincos_pos_embed(llm_hidden_size, grid_size),
-        persistent=False,
-    )
-    self.latents = nn.Parameter(torch.randn(query_num, llm_hidden_size) * 0.02)
-    self.kv_proj = _make_linear(vision_hidden_size, llm_hidden_size, bias=False)
-    self.ln_q = nn.LayerNorm(llm_hidden_size, eps=1e-6)
-    self.ln_kv = nn.LayerNorm(llm_hidden_size, eps=1e-6)
-    self.attn_q = _make_linear(llm_hidden_size, llm_hidden_size, bias=True)
-    self.attn_k = _make_linear(llm_hidden_size, llm_hidden_size, bias=True)
-    self.attn_v = _make_linear(llm_hidden_size, llm_hidden_size, bias=True)
-    self.attn_out = _make_linear(llm_hidden_size, llm_hidden_size, bias=True)
-    self.ln_post = nn.LayerNorm(llm_hidden_size, eps=1e-6)
-    self.proj = nn.Parameter(
-        torch.eye(llm_hidden_size, dtype=torch.float32) * 0.02
-    )
-
-  def encode_patches(
-      self,
-      pixel_values: torch.Tensor,
-      vit_pos_ids: torch.Tensor,
-      attn_mask: torch.Tensor | None = None,
-  ) -> torch.Tensor:
-    """Runs SigLIP patch + positional embedding, transformer blocks, and post-norm."""
-    patches = self.patch_embedding(pixel_values)  # [1, C, 1, N]
-    b, c, _, n = patches.shape
-    x = patches.reshape(b, c, n).permute(0, 2, 1)  # [1, N, C]
-    x = x + self.pos_embedding(vit_pos_ids)
-    for blk in self.blocks:
-      x = blk(x, attn_mask)
-    return self.post_layernorm(x)
-
-  def forward(
-      self, pixel_values: torch.Tensor, position_ids: torch.Tensor
-  ) -> dict[str, torch.Tensor]:
-    # pixel_values: [1, 3, patch_size, patch_size * num_patches]
-    n = position_ids.shape[1]
-    safe_ids = torch.clamp(position_ids, min=0)
-    resampler_raw = torch.div(safe_ids, 10000, rounding_mode="trunc")
-    vit_raw = safe_ids - resampler_raw * 10000
-    vit_pos_ids = torch.clamp(
-        vit_raw, min=0, max=self.pos_embedding.num_embeddings - 1
-    )
-    resampler_pos_ids = torch.clamp(
-        resampler_raw,
-        min=0,
-        max=self.resampler_pos_embed.shape[0] - 1,
-    )
-
-    valid_mask = (
-        (position_ids >= 0).to(pixel_values.dtype).unsqueeze(1).unsqueeze(2)
-    )
-    attn_mask = (1.0 - valid_mask) * (-1e9)
-    x = self.encode_patches(pixel_values, vit_pos_ids, attn_mask)
-
-    kv = self.ln_kv(self.kv_proj(x))  # [1, N, llm_hidden_size]
-    pos_emb = F.embedding(resampler_pos_ids, self.resampler_pos_embed)
-    q_in = self.ln_q(self.latents.unsqueeze(0))  # [1, query_num, llm_hidden]
-    # Place dynamic activation `k` on the LHS and constant-folded `q_t` on the
-    # RHS of `matmul` so TFLite hybrid `BATCH_MATMUL` receives
-    # `lhs=float32, rhs=int8` when dynamic_wi8_afp32 quantization is applied.
-    q_t = (
-        self.attn_q(q_in)
-        .reshape(
-            1, self.query_num, self.resampler_heads, self.resampler_head_dim
-        )
-        .permute(0, 2, 3, 1)
-    )
-    k = (
-        self.attn_k(kv + pos_emb)
-        .reshape(1, n, self.resampler_heads, self.resampler_head_dim)
-        .permute(0, 2, 1, 3)
-    )
-    v = (
-        self.attn_v(kv)
-        .reshape(1, n, self.resampler_heads, self.resampler_head_dim)
-        .permute(0, 2, 1, 3)
-    )
-    scores = torch.matmul(k, q_t).permute(0, 1, 3, 2) * (
-        1.0 / math.sqrt(float(self.resampler_head_dim))
-    )
-    scores = scores + attn_mask
-    probs = F.softmax(scores, dim=-1)
-    attn_out = (
-        torch.matmul(probs, v)
-        .permute(0, 2, 1, 3)
-        .reshape(1, self.query_num, self.llm_hidden_size)
-    )
-    resampled = self.attn_out(attn_out)
-    resampled = self.ln_post(resampled)
-    return {"vision_embeds": torch.matmul(resampled, self.proj)}
-
-
-class MiniCpmOAudioEncoderModule(nn.Module):
-  """Whisper-medium audio encoder + audio projection + 5x temporal pooling.
-
-  Inputs:
-    mel_features: [1, num_mel_bins, mel_frames] float32 log-mel spectrogram.
-    valid_mel_frames: Optional [1] int32 count of valid mel frames (<=
-    mel_frames).
-    position_offset: Optional [1] int32 starting post-conv2 position index.
-  Output:
-    dict with `"audio_embeds"`: [1, mel_frames // (2 * pool_step),
-    llm_hidden_size].
-  """
-
-  def __init__(
-      self,
-      num_mel_bins: int = 80,
-      audio_hidden_size: int = 1024,
-      audio_intermediate_size: int = 4096,
-      audio_num_layers: int = 2,
-      audio_num_heads: int = 16,
-      audio_pool_step: int = 5,
-      llm_hidden_size: int = 4096,
-      max_source_positions: int = 1500,
-  ):
-    super().__init__()
-    self.conv1 = nn.Conv1d(
-        num_mel_bins, audio_hidden_size, kernel_size=3, stride=1, padding=1
-    )
-    self.conv2 = nn.Conv1d(
-        audio_hidden_size, audio_hidden_size, kernel_size=3, stride=2, padding=1
-    )
-    self.embed_positions = _make_embedding(
-        max_source_positions, audio_hidden_size
-    )
-    self.blocks = nn.ModuleList([
-        MiniCpmOGeluTransformerBlock(
-            audio_hidden_size,
-            audio_num_heads,
-            audio_intermediate_size,
-            k_bias=False,
-            tanh_gelu=False,
-            layer_norm_eps=1e-5,
-        )
-        for _ in range(audio_num_layers)
-    ])
-    self.layer_norm = nn.LayerNorm(audio_hidden_size, eps=1e-5)
-    self.audio_pool_step = audio_pool_step
-    self.proj1 = _make_linear(audio_hidden_size, llm_hidden_size, bias=True)
-    self.proj2 = _make_linear(llm_hidden_size, llm_hidden_size, bias=True)
-
-  def encode_whisper_features(
-      self,
-      mel_features: torch.Tensor,
-      valid_mel_frames: torch.Tensor | None = None,
-      position_offset: torch.Tensor | None = None,
-  ) -> torch.Tensor:
-    """Runs Whisper conv stem, positional embedding, attention blocks, and norm."""
-    # mel_features: [B, 80, T]
-    mel_len = mel_features.shape[2]
-    mel_mask: torch.Tensor | None = None
-    if valid_mel_frames is not None:
-      mel_idx = torch.arange(
-          mel_len, dtype=torch.int32, device=mel_features.device
-      ).unsqueeze(0)
-      mel_mask = (
-          (mel_idx < valid_mel_frames.to(torch.int32).reshape(-1, 1))
-          .unsqueeze(1)
-          .to(mel_features.dtype)
+def _resolve_generate_audio(
+    export_config: exportable_module_config.ExportableModuleConfig,
+) -> bool:
+  """Resolves and validates `generate_audio` against targets and flags."""
+  targets = _resolve_targets(export_config)
+  has_tts_targets = "all" in targets or {
+      "tts_projector",
+      "tts_decoder",
+      "audio_vocoder",
+  }.issubset(targets)
+  include_hidden = bool(
+      export_config.extra_kwargs.get("include_decode_hidden_states", True)
+  )
+  raw_gen_audio = export_config.extra_kwargs.get("generate_audio")
+  if raw_gen_audio is None:
+    return has_tts_targets and include_hidden
+  generate_audio = bool(raw_gen_audio)
+  if generate_audio:
+    if not include_hidden:
+      raise ValueError(
+          "generate_audio=True requires include_decode_hidden_states=True."
       )
-      mel_features = mel_features * mel_mask
+    if not has_tts_targets:
+      raise ValueError(
+          "generate_audio=True requires 'tts_projector', 'tts_decoder', and"
+          " 'audio_vocoder' in targets."
+      )
+  return generate_audio
 
-    x = F.gelu(self.conv1(mel_features))
-    if mel_mask is not None:
-      x = x * mel_mask
-    x = F.gelu(self.conv2(x))  # [B, D, T // 2]
-    x = x.permute(0, 2, 1)  # [B, T // 2, D]
-    seq_len = x.shape[1]
 
-    pos = torch.arange(seq_len, dtype=torch.int32, device=x.device).unsqueeze(0)
-    if position_offset is not None:
-      pos = pos + position_offset.to(torch.int32).reshape(-1, 1)
-    pos_ids = torch.clamp(
-        pos,
-        min=0,
-        max=self.embed_positions.num_embeddings - 1,
-    )
-    x = x + self.embed_positions(pos_ids)
+_BaseGenerateModule = (
+    external_emb_module.LiteRTExportableModuleForDecoderOnlyLMGenerateExternalEmbedder
+)
+_BasePrefillModule = (
+    external_emb_module.LiteRTExportableModuleForDecoderOnlyLMPrefillExternalEmbedder
+)
 
-    attn_mask: torch.Tensor | None = None
-    # Match MiniCPMO.get_audio_embedding: 1-second (50 post-conv2 frame)
-    # block-causal attention mask `(j < (i // 50 + 1) * 50)` for multi-second
-    # segments, combined with key-padding mask `(j < valid_conv2_len)` when
-    # `valid_mel_frames` is provided.
-    if seq_len > 50 or valid_mel_frames is not None:
-      idx = torch.arange(seq_len, dtype=torch.int32, device=x.device)
-      block_end = (torch.div(idx, 50, rounding_mode="trunc") + 1) * 50
-      allowed = idx.unsqueeze(0) < block_end.unsqueeze(1)  # [S, S]
-      allowed = allowed.unsqueeze(0).unsqueeze(0)  # [1, 1, S, S]
-      if valid_mel_frames is not None:
-        valid_mel = valid_mel_frames.to(torch.int32).reshape(-1, 1)
-        valid_conv2 = torch.where(
-            valid_mel > 0,
-            torch.div(valid_mel - 1, 2, rounding_mode="trunc") + 1,
-            torch.zeros_like(valid_mel),
-        )
-        key_valid = (
-            (idx.unsqueeze(0) < valid_conv2).unsqueeze(1).unsqueeze(2)
-        )  # [B, 1, 1, S]
-        allowed = allowed & key_valid
-      attn_mask = (1.0 - allowed.to(x.dtype)) * (-1e9)
 
-    for blk in self.blocks:
-      x = blk(x, attn_mask)
-    return self.layer_norm(x)
+class _MiniCpmOLlmGenerateModule(_BaseGenerateModule):
+  """Generate module concatenating `[logits, last_hidden_state]` in `logits`.
 
+  `MiniCpmOLlmStage::RunDecodeStep` inspects the length of the `decode` output
+  buffer (`logits`): when its size equals `vocab_size + llm_hidden_size`, the
+  runtime splits the trailing `llm_hidden_size` floats into
+  `step_out.hidden_state` (required by `MiniCpmOTtsStage` when `generate_audio`
+  is enabled) and resizes `logits` to `vocab_size`.
+  """
+
+  # pylint: disable=arguments-renamed
   def forward(
       self,
-      mel_features: torch.Tensor,
-      valid_mel_frames: torch.Tensor | None = None,
-      position_offset: torch.Tensor | None = None,
-  ) -> dict[str, torch.Tensor]:
-    x = self.encode_whisper_features(
-        mel_features, valid_mel_frames, position_offset
+      embeddings,
+      input_pos,
+      kv_cache,
+      mask,
+      local_mask=None,
+      **kwargs,
+  ):
+    include_hidden = bool(
+        self.export_config.extra_kwargs.get(
+            "include_decode_hidden_states", True
+        )
     )
-    x = self.proj2(F.relu(self.proj1(x)))
-    if self.audio_pool_step > 1:
-      # Pool along time using AvgPool1d over [B, llm_hidden_size, T // 2]
-      x = F.avg_pool1d(
-          x.permute(0, 2, 1),
-          kernel_size=self.audio_pool_step,
-          stride=self.audio_pool_step,
-      ).permute(0, 2, 1)
-    return {"audio_embeds": x}
-
-
-class MiniCpmOTextEmbedderModule(nn.Module):
-  """Token embedding lookup table for MiniCPM-o 4.5 Qwen3 LLM backbone."""
-
-  def __init__(self, vocab_size: int = 151748, llm_hidden_size: int = 4096):
-    super().__init__()
-    self.embed_tokens = _make_embedding(vocab_size, llm_hidden_size)
-
-  def forward(self, token_ids: torch.Tensor) -> dict[str, torch.Tensor]:
-    return {"token_embeds": self.embed_tokens(token_ids)}
+    if not include_hidden:
+      return super().forward(
+          embeddings, input_pos, kv_cache, mask, local_mask=local_mask, **kwargs
+      )
+    orig_verifier = self.export_verifier
+    self.export_verifier = True
+    try:
+      result = super().forward(
+          embeddings, input_pos, kv_cache, mask, local_mask=local_mask, **kwargs
+      )
+    finally:
+      self.export_verifier = orig_verifier
+    last_hidden = result["activations"].to(torch.float32)
+    result["logits"] = torch.cat([result["logits"], last_hidden], dim=-1)
+    if not orig_verifier:
+      result.pop("activations", None)
+    return result
 
 
 class _MiniCpmOLlmWeightsLoader(weights_loader_lib.HFCheckpointWeightsLoader):
-  """Streams `llm.*`-prefixed Qwen3/Qwen2 weights from a MiniCPM-o checkpoint."""
+  """Streams `llm.*`-prefixed Qwen3/Qwen2 weights from MiniCPM-o checkpoints."""
 
-  @staticmethod
-  def _candidates(param_name: str) -> list[str]:
-    base = weights_loader_lib.HFCheckpointWeightsLoader._candidates(  # pylint: disable=protected-access
-        param_name
-    )
+  def _candidates(self, param_name: str) -> list[str]:
+    base = super()._candidates(param_name)
     return base + [f"llm.{c}" for c in base]
 
   def __call__(self, param_name: str) -> torch.Tensor:
@@ -610,14 +325,7 @@ class MiniCpmO:
 
   def _get_weight(self, key: str) -> torch.Tensor | None:
     """Retrieves a weight tensor by key from memory or sharded safetensors."""
-    if key in self._state_dict:
-      return self._state_dict[key]
-    shard_path = self._weight_map.get(key)
-    if shard_path and os.path.exists(shard_path):
-      with safetensors.safe_open(shard_path, framework="pt", device="cpu") as f:
-        if key in f.keys():
-          return f.get_tensor(key)
-    return None
+    return weights_utils.get_weight(self._state_dict, self._weight_map, key)
 
   def _copy_weight(
       self,
@@ -626,136 +334,30 @@ class MiniCpmO:
       strict: bool = True,
       populated: set[int] | None = None,
   ) -> None:
-    """Copies the first matching checkpoint tensor in `keys` into `target`.
-
-    Args:
-      target: Destination parameter tensor.
-      *keys: Candidate checkpoint tensor keys in priority order.
-      strict: When True, raises KeyError if none of `keys` exists in the
-        checkpoint and ValueError if a matching key's shape does not match
-        `target.shape`.
-      populated: Optional set of `data_ptr()` integers recording parameters that
-        were populated from the checkpoint.
-
-    Raises:
-      KeyError: If `strict` is True and none of `keys` exists in the checkpoint.
-      ValueError: If `strict` is True and a matching tensor's shape does not
-        match `target.shape`.
-    """
-    for key in keys:
-      raw = self._get_weight(key)
-      if raw is None:
-        continue
-      if raw.shape != target.shape:
-        if strict:
-          raise ValueError(
-              f"Weight shape mismatch for {key!r}: checkpoint has"
-              f" {tuple(raw.shape)}, target expects {tuple(target.shape)}."
-          )
-        continue
-      src = raw.to(dtype=target.dtype, device=target.device)
-      with torch.no_grad():
-        target.copy_(src)
-      if populated is not None:
-        populated.add(target.data_ptr())
-      return
-    if strict:
-      raise KeyError(f"Missing checkpoint weight; tried keys: {keys}.")
-
-  def _copy_qkv_in_proj(
-      self,
-      q_proj: nn.Linear,
-      k_proj: nn.Linear,
-      v_proj: nn.Linear,
-      weight_key: str,
-      bias_key: str,
-      strict: bool,
-      populated: set[int],
-  ) -> None:
-    """Copies fused QKV `in_proj_weight` and `in_proj_bias` into Q/K/V layers."""
-    hidden = q_proj.weight.shape[1]
-    in_proj_w = self._get_weight(weight_key)
-    if in_proj_w is None:
-      if strict:
-        raise KeyError(f"Missing checkpoint weight: {weight_key!r}.")
-    else:
-      expected_w_shape = (3 * hidden, hidden)
-      if in_proj_w.shape != expected_w_shape:
-        if strict:
-          raise ValueError(
-              f"Weight shape mismatch for {weight_key!r}: checkpoint has"
-              f" {tuple(in_proj_w.shape)}, target expects {expected_w_shape}."
-          )
-      else:
-        qw, kw, vw = in_proj_w.to(dtype=q_proj.weight.dtype).chunk(3, dim=0)
-        with torch.no_grad():
-          q_proj.weight.copy_(qw)
-          k_proj.weight.copy_(kw)
-          v_proj.weight.copy_(vw)
-        populated.update((
-            q_proj.weight.data_ptr(),
-            k_proj.weight.data_ptr(),
-            v_proj.weight.data_ptr(),
-        ))
-
-    in_proj_b = self._get_weight(bias_key)
-    if in_proj_b is None:
-      if strict:
-        raise KeyError(f"Missing checkpoint weight: {bias_key!r}.")
-    else:
-      expected_b_shape = (3 * hidden,)
-      if in_proj_b.shape != expected_b_shape:
-        if strict:
-          raise ValueError(
-              f"Weight shape mismatch for {bias_key!r}: checkpoint has"
-              f" {tuple(in_proj_b.shape)}, target expects {expected_b_shape}."
-          )
-      else:
-        qb, kb, vb = in_proj_b.to(dtype=q_proj.bias.dtype).chunk(3, dim=0)
-        with torch.no_grad():
-          q_proj.bias.copy_(qb)
-          k_proj.bias.copy_(kb)
-          v_proj.bias.copy_(vb)
-        populated.update((
-            q_proj.bias.data_ptr(),
-            k_proj.bias.data_ptr(),
-            v_proj.bias.data_ptr(),
-        ))
-
-  @staticmethod
-  def _verify_all_parameters_populated(
-      mod: nn.Module, populated: set[int], module_name: str
-  ) -> None:
-    """Raises ValueError if any parameter in `mod` was not populated."""
-    unpopulated = [
-        name
-        for name, param in mod.named_parameters()
-        if param.data_ptr() not in populated
-    ]
-    if unpopulated:
-      raise ValueError(
-          f"Unpopulated parameters in {module_name}: {unpopulated}"
-      )
-
-  @staticmethod
-  def _maybe_quantize(out_path: str, quant_recipe: str | None) -> str:
-    """Applies comma-separated quantization recipes to `out_path` if specified."""
-    quant_list = quant_recipe.split(",") if quant_recipe else [None]
-    final_path = out_path
-    for recipe in quant_list:
-      prev_path = final_path
-      final_path = quantization.maybe_quantize_model(final_path, recipe)
-      if final_path != prev_path and os.path.exists(prev_path):
-        os.remove(prev_path)
-      gc.collect()
-    return final_path
+    """Copies the first matching checkpoint tensor in `keys` into `target`."""
+    weights_utils.copy_weight(
+        target,
+        self._state_dict,
+        self._weight_map,
+        *keys,
+        strict=strict,
+        populated=populated,
+    )
 
   def export_vision_encoder(
       self,
       output_dir: str,
       export_config: exportable_module_config.ExportableModuleConfig,
   ) -> str:
-    """Exports SigLIP + Perceiver resampler vision encoder to TFLite."""
+    """Exports SigLIP + Perceiver resampler vision encoder to TFLite.
+
+    Args:
+      output_dir: Directory where the exported `.tflite` file is written.
+      export_config: Export configuration controlling shapes and quantization.
+
+    Returns:
+      Path to the exported vision encoder `.tflite` file.
+    """
     self._require_weights_or_random(export_config)
     strict = not export_config.use_random_weights
     v_cfg = self._config.get("vision_config", {})
@@ -786,7 +388,7 @@ class MiniCpmO:
         )
     )
 
-    mod = MiniCpmOVisionEncoderModule(
+    mod = encoders.MiniCpmOVisionEncoderModule(
         vision_hidden_size=vision_hidden,
         vision_intermediate_size=vision_inter,
         vision_num_layers=vision_layers,
@@ -796,206 +398,9 @@ class MiniCpmO:
         query_num=query_num,
         llm_hidden_size=llm_hidden,
     ).eval()
-    populated: set[int] = set()
-    self._copy_weight(
-        mod.patch_embedding.weight,
-        "vpm.embeddings.patch_embedding.weight",
-        strict=strict,
-        populated=populated,
+    encoders.load_vision_encoder_weights(
+        mod, self._state_dict, self._weight_map, strict=strict
     )
-    self._copy_weight(
-        mod.patch_embedding.bias,
-        "vpm.embeddings.patch_embedding.bias",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.pos_embedding.weight,
-        "vpm.embeddings.position_embedding.weight",
-        strict=strict,
-        populated=populated,
-    )
-    for idx, blk in enumerate(mod.blocks):
-      p = f"vpm.encoder.layers.{idx}"
-      self._copy_weight(
-          blk.norm1.weight,
-          f"{p}.layer_norm1.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.norm1.bias,
-          f"{p}.layer_norm1.bias",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.q_proj.weight,
-          f"{p}.self_attn.q_proj.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.q_proj.bias,
-          f"{p}.self_attn.q_proj.bias",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.k_proj.weight,
-          f"{p}.self_attn.k_proj.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.k_proj.bias,
-          f"{p}.self_attn.k_proj.bias",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.v_proj.weight,
-          f"{p}.self_attn.v_proj.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.v_proj.bias,
-          f"{p}.self_attn.v_proj.bias",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.o_proj.weight,
-          f"{p}.self_attn.out_proj.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.o_proj.bias,
-          f"{p}.self_attn.out_proj.bias",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.norm2.weight,
-          f"{p}.layer_norm2.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.norm2.bias,
-          f"{p}.layer_norm2.bias",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.fc1.weight,
-          f"{p}.mlp.fc1.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.fc1.bias,
-          f"{p}.mlp.fc1.bias",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.fc2.weight,
-          f"{p}.mlp.fc2.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.fc2.bias,
-          f"{p}.mlp.fc2.bias",
-          strict=strict,
-          populated=populated,
-      )
-    self._copy_weight(
-        mod.post_layernorm.weight,
-        "vpm.post_layernorm.weight",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.post_layernorm.bias,
-        "vpm.post_layernorm.bias",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.latents, "resampler.query", strict=strict, populated=populated
-    )
-    self._copy_weight(
-        mod.kv_proj.weight,
-        "resampler.kv_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.ln_q.weight,
-        "resampler.ln_q.weight",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.ln_q.bias,
-        "resampler.ln_q.bias",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.ln_kv.weight,
-        "resampler.ln_kv.weight",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.ln_kv.bias,
-        "resampler.ln_kv.bias",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_qkv_in_proj(
-        mod.attn_q,
-        mod.attn_k,
-        mod.attn_v,
-        "resampler.attn.in_proj_weight",
-        "resampler.attn.in_proj_bias",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.attn_out.weight,
-        "resampler.attn.out_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.attn_out.bias,
-        "resampler.attn.out_proj.bias",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.ln_post.weight,
-        "resampler.ln_post.weight",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.ln_post.bias,
-        "resampler.ln_post.bias",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.proj, "resampler.proj", strict=strict, populated=populated
-    )
-    if strict:
-      self._verify_all_parameters_populated(mod, populated, "vision_encoder")
 
     sample_kwargs = {
         "pixel_values": torch.zeros(
@@ -1014,14 +419,22 @@ class MiniCpmO:
         if export_config.vision_encoder_quantization_recipe is not None
         else export_config.quantization_recipe
     )
-    return self._maybe_quantize(out_path, quant_recipe)
+    return weights_utils.maybe_quantize(out_path, quant_recipe)
 
   def export_audio_encoder(
       self,
       output_dir: str,
       export_config: exportable_module_config.ExportableModuleConfig,
   ) -> str:
-    """Exports Whisper-medium audio encoder + projection to TFLite."""
+    """Exports Whisper-medium audio encoder + projection to TFLite.
+
+    Args:
+      output_dir: Directory where the exported `.tflite` file is written.
+      export_config: Export configuration controlling shapes and quantization.
+
+    Returns:
+      Path to the exported audio encoder `.tflite` file.
+    """
     self._require_weights_or_random(export_config)
     strict = not export_config.use_random_weights
     a_cfg = self._config.get("audio_config", {})
@@ -1042,7 +455,7 @@ class MiniCpmO:
     llm_hidden = int(self._config.get("hidden_size", 4096))
     mel_frames = int(export_config.extra_kwargs.get("audio_mel_frames", 100))
 
-    mod = MiniCpmOAudioEncoderModule(
+    mod = encoders.MiniCpmOAudioEncoderModule(
         num_mel_bins=num_mel_bins,
         audio_hidden_size=audio_hidden,
         audio_intermediate_size=audio_inter,
@@ -1052,149 +465,9 @@ class MiniCpmO:
         llm_hidden_size=llm_hidden,
         max_source_positions=max_source_pos,
     ).eval()
-    populated: set[int] = set()
-    self._copy_weight(
-        mod.conv1.weight, "apm.conv1.weight", strict=strict, populated=populated
+    encoders.load_audio_encoder_weights(
+        mod, self._state_dict, self._weight_map, strict=strict
     )
-    self._copy_weight(
-        mod.conv1.bias, "apm.conv1.bias", strict=strict, populated=populated
-    )
-    self._copy_weight(
-        mod.conv2.weight, "apm.conv2.weight", strict=strict, populated=populated
-    )
-    self._copy_weight(
-        mod.conv2.bias, "apm.conv2.bias", strict=strict, populated=populated
-    )
-    self._copy_weight(
-        mod.embed_positions.weight,
-        "apm.embed_positions.weight",
-        strict=strict,
-        populated=populated,
-    )
-    for idx, blk in enumerate(mod.blocks):
-      p = f"apm.layers.{idx}"
-      self._copy_weight(
-          blk.norm1.weight,
-          f"{p}.self_attn_layer_norm.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.norm1.bias,
-          f"{p}.self_attn_layer_norm.bias",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.q_proj.weight,
-          f"{p}.self_attn.q_proj.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.q_proj.bias,
-          f"{p}.self_attn.q_proj.bias",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.k_proj.weight,
-          f"{p}.self_attn.k_proj.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.v_proj.weight,
-          f"{p}.self_attn.v_proj.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.v_proj.bias,
-          f"{p}.self_attn.v_proj.bias",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.o_proj.weight,
-          f"{p}.self_attn.out_proj.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.o_proj.bias,
-          f"{p}.self_attn.out_proj.bias",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.norm2.weight,
-          f"{p}.final_layer_norm.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.norm2.bias,
-          f"{p}.final_layer_norm.bias",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.fc1.weight,
-          f"{p}.fc1.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.fc1.bias, f"{p}.fc1.bias", strict=strict, populated=populated
-      )
-      self._copy_weight(
-          blk.fc2.weight,
-          f"{p}.fc2.weight",
-          strict=strict,
-          populated=populated,
-      )
-      self._copy_weight(
-          blk.fc2.bias, f"{p}.fc2.bias", strict=strict, populated=populated
-      )
-    self._copy_weight(
-        mod.layer_norm.weight,
-        "apm.layer_norm.weight",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.layer_norm.bias,
-        "apm.layer_norm.bias",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.proj1.weight,
-        "audio_projection_layer.linear1.weight",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.proj1.bias,
-        "audio_projection_layer.linear1.bias",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.proj2.weight,
-        "audio_projection_layer.linear2.weight",
-        strict=strict,
-        populated=populated,
-    )
-    self._copy_weight(
-        mod.proj2.bias,
-        "audio_projection_layer.linear2.bias",
-        strict=strict,
-        populated=populated,
-    )
-    if strict:
-      self._verify_all_parameters_populated(mod, populated, "audio_encoder")
 
     # TODO(b/568027544): Enable `valid_mel_frames` and `position_offset` inputs
     # by default once `MiniCpmOFrontendStage` passes per-chunk frame lengths and
@@ -1218,44 +491,56 @@ class MiniCpmO:
         if export_config.audio_encoder_quantization_recipe is not None
         else export_config.quantization_recipe
     )
-    return self._maybe_quantize(out_path, quant_recipe)
+    return weights_utils.maybe_quantize(out_path, quant_recipe)
 
   def export_text_embedder(
       self,
       output_dir: str,
       export_config: exportable_module_config.ExportableModuleConfig,
   ) -> str:
-    """Exports Qwen3/Qwen2 text token embedding lookup table to TFLite."""
+    """Exports Qwen3/Qwen2 text token embedding lookup table to TFLite.
+
+    Args:
+      output_dir: Directory where the exported `.tflite` file is written.
+      export_config: Export configuration controlling shapes and quantization.
+
+    Returns:
+      Path to the exported text embedder `.tflite` file.
+    """
     self._require_weights_or_random(export_config)
     strict = not export_config.use_random_weights
     vocab_size = int(self._config.get("vocab_size", 151748))
     llm_hidden = int(self._config.get("hidden_size", 4096))
-    mod = MiniCpmOTextEmbedderModule(
+    mod = encoders.MiniCpmOTextEmbedderModule(
         vocab_size=vocab_size, llm_hidden_size=llm_hidden
     ).eval()
-    populated: set[int] = set()
-    self._copy_weight(
-        mod.embed_tokens.weight,
-        "llm.model.embed_tokens.weight",
-        strict=strict,
-        populated=populated,
+    encoders.load_text_embedder_weights(
+        mod, self._state_dict, self._weight_map, strict=strict
     )
-    if strict:
-      self._verify_all_parameters_populated(mod, populated, "text_embedder")
 
     sample_kwargs = {"token_ids": torch.zeros(1, 1, dtype=torch.int32)}
     out_path = os.path.join(output_dir, "text_embedder_fp32.tflite")
     litert_torch.convert(mod, sample_kwargs=sample_kwargs).export(out_path)
     del mod
     gc.collect()
-    return self._maybe_quantize(out_path, export_config.quantization_recipe)
+    return weights_utils.maybe_quantize(
+        out_path, export_config.quantization_recipe
+    )
 
   def export_llm_backbone(
       self,
       output_dir: str,
       export_config: exportable_module_config.ExportableModuleConfig,
   ) -> str:
-    """Exports Qwen3/Qwen2 LLM backbone (`prefill_*` + `decode` + KV cache) to TFLite."""
+    """Exports Qwen3/Qwen2 LLM backbone (`prefill_*` + `decode`) to TFLite.
+
+    Args:
+      output_dir: Directory where the exported `.tflite` file is written.
+      export_config: Export configuration controlling shapes and quantization.
+
+    Returns:
+      Path to the exported LLM backbone `.tflite` file.
+    """
     self._require_weights_or_random(export_config)
     strict = not export_config.use_random_weights
     llm_hidden = int(self._config.get("hidden_size", 4096))
@@ -1346,7 +631,9 @@ class MiniCpmO:
       )
       patch_name = "qwen2"
       model_cls = transformers.Qwen2ForCausalLM
-    llm_config._attn_implementation = "lrt_transposed_attention"  # pylint: disable=protected-access
+    # pylint: disable=protected-access
+    llm_config._attn_implementation = "lrt_transposed_attention"
+    # pylint: enable=protected-access
 
     has_checkpoint_weights = "llm.lm_head.weight" in self._weight_map or (
         tie_word_embeddings
@@ -1485,7 +772,7 @@ class MiniCpmO:
               populated=populated,
           )
         if strict:
-          self._verify_all_parameters_populated(
+          weights_utils.verify_all_parameters_populated(
               qwen_model, populated, "llm_backbone"
           )
 
@@ -1505,12 +792,8 @@ class MiniCpmO:
             prefill_lengths=prefill_lengths,
             externalize_embedder=True,
         )
-        prefill_module = external_emb_module.LiteRTExportableModuleForDecoderOnlyLMPrefillExternalEmbedder(
-            qwen_model, iter_config
-        )
-        decode_module = external_emb_module.LiteRTExportableModuleForDecoderOnlyLMGenerateExternalEmbedder(
-            qwen_model, iter_config
-        )
+        prefill_module = _BasePrefillModule(qwen_model, iter_config)
+        decode_module = _MiniCpmOLlmGenerateModule(qwen_model, iter_config)
         for module in (prefill_module, decode_module):
           for sig_name, (inputs, dynamic_shapes) in module.get_sample_inputs(
               llm_config
@@ -1520,6 +803,7 @@ class MiniCpmO:
             signatures.append((sig_name, module, inputs, dynamic_shapes))
 
       signature_modules = list({id(s[1]): s[1] for s in signatures}.values())
+      lightweight = export_config.experimental_lightweight_conversion
       with contextlib.ExitStack() as stack:
         weights_loader = base_loader
         if weights_loader is not None:
@@ -1538,7 +822,7 @@ class MiniCpmO:
           )
         if use_v2:
           converter.convert(
-              lightweight_conversion=export_config.experimental_lightweight_conversion,
+              lightweight_conversion=lightweight,
               strict_export=False,
               use_v2=True,
               delete_in_memory_params=True,
@@ -1552,7 +836,7 @@ class MiniCpmO:
           )
         else:
           lrt_model = converter.convert(
-              lightweight_conversion=export_config.experimental_lightweight_conversion,
+              lightweight_conversion=lightweight,
               strict_export=False,
           )
           lrt_model.export(out_path)
@@ -1581,14 +865,392 @@ class MiniCpmO:
           quant_recipe,
       )
 
-    return self._maybe_quantize(out_path, quant_recipe)
+    return weights_utils.maybe_quantize(out_path, quant_recipe)
+
+  def export_tts_projector(
+      self,
+      output_dir: str,
+      export_config: exportable_module_config.ExportableModuleConfig,
+  ) -> str:
+    """Exports LLM-to-TTS semantic projector (`tf_lite_tts_projector`).
+
+    Args:
+      output_dir: Directory where the exported `.tflite` file is written.
+      export_config: Export configuration controlling shapes and quantization.
+
+    Returns:
+      Path to the exported TTS projector `.tflite` file.
+    """
+    self._require_weights_or_random(export_config)
+    strict = not export_config.use_random_weights
+    llm_hidden = int(self._config.get("hidden_size", 4096))
+    tts_cfg = self._config.get("tts_config", {})
+    tts_hidden = int(tts_cfg.get("hidden_size", 768))
+    emb_text_w = self._get_weight("tts.emb_text.weight")
+    default_num_text_tokens = (
+        int(emb_text_w.shape[0])
+        if emb_text_w is not None
+        else int(self._config.get("vocab_size", 152064))
+    )
+    num_text_tokens = int(
+        tts_cfg.get("num_text_tokens", default_num_text_tokens)
+    )
+    mod = tts.MiniCpmOTtsProjectorModule(
+        llm_hidden_size=llm_hidden,
+        tts_hidden_size=tts_hidden,
+        num_text_tokens=num_text_tokens,
+    ).eval()
+    tts.load_tts_projector_weights(
+        mod, self._state_dict, self._weight_map, tts_cfg, strict=strict
+    )
+
+    sample_kwargs = {
+        "llm_hidden": torch.zeros(1, 1, llm_hidden, dtype=torch.float32),
+        "token_id": torch.zeros(1, 1, dtype=torch.int32),
+    }
+    out_path = os.path.join(output_dir, "tts_projector_fp32.tflite")
+    litert_torch.convert(mod, sample_kwargs=sample_kwargs).export(out_path)
+    del mod
+    gc.collect()
+    return weights_utils.maybe_quantize(
+        out_path, export_config.quantization_recipe
+    )
+
+  def export_tts_decoder(
+      self,
+      output_dir: str,
+      export_config: exportable_module_config.ExportableModuleConfig,
+  ) -> str:
+    """Exports KV-cached TTS decoder (`tf_lite_tts_decoder`) to TFLite.
+
+    Args:
+      output_dir: Directory where the exported `.tflite` file is written.
+      export_config: Export configuration controlling shapes and quantization.
+
+    Returns:
+      Path to the exported TTS decoder `.tflite` file.
+    """
+    self._require_weights_or_random(export_config)
+    strict = not export_config.use_random_weights
+    tts_cfg = self._config.get("tts_config", {})
+    tts_hidden = int(tts_cfg.get("hidden_size", 768))
+    tts_inter = int(tts_cfg.get("intermediate_size", 3072))
+    default_tts_layers = (
+        min(int(tts_cfg.get("num_hidden_layers", 1)), 1)
+        if export_config.use_random_weights
+        else int(tts_cfg.get("num_hidden_layers", 20))
+    )
+    tts_layers = int(
+        export_config.extra_kwargs.get("tts_num_layers", default_tts_layers)
+    )
+    tts_heads = int(tts_cfg.get("num_attention_heads", 12))
+    tts_vocab = int(tts_cfg.get("num_audio_tokens", 6562))
+    tts_mel_bins = int(tts_cfg.get("num_mel_bins", 100))
+    default_max_cache_len = 32 if export_config.use_random_weights else 256
+    tts_max_cache_len = int(
+        export_config.extra_kwargs.get(
+            "tts_max_cache_len", default_max_cache_len
+        )
+    )
+    min_tts_steps = int(export_config.extra_kwargs.get("min_tts_steps", 0))
+
+    mod = tts.MiniCpmOTtsDecoderModule(
+        tts_hidden_size=tts_hidden,
+        tts_intermediate_size=tts_inter,
+        tts_num_layers=tts_layers,
+        tts_num_heads=tts_heads,
+        tts_vocab_size=tts_vocab,
+        tts_num_mel_bins=tts_mel_bins,
+        tts_max_cache_len=tts_max_cache_len,
+        min_tts_steps=min_tts_steps,
+    ).eval()
+    tts.load_tts_decoder_weights(
+        mod, self._state_dict, self._weight_map, strict=strict
+    )
+
+    sample_kwargs = {
+        "cond_emb": torch.zeros(1, 1, tts_hidden, dtype=torch.float32),
+        "prev_audio_code": torch.zeros(1, 1, dtype=torch.int32),
+        "step_idx": torch.zeros(1, dtype=torch.int32),
+        "kv_cache": torch.zeros(
+            1,
+            2 * tts_layers,
+            tts_max_cache_len,
+            tts_hidden,
+            dtype=torch.float32,
+        ),
+    }
+    out_path = os.path.join(output_dir, "tts_decoder_fp32.tflite")
+    litert_torch.convert(mod, sample_kwargs=sample_kwargs).export(out_path)
+    del mod
+    gc.collect()
+    return weights_utils.maybe_quantize(
+        out_path, export_config.quantization_recipe
+    )
+
+  def export_audio_vocoder(
+      self,
+      output_dir: str,
+      export_config: exportable_module_config.ExportableModuleConfig,
+  ) -> str:
+    """Exports CosyVoice2 Token2Wav vocoder (`tf_lite_audio_vocoder`).
+
+    Args:
+      output_dir: Directory where the exported `.tflite` file is written.
+      export_config: Export configuration controlling shapes and quantization.
+
+    Returns:
+      Path to the exported audio vocoder `.tflite` file.
+    """
+    self._require_weights_or_random(export_config)
+    strict = not export_config.use_random_weights
+    tts_cfg = self._config.get("tts_config", {})
+
+    flow_path = os.path.join(self.model_dir, "assets", "token2wav", "flow.pt")
+    hift_path = os.path.join(self.model_dir, "assets", "token2wav", "hift.pt")
+    flow_sd: dict[str, torch.Tensor] = {}
+    hift_sd: dict[str, torch.Tensor] = {}
+    if os.path.exists(flow_path):
+      try:
+        loaded_flow = torch.load(
+            flow_path, map_location="cpu", weights_only=True
+        )
+      except TypeError:  # pragma: no cover
+        loaded_flow = torch.load(flow_path, map_location="cpu")
+      if isinstance(loaded_flow, dict):
+        flow_sd = loaded_flow
+    if os.path.exists(hift_path):
+      try:
+        loaded_hift = torch.load(
+            hift_path, map_location="cpu", weights_only=True
+        )
+      except TypeError:  # pragma: no cover
+        loaded_hift = torch.load(hift_path, map_location="cpu")
+      if isinstance(loaded_hift, dict):
+        hift_sd = loaded_hift
+
+    if not flow_sd and not hift_sd:
+      all_keys = set(self._weight_map) | set(self._state_dict)
+      for k in all_keys:
+        if k.startswith("vocoder.flow."):
+          t = self._get_weight(k)
+          if t is not None:
+            flow_sd[k.removeprefix("vocoder.flow.")] = t
+        elif k.startswith("vocoder.hift."):
+          t = self._get_weight(k)
+          if t is not None:
+            hift_sd[k.removeprefix("vocoder.hift.")] = t
+
+    emb_w = flow_sd.get("input_embedding.weight")
+    default_vocab_size = (
+        int(emb_w.shape[0])
+        if emb_w is not None
+        else max(1, int(tts_cfg.get("num_audio_tokens", 6562)) - 1)
+    )
+    default_flow_dim = (
+        int(emb_w.shape[1])
+        if emb_w is not None
+        else (16 if export_config.use_random_weights else 512)
+    )
+    flow_dim = int(
+        export_config.extra_kwargs.get("vocoder_flow_dim", default_flow_dim)
+    )
+    pos_u = flow_sd.get("encoder.encoders.0.self_attn.pos_bias_u")
+    default_flow_heads = (
+        int(pos_u.shape[0])
+        if pos_u is not None
+        else (2 if export_config.use_random_weights else 8)
+    )
+    flow_heads = int(
+        export_config.extra_kwargs.get("vocoder_flow_heads", default_flow_heads)
+    )
+    ff_w1 = flow_sd.get("encoder.encoders.0.feed_forward.w_1.weight")
+    flow_ffn_dim = int(ff_w1.shape[0]) if ff_w1 is not None else 4 * flow_dim
+
+    enc_indices = {
+        int(k.split(".")[2])
+        for k in flow_sd
+        if k.startswith("encoder.encoders.")
+    }
+    default_num_encoders = (
+        len(enc_indices)
+        if enc_indices
+        else (1 if export_config.use_random_weights else 6)
+    )
+    flow_num_encoders = int(
+        export_config.extra_kwargs.get(
+            "vocoder_flow_layers", default_num_encoders
+        )
+    )
+    up_indices = {
+        int(k.split(".")[2])
+        for k in flow_sd
+        if k.startswith("encoder.up_encoders.")
+    }
+    default_num_up_encoders = (
+        len(up_indices)
+        if up_indices
+        else (1 if export_config.use_random_weights else 4)
+    )
+    flow_num_up_encoders = int(
+        export_config.extra_kwargs.get(
+            "vocoder_up_layers", default_num_up_encoders
+        )
+    )
+    dit_indices = {
+        int(k.split(".")[3])
+        for k in flow_sd
+        if k.startswith("decoder.estimator.blocks.")
+    }
+    default_num_dit_blocks = (
+        len(dit_indices)
+        if dit_indices
+        else (1 if export_config.use_random_weights else 16)
+    )
+    flow_num_dit_blocks = int(
+        export_config.extra_kwargs.get(
+            "vocoder_flow_layers", default_num_dit_blocks
+        )
+    )
+    spk_w = flow_sd.get("spk_embed_affine_layer.weight")
+    default_mel_bins = (
+        int(spk_w.shape[0])
+        if spk_w is not None
+        else (16 if export_config.use_random_weights else 80)
+    )
+    mel_bins = int(
+        export_config.extra_kwargs.get("vocoder_mel_bins", default_mel_bins)
+    )
+    spk_dim = (
+        int(spk_w.shape[1])
+        if spk_w is not None
+        else (16 if export_config.use_random_weights else 192)
+    )
+    conv_pre_b = hift_sd.get("conv_pre.bias")
+    default_hidden_ch = (
+        int(conv_pre_b.shape[0])
+        if conv_pre_b is not None
+        else (32 if export_config.use_random_weights else 512)
+    )
+    hift_base_channels = int(
+        export_config.extra_kwargs.get(
+            "vocoder_hidden_channels", default_hidden_ch
+        )
+    )
+    f0_indices = {
+        int(k.split(".")[2])
+        for k in hift_sd
+        if k.startswith("f0_predictor.condnet.")
+    }
+    hift_f0_conv_layers = (
+        len(f0_indices)
+        if f0_indices
+        else (1 if export_config.use_random_weights else 5)
+    )
+    default_input_tokens = (
+        8
+        if (export_config.use_random_weights or flow_num_dit_blocks < 4)
+        else 32
+    )
+    input_tokens = int(
+        export_config.extra_kwargs.get(
+            "vocoder_input_tokens",
+            export_config.extra_kwargs.get(
+                "vocoder_chunk_frames", default_input_tokens
+            ),
+        )
+    )
+    default_n_timesteps = (
+        1
+        if (export_config.use_random_weights or flow_num_dit_blocks < 4)
+        else 6
+    )
+    n_timesteps = int(
+        export_config.extra_kwargs.get(
+            "vocoder_n_timesteps", default_n_timesteps
+        )
+    )
+    prompt_tokens_len = export_config.extra_kwargs.get(
+        "vocoder_prompt_tokens", None
+    )
+    if prompt_tokens_len is not None:
+      prompt_tokens_len = int(prompt_tokens_len)
+    elif any(
+        os.path.exists(os.path.join(self.model_dir, "assets", w))
+        for w in ("system_ref_audio.wav", "HT_ref_audio.wav")
+    ):
+      prompt_tokens_len = (
+          len(vocoder.DEFAULT_VOICE_PROMPT_TOKENS)
+          if input_tokens >= 32
+          else min(4, max(1, input_tokens // 2))
+      )
+    cfg_rate = export_config.extra_kwargs.get("vocoder_cfg_rate", None)
+    if cfg_rate is not None:
+      cfg_rate = float(cfg_rate)
+
+    mod = vocoder.MiniCpmOAudioVocoderModule(
+        vocab_size=default_vocab_size,
+        input_tokens=input_tokens,
+        flow_dim=flow_dim,
+        flow_heads=flow_heads,
+        flow_ffn_dim=flow_ffn_dim,
+        flow_num_encoders=flow_num_encoders,
+        flow_num_up_encoders=flow_num_up_encoders,
+        flow_num_dit_blocks=flow_num_dit_blocks,
+        mel_bins=mel_bins,
+        spk_dim=spk_dim,
+        n_timesteps=n_timesteps,
+        hift_base_channels=hift_base_channels,
+        hift_f0_conv_layers=hift_f0_conv_layers,
+        prompt_tokens_len=prompt_tokens_len,
+        cfg_rate=cfg_rate,
+    ).eval()
+    populated: set[int] = set()
+    if flow_sd or hift_sd or strict:
+      vocoder.load_token2wav_weights(
+          mod, flow_sd, hift_sd, strict=strict, populated=populated
+      )
+      if strict:
+        weights_utils.verify_all_parameters_populated(
+            mod, populated, "audio_vocoder"
+        )
+    if mod.prompt_tokens_len > 0:
+      for wav_name in ("system_ref_audio.wav", "HT_ref_audio.wav"):
+        wav_path = os.path.join(self.model_dir, "assets", wav_name)
+        if os.path.exists(wav_path):
+          with torch.no_grad():
+            ref_mel = _extract_ref_mel_24k(
+                wav_path,
+                num_frames=mod.flow_dit.prompt_mel_frames,
+                n_mels=mel_bins,
+            )
+            mod.flow_dit.prompt_mel.copy_(ref_mel)
+          break
+
+    sample_kwargs = {
+        "audio_codes": torch.zeros(1, input_tokens, dtype=torch.int32)
+    }
+    out_path = os.path.join(output_dir, "audio_vocoder_fp32.tflite")
+    litert_torch.convert(mod, sample_kwargs=sample_kwargs).export(out_path)
+    del mod
+    gc.collect()
+    return weights_utils.maybe_quantize(
+        out_path, export_config.quantization_recipe
+    )
 
   def export(
       self, export_config: exportable_module_config.ExportableModuleConfig
   ) -> dict[str, str]:
-    """Exports MiniCPM-o 4.5 vision, audio, text-embedder, and LLM submodules."""
-    # TODO(b/568027544): Add TTS / audio-output sub-model export
-    # (`tts_projector`, `tts_decoder`, `audio_vocoder`) in a follow-up CL.
+    """Exports MiniCPM-o 4.5 vision, audio, text-embedder, LLM, and TTS models.
+
+    Args:
+      export_config: Export configuration specifying output directory, targets,
+        and quantization recipes.
+
+    Returns:
+      Dictionary mapping exported artifact names to `.tflite` file paths.
+    """
+    _resolve_generate_audio(export_config)
     output_dir = (
         (
             export_config.work_dir
@@ -1603,7 +1265,7 @@ class MiniCpmO:
     os.makedirs(output_dir, exist_ok=True)
     artifacts: dict[str, str] = {}
 
-    targets = set(export_config.extra_kwargs.get("targets", ["all"]))
+    targets = _resolve_targets(export_config)
     export_all = "all" in targets
 
     if (
@@ -1628,17 +1290,36 @@ class MiniCpmO:
       artifacts["llm_backbone"] = self.export_llm_backbone(
           output_dir, export_config
       )
+    if export_all or "tts_projector" in targets:
+      artifacts["tts_projector"] = self.export_tts_projector(
+          output_dir, export_config
+      )
+    if export_all or "tts_decoder" in targets:
+      artifacts["tts_decoder"] = self.export_tts_decoder(
+          output_dir, export_config
+      )
+    if export_all or "audio_vocoder" in targets:
+      artifacts["audio_vocoder"] = self.export_audio_vocoder(
+          output_dir, export_config
+      )
 
     return artifacts
 
   def get_any2any_metadata(
       self, export_config: exportable_module_config.ExportableModuleConfig
   ) -> any2any_metadata_pb2.Any2AnyMetadata:
-    """Builds Any2AnyMetadata proto for the exported MiniCPM-o 4.5 model."""
-    del export_config
+    """Builds Any2AnyMetadata proto for the exported MiniCPM-o 4.5 model.
+
+    Args:
+      export_config: Export configuration containing extra_kwargs.
+
+    Returns:
+      Populated `Any2AnyMetadata` protobuf message.
+    """
     v_cfg = self._config.get("vision_config", {})
     a_cfg = self._config.get("audio_config", {})
     tts_cfg = self._config.get("tts_config", {})
+    generate_audio = _resolve_generate_audio(export_config)
 
     minicpm_proto = any2any_model_type_pb2.MiniCpmO(
         llm_hidden_size=int(self._config.get("hidden_size", 4096)),
@@ -1657,7 +1338,7 @@ class MiniCpmO:
         audio_pool_step=int(
             self._config.get("audio_pool_step", a_cfg.get("pool_step", 5))
         ),
-        generate_audio=False,
+        generate_audio=generate_audio,
         max_new_tokens=512,
         max_tts_tokens=1024,
         voice="default",
