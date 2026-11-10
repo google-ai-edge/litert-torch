@@ -60,19 +60,20 @@ def l2norm(
     inv_norm = torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
     return x * (inv_norm * scale)
   head_dim = x.shape[-1]
+  dtype = x.dtype
   weight = torch.full(
       (head_dim,),
       scale / (head_dim**0.5),
-      dtype=x.dtype,
+      dtype=torch.float32,
       device=x.device,
   )
-  ones = torch.ones((head_dim,), dtype=x.dtype, device=x.device)
+  ones = torch.ones((head_dim,), dtype=torch.float32, device=x.device)
   return normalization.rms_norm_with_hlfb(
-      x,
+      x.to(torch.float32),
       weight,
       eps / head_dim,
       ones,
-  )
+  ).to(dtype)
 
 
 def stable_softplus(x: torch.Tensor) -> torch.Tensor:
@@ -103,17 +104,18 @@ class Qwen3_5RMSNormGated(nn.Module):  # pylint: disable=invalid-name
   def forward(
       self, hidden_states: torch.Tensor, gate: torch.Tensor
   ) -> torch.Tensor:
+    dtype = hidden_states.dtype
     normed = normalization.rms_norm_with_hlfb(
-        hidden_states,
-        self.weight,
+        hidden_states.to(torch.float32),
+        self.weight.to(torch.float32),
         self.variance_epsilon,
         torch.ones(
             (self.hidden_size,),
-            dtype=hidden_states.dtype,
+            dtype=torch.float32,
             device=hidden_states.device,
         ),
-    )
-    return normed * F.silu(gate)
+    ).to(dtype)
+    return normed * F.silu(gate.to(torch.float32)).to(dtype)
 
   def extra_repr(self) -> str:
     return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
