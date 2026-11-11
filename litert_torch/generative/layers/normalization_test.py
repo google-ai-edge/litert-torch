@@ -68,6 +68,21 @@ class NormalizationTest(parameterized.TestCase):
     self.assertEqual(out.shape, (model_dim,))
     self.assertTrue(torch.allclose(out, expected_values))
 
+  def test_rms_norm_with_hlfb_final_scale_optional(self):
+    """`final_scale` omitted/None must be a true no-op vs. passing all-ones."""
+    model_dim = 4
+    x = torch.randn((model_dim,), dtype=torch.float32)
+    w = torch.randn((model_dim,), dtype=torch.float32)
+    eps = 1e-6
+    ones_scale = torch.ones((model_dim,), dtype=torch.float32)
+
+    out_omitted = normalization.rms_norm_with_hlfb(x, w, eps)
+    out_none = normalization.rms_norm_with_hlfb(x, w, eps, None)
+    out_with_ones = normalization.rms_norm_with_hlfb(x, w, eps, ones_scale)
+
+    self.assertTrue(torch.allclose(out_omitted, out_with_ones))
+    self.assertTrue(torch.allclose(out_none, out_with_ones))
+
   @parameterized.named_parameters(
       dict(
           testcase_name="layer_norm_with_bias_no_hlfb",

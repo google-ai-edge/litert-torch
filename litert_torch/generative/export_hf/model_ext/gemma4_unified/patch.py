@@ -23,10 +23,17 @@ import torch
 class Gemma4UnifiedRMSNorm(torch.nn.Module):
   """RMSNorm Layer."""
 
-  def __init__(self, dim: int, eps: float = 1e-6, with_scale: bool = True):
+  def __init__(
+      self,
+      dim: int,
+      eps: float = 1e-6,
+      with_scale: bool = True,
+      elide_final_scale: bool = False,
+  ):
     """RMSNorm Layer."""
     super().__init__()
     self.with_scale = with_scale
+    self.elide_final_scale = elide_final_scale
 
     if self.with_scale:
       self.weight = torch.nn.Parameter(torch.ones(dim), requires_grad=True)
@@ -39,21 +46,23 @@ class Gemma4UnifiedRMSNorm(torch.nn.Module):
   def forward(self, hidden_states):
     x_dtype = hidden_states.dtype
     hidden_states = hidden_states.float()
-    ret = normalization.rms_norm_with_hlfb(
-        hidden_states,
+    w = (
         self.weight
         if self.with_scale
         else torch.ones(
             (self.hidden_size,),
             dtype=torch.float32,
             device=hidden_states.device,
-        ),
+        )
+    )
+    final_scale = patches_lib.maybe_ones_final_scale(
+        self.elide_final_scale, self.hidden_size, hidden_states.device
+    )
+    ret = normalization.rms_norm_with_hlfb(
+        hidden_states,
+        w,
         self.variance_epsilon,
-        torch.ones(
-            (self.hidden_size,),
-            dtype=torch.float32,
-            device=hidden_states.device,
-        ),
+        final_scale,
     )
     return ret.to(x_dtype)
 
@@ -75,3 +84,21 @@ def gemma4_litert_patch():
     yield
   finally:
     modeling_gemma4_unified.Gemma4UnifiedRMSNorm = original_norm
+
+
+@patches_lib.register_model_patch(["gemma4_unified_text"])
+@contextlib.contextmanager
+def patch_gemma4_unified_model(model, export_config):
+  """Trace-time patch: opt-in elision of RMSNorm's redundant final_scale.
+
+  Registered under `"gemma4_unified_text"` (the `text_config.model_type`
+  trace-time patches dispatch on), not the outer `"gemma4_unified"`. See
+  `patch_gemma4_model` for the elision rationale.
+  """
+  elide_final_scale = export_config.extra_kwargs.get(
+      "elide_rmsnorm_final_scale", False
+  )
+  with patches_lib.elide_final_scale_during_trace(
+      model, Gemma4UnifiedRMSNorm, elide_final_scale
+  ):
+    yield

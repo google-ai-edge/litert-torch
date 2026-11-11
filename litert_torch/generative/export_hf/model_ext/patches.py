@@ -37,6 +37,8 @@ extensions can implement `ModelExtension.patch_context` and
 import contextlib
 from typing import Any, Callable, Dict
 
+import torch
+
 from litert_torch.generative.export_hf.model_ext import extension as extension_lib
 
 # A map of model_type -> context manager factory
@@ -163,3 +165,35 @@ def patch_model(model: Any, model_type: str, export_config: Any):
     if ext is not None:
       stack.enter_context(ext.patch_model(model, export_config))
     yield
+
+
+def maybe_ones_final_scale(elide, size, device):
+  """Returns `None` to elide RMSNorm's final scale, else an all-ones tensor.
+
+  Gemma4's `final_scale` is always all-ones, so the multiply is a no-op;
+  tracing it emits an identical constant per call site that some NPU backends
+  merge and fail to compile. `None` lets a trace-time patch skip it.
+  """
+  if elide:
+    return None
+  return torch.ones((size,), dtype=torch.float32, device=device)
+
+
+@contextlib.contextmanager
+def elide_final_scale_during_trace(model, norm_type, enabled):
+  """Flips `elide_final_scale=True` on matching norms, restoring on exit.
+
+  Walks `model.modules()` so it reaches `norm_type` instances that fused
+  modules reuse by reference. No-op when `enabled` is falsy.
+  """
+  patched = []
+  if enabled:
+    for module in model.modules():
+      if isinstance(module, norm_type):
+        patched.append((module, module.elide_final_scale))
+        module.elide_final_scale = True
+  try:
+    yield
+  finally:
+    for module, original in patched:
+      module.elide_final_scale = original
