@@ -15,6 +15,8 @@
 """Tests for Qwen3.5 model patch."""
 
 import importlib.metadata
+import os
+import tempfile
 from typing import Any
 
 orig_version = importlib.metadata.version
@@ -32,9 +34,12 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import litert_torch
 from litert_torch.generative.export_hf.core import exportable_module_config
+from litert_torch.generative.export_hf.core import weights_loader
 from litert_torch.generative.export_hf.model_ext import patches as patches_lib
+from litert_torch.generative.export_hf.model_ext.qwen3_5 import extension as qwen3_5_extension
 from litert_torch.generative.export_hf.model_ext.qwen3_5 import modeling_qwen3_5_static
 from litert_torch.generative.export_hf.model_ext.qwen3_5 import patch
+import safetensors.torch
 import torch
 from transformers.models.qwen3_5 import configuration_qwen3_5
 from transformers.models.qwen3_5 import modeling_qwen3_5
@@ -507,6 +512,73 @@ class Qwen3_5PatchTest(parameterized.TestCase):
 
     edge_model = litert_torch.convert(wrapper, (x, pos_ids))
     self.assertIn(b"odml.qkv_norm_rope", edge_model.model_content())
+
+  def test_hf_checkpoint_weights_loader_qwen3_5(self):
+    torch.manual_seed(0)
+    cfg = self._make_config(partial_rotary_factor=0.25)
+    model = modeling_qwen3_5_static.Qwen3_5StaticForCausalLM(cfg).eval()
+    for module in model.modules():
+      if isinstance(
+          module,
+          (modeling_qwen3_5.Qwen3_5RMSNorm, modular_qwen3_5.Qwen3_5RMSNorm),
+      ):
+        module.weight.data.uniform_(-0.1, 0.1)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      raw_state = {
+          k: v.detach().to(torch.bfloat16)
+          for k, v in model.state_dict().items()
+      }
+      safetensors.torch.save_file(
+          raw_state, os.path.join(tmpdir, "model.safetensors")
+      )
+      ext = qwen3_5_extension.Qwen3_5Extension()
+      loader = weights_loader.HFCheckpointWeightsLoader(
+          tmpdir,
+          extra_fused_specs=ext.fused_weight_specs,
+          tensor_resolver=ext.resolve_checkpoint_tensor,
+          config=cfg,
+      )
+
+      # 1. Zero-centered RMSNorm weights should have +1.0 added in float32
+      for norm_key in (
+          "model.layers.0.input_layernorm.weight",
+          "model.layers.0.post_attention_layernorm.weight",
+          "model.layers.1.self_attn.q_norm.weight",
+          "model.layers.1.self_attn.k_norm.weight",
+          "model.norm.weight",
+      ):
+        loaded = loader(f"static_model.{norm_key}")
+        expected = raw_state[norm_key].to(torch.float32) + 1.0
+        self.assertEqual(loaded.dtype, torch.float32)
+        torch.testing.assert_close(loaded, expected)
+
+      # 2. Gated RMSNorm in linear_attn is NOT zero-centered (no +1.0 shift)
+      gated_key = "model.layers.0.linear_attn.norm.weight"
+      loaded_gated = loader(f"static_model.{gated_key}")
+      torch.testing.assert_close(loaded_gated, raw_state[gated_key])
+
+  def test_from_hf_model_and_patches_on_meta_device(self):
+    cfg = self._make_config(partial_rotary_factor=0.25)
+    with weights_loader.init_params_on_meta():
+      hf_model = modeling_qwen3_5.Qwen3_5ForCausalLM(cfg)
+    hf_model = weights_loader.cast_params_(hf_model, torch.bfloat16)
+
+    static_model = (
+        modeling_qwen3_5_static.Qwen3_5StaticForCausalLM.from_hf_model(hf_model)
+    )
+    export_config = exportable_module_config.ExportableModuleConfig(
+        model="dummy",
+        fuse_gate_up=True,
+        fuse_qkv=True,
+        use_swiglu_composite=True,
+        use_rope_composite=True,
+        use_qkv_norm_rope_composite=False,
+    )
+    patch.apply_qwen3_5_model_patches(static_model, export_config)
+
+    self.assertTrue(all(p.is_meta for p in static_model.parameters()))
+
 
 if __name__ == "__main__":
   absltest.main()
