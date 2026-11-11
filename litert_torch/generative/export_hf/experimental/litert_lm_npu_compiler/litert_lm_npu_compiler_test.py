@@ -1136,6 +1136,183 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
     _, kwargs = inst.call_args
     self.assertEqual(kwargs['mediatek_option_bundle'], 'custom-bundle')
 
+  def _setup_mock_plugin_and_litertlm(
+      self, mock_apply_plugin_class, include_aux: bool = False
+  ):
+    compiled_instances = []
+
+    def apply_plugin_init_side_effect(*unused_args, **unused_kwargs):
+      instance_mock = mock.MagicMock()
+
+      def compile_call_side_effect(*args, **kwargs):
+        input_model = kwargs.get('input_model') or args[0]
+        output_model = kwargs.get('output_model') or args[1]
+        with open(input_model.path, 'rb') as orig_f:
+          model_bytes = orig_f.read()
+        with open(output_model.path, 'wb') as f:
+          f.write(model_bytes)
+
+      instance_mock.side_effect = compile_call_side_effect
+      compiled_instances.append(instance_mock)
+      return instance_mock
+
+    mock_apply_plugin_class.side_effect = apply_plugin_init_side_effect
+
+    main_model_bytes = build_dummy_tflite_model([('serving_default', 0)])
+    main_model_path = os.path.join(self.test_dir, 'model.tflite')
+    with open(main_model_path, 'wb') as f:
+      f.write(main_model_bytes)
+
+    metadata_path = os.path.join(self.test_dir, 'metadata.pb')
+    with open(metadata_path, 'wb') as f:
+      f.write(llm_metadata_pb2.LlmMetadata().SerializeToString())
+    tokenizer_path = os.path.join(self.test_dir, 'tokenizer.model')
+    with open(tokenizer_path, 'w') as f:
+      f.write('dummy')
+
+    input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
+    builder = litertlm_builder.LitertLmFileBuilder()
+    builder.add_tflite_model(
+        main_model_path, llm_metadata_pb2.LlmMetadata.TF_LITE_PREFILL_DECODE
+    )
+    if include_aux:
+      aux_model_bytes = build_dummy_tflite_model([('prefill_mask_128', 1)])
+      aux_model_path = os.path.join(self.test_dir, 'aux.tflite')
+      with open(aux_model_path, 'wb') as f:
+        f.write(aux_model_bytes)
+      builder.add_tflite_model(
+          aux_model_path, llm_metadata_pb2.LlmMetadata.TF_LITE_AUX
+      )
+    builder.add_llm_metadata(metadata_path)
+    builder.add_sentencepiece_tokenizer(tokenizer_path)
+    with open(input_litertlm_path, 'wb') as f:
+      builder.build(f)
+
+    output_litertlm_path = os.path.join(self.test_dir, 'output.litertlm')
+    return compiled_instances, input_litertlm_path, output_litertlm_path
+
+  @mock.patch(
+      'litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler.ApplyPlugin'
+  )
+  def test_kv_cache_init_value(self, mock_apply_plugin_class):
+    _, input_litertlm_path, output_litertlm_path = (
+        self._setup_mock_plugin_and_litertlm(
+            mock_apply_plugin_class, include_aux=True
+        )
+    )
+    unpack_dir = os.path.join(self.test_dir, 'unpacked')
+
+    litert_lm_npu_compiler.compile_litertlm(
+        input_litertlm=input_litertlm_path,
+        output_litertlm=output_litertlm_path,
+        backend='qualcomm',
+        soc_model='SM8750',
+        kv_cache_init_value=32768,
+        intermediate_dir=unpack_dir,
+    )
+
+    with open(os.path.join(unpack_dir, 'LlmMetadataProto.pbtext'), 'r') as f:
+      pbtext = f.read()
+    self.assertIn('kv_cache_init_value: 32768', pbtext)
+
+  @mock.patch(
+      'litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler.ApplyPlugin'
+  )
+  def test_qualcomm_weight_sharing_channel_tile_size(
+      self, mock_apply_plugin_class
+  ):
+    compiled_instances, input_litertlm_path, output_litertlm_path = (
+        self._setup_mock_plugin_and_litertlm(mock_apply_plugin_class)
+    )
+
+    litert_lm_npu_compiler.compile_litertlm(
+        input_litertlm=input_litertlm_path,
+        output_litertlm=output_litertlm_path,
+        backend='qualcomm',
+        soc_model='SM8750',
+        qualcomm_weight_sharing_channel_tile_size=64,
+    )
+
+    self.assertLen(compiled_instances, 1)
+    inst = compiled_instances[0]
+    inst.assert_called_once()
+    _, kwargs = inst.call_args
+    self.assertEqual(
+        kwargs['qualcomm_htp_weight_sharing_channel_tile_size'], 64
+    )
+
+  @mock.patch(
+      'litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler.ApplyPlugin'
+  )
+  def test_qualcomm_graph_transform(self, mock_apply_plugin_class):
+    compiled_instances, input_litertlm_path, output_litertlm_path = (
+        self._setup_mock_plugin_and_litertlm(mock_apply_plugin_class)
+    )
+
+    litert_lm_npu_compiler.compile_litertlm(
+        input_litertlm=input_litertlm_path,
+        output_litertlm=output_litertlm_path,
+        backend='qualcomm',
+        soc_model='SM8750',
+        qualcomm_graph_transform='gqa',
+    )
+
+    self.assertLen(compiled_instances, 1)
+    inst = compiled_instances[0]
+    inst.assert_called_once()
+    _, kwargs = inst.call_args
+    self.assertEqual(kwargs['qualcomm_graph_transform'], 'gqa')
+
+  @mock.patch(
+      'litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler.ApplyPlugin'
+  )
+  def test_npu_executor_metadata_overrides(self, mock_apply_plugin_class):
+    _, input_litertlm_path, output_litertlm_path = (
+        self._setup_mock_plugin_and_litertlm(mock_apply_plugin_class)
+    )
+    exec_meta_path = os.path.join(self.test_dir, 'executor_metadata.pbtext')
+    with open(exec_meta_path, 'w') as f:
+      f.write(
+          'llm_executor_metadata {\n  max_history_size: 1024\n}\n'
+          'llm_npu_executor_metadata {\n'
+          '  use_hw_cache_update_for_npu: true\n'
+          '}\n'
+      )
+    main_model_path = os.path.join(self.test_dir, 'model.tflite')
+    metadata_path = os.path.join(self.test_dir, 'metadata.pb')
+    tokenizer_path = os.path.join(self.test_dir, 'tokenizer.model')
+    builder = litertlm_builder.LitertLmFileBuilder()
+    builder.add_tflite_model(
+        main_model_path, llm_metadata_pb2.LlmMetadata.TF_LITE_PREFILL_DECODE
+    )
+    builder.add_llm_metadata(metadata_path)
+    builder.add_executor_metadata(exec_meta_path)
+    builder.add_sentencepiece_tokenizer(tokenizer_path)
+    with open(input_litertlm_path, 'wb') as f:
+      builder.build(f)
+
+    unpack_dir = os.path.join(self.test_dir, 'unpacked_exec_meta')
+    litert_lm_npu_compiler.compile_litertlm(
+        input_litertlm=input_litertlm_path,
+        output_litertlm=output_litertlm_path,
+        backend='qualcomm',
+        soc_model='SM8750',
+        enable_neon_for_npu_greedy_sampling=True,
+        use_hw_masking_for_npu=True,
+        use_hw_cache_update_for_npu=True,
+        use_hw_ple_for_npu=False,
+        intermediate_dir=unpack_dir,
+    )
+
+    with open(
+        os.path.join(unpack_dir, 'ExecutorMetadataProto.pbtext'), 'r'
+    ) as f:
+      pbtext = f.read()
+    self.assertIn('enable_neon_for_npu_greedy_sampling: true', pbtext)
+    self.assertIn('use_hw_masking_for_npu: true', pbtext)
+    self.assertIn('use_hw_cache_update_for_npu: true', pbtext)
+    self.assertIn('use_hw_ple_for_npu: false', pbtext)
+
 
 if __name__ == '__main__':
   absltest.main()

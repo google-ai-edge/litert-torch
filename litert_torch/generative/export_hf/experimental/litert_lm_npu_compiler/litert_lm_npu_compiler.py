@@ -129,6 +129,69 @@ _define_flag(
     False,
     'Enable compiling vision encoder model.',
 )
+_define_flag(
+    flags.DEFINE_integer,
+    'kv_cache_init_value',
+    None,
+    'Initial fill value for integer KV caches (e.g., 32768 for 16-bit zero'
+    ' point). Overrides value in compile_configs if specified.',
+)
+
+_define_flag(
+    flags.DEFINE_integer,
+    'qualcomm_weight_sharing_channel_tile_size',
+    None,
+    'Channel tile size used by Qualcomm weight sharing during graph'
+    ' finalization (e.g. 32, 64, 128, 256).',
+)
+_define_flag(
+    flags.DEFINE_alias,
+    'qualcomm_htp_weight_sharing_channel_tile_size',
+    'qualcomm_weight_sharing_channel_tile_size',
+)
+_define_flag(
+    flags.DEFINE_string,
+    'qualcomm_graph_transform',
+    None,
+    'Comma-separated list of graph transformations to enable for Qualcomm'
+    ' backend (e.g. "gqa"). Overrides value in'
+    ' compile_configs if specified.',
+)
+_define_flag(
+    flags.DEFINE_bool,
+    'enable_neon_for_npu_greedy_sampling',
+    None,
+    'Whether to enable NEON optimizations for greedy sampling on NPU in'
+    ' ExecutorMetadata. Overrides value in compile_configs if specified.',
+)
+_define_flag(
+    flags.DEFINE_bool,
+    'use_hw_masking_for_npu',
+    None,
+    'Whether to enable handwritten attention mask updates on NPU in'
+    ' ExecutorMetadata. Overrides value in compile_configs if specified.',
+)
+_define_flag(
+    flags.DEFINE_bool,
+    'use_hw_cache_update_for_npu',
+    None,
+    'Whether to enable handwritten KV-cache updates on NPU in'
+    ' ExecutorMetadata. Overrides value in compile_configs if specified.',
+)
+_define_flag(
+    flags.DEFINE_bool,
+    'use_hw_ple_for_npu',
+    None,
+    'Whether to enable handwritten per-layer embedding lookup on NPU in'
+    ' ExecutorMetadata. Overrides value in compile_configs if specified.',
+)
+
+_NPU_EXECUTOR_METADATA_FIELDS = (
+    'enable_neon_for_npu_greedy_sampling',
+    'use_hw_masking_for_npu',
+    'use_hw_cache_update_for_npu',
+    'use_hw_ple_for_npu',
+)
 
 _WEIGHT_SHARING_MODEL_TYPES = (
     'prefill_decode',
@@ -191,6 +254,43 @@ def _resolve_subgraphs_to_compile(
 _DEFAULT_INTERMEDIATE_ARTIFACTS_DIR = 'intermediate_compiler_artifacts'
 
 
+def _update_npu_executor_metadata_pbtext(
+    pbtext_content: str,
+    npu_overrides: dict[str, bool],
+) -> str:
+  """Updates or appends `llm_npu_executor_metadata` fields in textproto."""
+  if not npu_overrides:
+    return pbtext_content
+  block_match = re.search(
+      r'(?ms)^(\s*llm_npu_executor_metadata\s*\{)(.*?)^(\s*\})',
+      pbtext_content,
+  )
+  if block_match:
+    header, body, footer = block_match.groups()
+    for field_name, field_val in npu_overrides.items():
+      val_str = 'true' if field_val else 'false'
+      field_pattern = (
+          rf'(?m)^(\s*{re.escape(field_name)}:\s*)(?:true|false)\b'
+      )
+      if re.search(field_pattern, body):
+        body = re.sub(field_pattern, rf'\g<1>{val_str}', body)
+      else:
+        body = body.rstrip('\n') + f'\n  {field_name}: {val_str}\n'
+    new_block = f'{header}{body}{footer}'
+    return (
+        pbtext_content[: block_match.start()]
+        + new_block
+        + pbtext_content[block_match.end() :]
+    )
+  lines = ['llm_npu_executor_metadata {']
+  for field_name, field_val in npu_overrides.items():
+    val_str = 'true' if field_val else 'false'
+    lines.append(f'  {field_name}: {val_str}')
+  lines.append('}')
+  prefix = pbtext_content.rstrip()
+  return (f'{prefix}\n' if prefix else '') + '\n'.join(lines) + '\n'
+
+
 def compile_litertlm(
     input_litertlm: str | pathlib.Path,
     output_litertlm: str | pathlib.Path,
@@ -204,6 +304,13 @@ def compile_litertlm(
     disable_audio_encoder_compilation: bool = False,
     enable_audio_encoder_compilation: bool = False,
     enable_vision_encoder_compilation: bool = False,
+    kv_cache_init_value: int | None = None,
+    qualcomm_weight_sharing_channel_tile_size: int | None = None,
+    qualcomm_graph_transform: str | None = None,
+    enable_neon_for_npu_greedy_sampling: bool | None = None,
+    use_hw_masking_for_npu: bool | None = None,
+    use_hw_cache_update_for_npu: bool | None = None,
+    use_hw_ple_for_npu: bool | None = None,
     intermediate_dir: str | pathlib.Path | None = None,
     keep_temporary_files: bool = False,
     overwrite: bool = True,
@@ -224,6 +331,21 @@ def compile_litertlm(
     enable_audio_encoder_compilation: If True, enables compiling audio encoder.
     enable_vision_encoder_compilation: If True, enables compiling vision
       encoder.
+    kv_cache_init_value: Optional initial fill value for integer KV caches
+      (e.g., 32768 for 16-bit zero point). Overrides value in compile_configs if
+      specified.
+    qualcomm_weight_sharing_channel_tile_size: Optional channel tile size for
+      weight sharing during graph finalization (e.g. 32, 64, 128, 256).
+    qualcomm_graph_transform: Optional comma-separated list of Qualcomm graph
+      transformations (e.g. "gqa").
+    enable_neon_for_npu_greedy_sampling: Optional override for NEON greedy
+      sampling in `ExecutorMetadata.llm_npu_executor_metadata`.
+    use_hw_masking_for_npu: Optional override for handwritten attention masking
+      in `ExecutorMetadata.llm_npu_executor_metadata`.
+    use_hw_cache_update_for_npu: Optional override for handwritten KV-cache
+      updates in `ExecutorMetadata.llm_npu_executor_metadata`.
+    use_hw_ple_for_npu: Optional override for handwritten per-layer embedding
+      lookup in `ExecutorMetadata.llm_npu_executor_metadata`.
     intermediate_dir: If set, intermediate artifacts will be stored here. If not
       set and keep_temporary_files is True, intermediate artifacts will be
       stored in a temporary directory.
@@ -279,6 +401,40 @@ def compile_litertlm(
       )
       logging.info('Using generic defaults for %s', backend)
 
+  model_defaults = {}
+  if model_name:
+    model_defaults = litert_lm_npu_compiler_configs.MODEL_SPECIFIC_DEFAULTS.get(
+        (backend, model_name), {}
+    )
+  default_kv_init = model_defaults.get('kv_cache_init_value')
+  effective_kv_cache_init_value = configs.get(
+      'kv_cache_init_value', default_kv_init
+  )
+  if kv_cache_init_value is not None:
+    effective_kv_cache_init_value = kv_cache_init_value
+
+  explicit_npu_executor_args = {
+      'enable_neon_for_npu_greedy_sampling': (
+          enable_neon_for_npu_greedy_sampling
+      ),
+      'use_hw_masking_for_npu': use_hw_masking_for_npu,
+      'use_hw_cache_update_for_npu': use_hw_cache_update_for_npu,
+      'use_hw_ple_for_npu': use_hw_ple_for_npu,
+  }
+  effective_npu_executor_overrides: dict[str, bool] = {}
+  for field_name in _NPU_EXECUTOR_METADATA_FIELDS:
+    explicit_val = explicit_npu_executor_args[field_name]
+    if explicit_val is not None:
+      effective_npu_executor_overrides[field_name] = bool(explicit_val)
+    elif field_name in configs and configs[field_name] is not None:
+      effective_npu_executor_overrides[field_name] = bool(configs[field_name])
+    elif (
+        field_name in model_defaults and model_defaults[field_name] is not None
+    ):
+      effective_npu_executor_overrides[field_name] = bool(
+          model_defaults[field_name]
+      )
+
   soc_manufacturer = _get_soc_manufacturer(backend)
 
   if intermediate_dir:
@@ -314,7 +470,54 @@ def compile_litertlm(
 
     if 'section' in toml_data:
       for section in toml_data['section']:
-        if section.get('section_type') == 'TFLiteModel':
+        if (
+            section.get('section_type') in ('LlmMetadata', 'LlmMetadataProto')
+            and effective_kv_cache_init_value is not None
+        ):
+          metadata_path = temp_dir_path / section.get('data_path')
+          if metadata_path.exists():
+            with _open(metadata_path, 'r') as f:
+              pbtext_content = f.read()
+            if re.search(
+                r'(?m)^\s*kv_cache_init_value:\s*-?\d+', pbtext_content
+            ):
+              pbtext_content = re.sub(
+                  r'(?m)^(\s*kv_cache_init_value:\s*)-?\d+',
+                  rf'\g<1>{effective_kv_cache_init_value}',
+                  pbtext_content,
+              )
+            else:
+              pbtext_content = (
+                  pbtext_content.rstrip()
+                  + f'\nkv_cache_init_value: {effective_kv_cache_init_value}\n'
+              )
+            with _open(metadata_path, 'w') as f:
+              f.write(pbtext_content)
+            logging.info(
+                'Set kv_cache_init_value: %d in %s',
+                effective_kv_cache_init_value,
+                metadata_path,
+            )
+        elif (
+            section.get('section_type')
+            in ('ExecutorMetadata', 'ExecutorMetadataProto')
+            and effective_npu_executor_overrides
+        ):
+          metadata_path = temp_dir_path / section.get('data_path')
+          if metadata_path.exists():
+            with _open(metadata_path, 'r') as f:
+              pbtext_content = f.read()
+            pbtext_content = _update_npu_executor_metadata_pbtext(
+                pbtext_content, effective_npu_executor_overrides
+            )
+            with _open(metadata_path, 'w') as f:
+              f.write(pbtext_content)
+            logging.info(
+                'Updated llm_npu_executor_metadata %s in %s',
+                effective_npu_executor_overrides,
+                metadata_path,
+            )
+        elif section.get('section_type') == 'TFLiteModel':
           model_type = section.get('model_type')
           relative_data_path = section.get('data_path')
           model_path = temp_dir_path / relative_data_path
@@ -323,12 +526,13 @@ def compile_litertlm(
           extra_flags: list[str] = []
 
           if model_type in configs:
-            if isinstance(configs[model_type], list):
+            model_cfg = configs[model_type]
+            if isinstance(model_cfg, list):
               should_compile = True
-              extra_flags = list(configs[model_type])
-            elif isinstance(configs[model_type], dict):
-              should_compile = configs[model_type].get('compile', True)
-              flags_val = configs[model_type].get('flags', [])
+              extra_flags = list(model_cfg)
+            elif isinstance(model_cfg, dict):
+              should_compile = bool(model_cfg.get('compile', True))
+              flags_val = model_cfg.get('flags', [])
               if isinstance(flags_val, list):
                 extra_flags = list(flags_val)
 
@@ -368,6 +572,17 @@ def compile_litertlm(
               ):
                 extra_flags = list(extra_flags)
                 extra_flags.append('--qualcomm_enable_weight_sharing=true')
+              if (
+                  qualcomm_weight_sharing_channel_tile_size is not None
+                  and qualcomm_weight_sharing_channel_tile_size > 0
+              ):
+                if not any(
+                    'weight_sharing_channel_tile_size' in f for f in extra_flags
+                ):
+                  extra_flags = list(extra_flags)
+                  extra_flags.append(
+                      f'--qualcomm_htp_weight_sharing_channel_tile_size={qualcomm_weight_sharing_channel_tile_size}'
+                  )
             else:
               extra_flags = [
                   f
@@ -376,6 +591,19 @@ def compile_litertlm(
               ]
               extra_flags = list(extra_flags)
               extra_flags.append('--qualcomm_enable_weight_sharing=false')
+
+          if (
+              should_compile
+              and backend == 'qualcomm'
+              and model_type == 'prefill_decode'
+          ):
+            if qualcomm_graph_transform and not any(
+                'qualcomm_graph_transform' in f for f in extra_flags
+            ):
+              extra_flags = list(extra_flags)
+              extra_flags.append(
+                  f'--qualcomm_graph_transform={qualcomm_graph_transform}'
+              )
 
           if should_compile and backend == 'mediatek':
             sdk_version_type, _ = _get_mediatek_sdk_version(soc_model)
@@ -555,6 +783,13 @@ def main(argv: Sequence[str]) -> None:
         disable_audio_encoder_compilation=FLAGS.disable_audio_encoder_compilation,
         enable_audio_encoder_compilation=FLAGS.enable_audio_encoder_compilation,
         enable_vision_encoder_compilation=FLAGS.enable_vision_encoder_compilation,
+        kv_cache_init_value=FLAGS.kv_cache_init_value,
+        qualcomm_weight_sharing_channel_tile_size=FLAGS.qualcomm_weight_sharing_channel_tile_size,
+        qualcomm_graph_transform=FLAGS.qualcomm_graph_transform,
+        enable_neon_for_npu_greedy_sampling=FLAGS.enable_neon_for_npu_greedy_sampling,
+        use_hw_masking_for_npu=FLAGS.use_hw_masking_for_npu,
+        use_hw_cache_update_for_npu=FLAGS.use_hw_cache_update_for_npu,
+        use_hw_ple_for_npu=FLAGS.use_hw_ple_for_npu,
     )
   except ValueError as e:
     raise app.UsageError(str(e)) from e
