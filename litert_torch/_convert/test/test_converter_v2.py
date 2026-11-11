@@ -509,10 +509,57 @@ class TestConverterV2(googletest.TestCase):
         atol=1e-3,
     )
 
-  @googletest.skip(
-      "TODO(b/581828582): Enable when the Converter V2 fix is in the OSS"
-      " release."
-  )
+  def test_prune_unused_parameters_keeps_mutated_buffers(self):
+    """_prune_unused_parameters drops unused params/buffers and keeps mutated buffers."""
+
+    class StatefulWithUnusedModule(nn.Module):
+      """Module with unused params/buffers and a mutated buffer."""
+
+      def __init__(self):
+        super().__init__()
+        self.used = nn.Linear(4, 2, bias=False)
+        self.unused = nn.Linear(8, 8)
+        self.dead = nn.Linear(4, 2, bias=False)
+        self.register_buffer("unused_buf", torch.ones(4))
+        self.register_buffer("mutated_buf", torch.zeros(1, 2))
+
+      def forward(self, x):
+        _ = self.dead(x) + 1.0
+        out = self.used(x)
+        self.mutated_buf.copy_(out)
+        return out
+
+    m = StatefulWithUnusedModule().eval()
+    ep = torch.export.export(m, (torch.randn(1, 4),), strict=False)
+    self.assertIn("unused.weight", ep.state_dict)
+    self.assertIn("dead.weight", ep.state_dict)
+    self.assertIn("unused_buf", ep.state_dict)
+
+    converter_v2_lib._prune_unused_parameters(ep)  # pylint: disable=protected-access
+    ep.validate()
+    self.assertNotIn("unused.weight", ep.state_dict)
+    self.assertNotIn("unused.bias", ep.state_dict)
+    self.assertNotIn("dead.weight", ep.state_dict)
+    self.assertNotIn("unused_buf", ep.state_dict)
+    self.assertIn("used.weight", ep.state_dict)
+    self.assertIn("mutated_buf", ep.state_dict)
+    self.assertEqual(list(ep.graph_signature.parameters), ["used.weight"])
+    self.assertEqual(list(ep.graph_signature.buffers), ["mutated_buf"])
+
+  def test_tensor_to_byte_view(self):
+    """_tensor_to_byte_view supports contiguous, non-contiguous, and bfloat16 tensors."""
+    for dtype in (torch.float32, torch.bfloat16, torch.int8, torch.uint8):
+      with self.subTest(dtype=dtype):
+        t = torch.arange(12, dtype=torch.float32).reshape(3, 4).to(dtype)
+        for candidate in (t, t.t()):
+          view = converter_v2_lib._tensor_to_byte_view(candidate)  # pylint: disable=protected-access
+          self.assertIsInstance(view, memoryview)
+          self.assertEqual(
+              view.nbytes, candidate.numel() * candidate.element_size()
+          )
+          expected = candidate.contiguous().view(torch.uint8).numpy().tobytes()
+          self.assertEqual(bytes(view), expected)
+
   def test_preserves_pytorch_module_hierarchy_in_op_scopes(self):
     """Test that Converter V2 lifts CallSiteLoc caller NameLocs onto Linear ops."""
     m = SimpleLinearModel().eval()

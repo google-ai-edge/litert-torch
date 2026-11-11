@@ -169,12 +169,12 @@ def _get_param_id(p: torch.Tensor, origin: torch.Tensor | None = None) -> Any:
   return id(p)
 
 
-def _tensor_to_raw_bytes(tensor: torch.Tensor) -> bytes:
-  """Converts a torch tensor to raw bytes with C-contiguous layout."""
-  t = tensor.contiguous().detach().cpu()
-  if t.dtype == torch.bfloat16:
-    return t.reshape(-1).view(torch.uint8).numpy().tobytes()
-  return t.numpy().tobytes()
+def _tensor_to_byte_view(
+    tensor: torch.Tensor,
+) -> memoryview:  # pylint: disable=g-bare-generic
+  """Returns a zero-copy 1D uint8 memoryview of `tensor` in C-contiguous layout."""
+  t = tensor.detach().cpu().contiguous()
+  return memoryview(t.reshape(-1).view(torch.uint8).numpy())
 
 
 def _fallback_tensor_or_raise(
@@ -432,20 +432,22 @@ class ParameterRegistry:
             )
           if actual_tensor.dtype != p.dtype:
             actual_tensor = actual_tensor.to(p.dtype)
-          raw_bytes = _tensor_to_raw_bytes(actual_tensor)
-          del actual_tensor
+          raw_view = _tensor_to_byte_view(actual_tensor)
         else:
-          raw_bytes = _tensor_to_raw_bytes(p)
+          raw_view = _tensor_to_byte_view(p)
 
         expected_nbytes = p.numel() * p.element_size()
-        if len(raw_bytes) != expected_nbytes:
+        if raw_view.nbytes != expected_nbytes:
           raise RuntimeError(
               f"params.bin size mismatch for '{param_name}': got"
-              f" {len(raw_bytes)} bytes but {expected_nbytes} were reserved"
+              f" {raw_view.nbytes} bytes but {expected_nbytes} were reserved"
               " during registration."
           )
-        f.write(raw_bytes)
-        current_pos += len(raw_bytes)
+        f.write(raw_view)
+        current_pos += raw_view.nbytes
+        del raw_view
+        if weights_loader is not None:
+          del actual_tensor
 
     with open(json_path, "w") as f:
       json.dump(self.metadata, f, indent=2)
@@ -527,6 +529,25 @@ def _trim_memory():
     pass
 
 
+def _prune_unused_parameters(
+    exported_program: torch.export.ExportedProgram,
+) -> None:
+  """Removes dead metadata asserts, dead ops, and unused non-user-input placeholders."""
+  erased = False
+  if hasattr(torch.ops.aten, "_assert_tensor_metadata"):
+    for node in list(exported_program.graph.nodes):
+      if (
+          node.target
+          == torch.ops.aten._assert_tensor_metadata.default  # pylint: disable=protected-access
+          and not node.users
+      ):
+        exported_program.graph.erase_node(node)
+        erased = True
+  if erased | exported_program.graph.eliminate_dead_code():
+    exported_program.graph_module.recompile()
+  fx_infra.graph_utils.remove_unused_non_user_inputs(exported_program)
+
+
 def export_to_dir(
     signatures: list[signature_module.Signature],
     export_dir: str,
@@ -545,11 +566,11 @@ def export_to_dir(
   exported_programs: list[Any] = []
   for sig in signatures:
     with progress.task(f"Torch Export: {sig.name}"):
-      exported_programs.append(
-          core.export_torch_signature(
-              sig, strict_export=strict_export, run_decompositions=False
-          )
+      exported_program = core.export_torch_signature(
+          sig, strict_export=strict_export, run_decompositions=False
       )
+      _prune_unused_parameters(exported_program)
+      exported_programs.append(exported_program)
   t_torch_export = time.perf_counter() - t_torch_start
 
   t_python_rest_start = time.perf_counter()
@@ -564,6 +585,7 @@ def export_to_dir(
       lowered = backend.export.exported_program_to_mlir(
           exported_program,
           ir_context=ir_context,
+          _pre_lower_pass=_prune_unused_parameters,
           inline_constants=False,
       )
 
@@ -599,7 +621,7 @@ def export_to_dir(
     _delete_signature_params(signatures)
     registry.delete_in_memory_params()
     _close_weights_loader(weights_loader)
-    _trim_memory()
+  _trim_memory()
 
   t_python_rest = time.perf_counter() - t_python_rest_start
   registry.timings["torch_export_s"] = t_torch_export
