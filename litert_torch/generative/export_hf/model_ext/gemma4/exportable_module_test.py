@@ -553,6 +553,7 @@ class Gemma4ExportableModuleTest(parameterized.TestCase):
         prefill_lengths=[8],
         sliding_window_ring_buffer_size=32,
         apply_gpu_composites=True,
+        use_v2=False,
     )
     with gemma4_patch.patch_gemma4_model(model, export_cfg):
       text_cfg = cfg.get_text_config()
@@ -608,7 +609,6 @@ class Gemma4ExportableModuleTest(parameterized.TestCase):
             out_tflite,
             export_cfg,
             weights_loader=None,
-            use_v2=False,
         )
         self.assertTrue(os.path.exists(out_tflite))
         self.assertGreater(os.path.getsize(out_tflite), 0)
