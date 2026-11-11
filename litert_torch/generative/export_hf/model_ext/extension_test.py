@@ -688,6 +688,17 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
               ),
           },
       ),
+      (
+          'whisper_small_and_medium_asr',
+          'whisper',
+          {'model_type': 'whisper', 'd_model': 768, 'num_mel_bins': 80},
+          None,
+          'cpu_gpu',
+          extension.ExportTask.AUTOMATIC_SPEECH_RECOGNITION,
+          {
+              'input_sec': 30.0,
+          },
+      ),
   )
   def test_builtin_get_export_defaults(
       self,
@@ -1348,6 +1359,165 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
         model=tiny_model,
     )
     self.assertIn('decode', exported)
+
+  def test_whisper_metadata_supports_small_medium_and_language_override(self):
+    ext = extension.get_model_extension('whisper')
+    self.assertIsNotNone(ext)
+    speech_cls = ext.get_speech_model_cls('whisper')
+
+    class _FakeHfWhisperModel(torch.nn.Module):
+
+      def __init__(self, num_mel_bins: int = 80):
+        super().__init__()
+        self.config = types.SimpleNamespace(num_mel_bins=num_mel_bins)
+
+    class _FakeWhisperTokenizer:
+
+      def __init__(self, include_yue: bool = False):
+        self._include_yue = include_yue
+
+      def convert_tokens_to_ids(self, token: str) -> int:
+        shift = 1 if self._include_yue else 0
+        vocab = {
+            '<|endoftext|>': 50257,
+            '<|startoftranscript|>': 50258,
+            '<|en|>': 50259,
+            '<|zh|>': 50260,
+            '<|ko|>': 50264,
+            '<|ja|>': 50266,
+            '<|id|>': 50275,
+            '<|hi|>': 50276,
+            '<|he|>': 50279,
+            '<|no|>': 50288,
+            '<|yi|>': 50335,
+            '<|tl|>': 50348,
+            '<|jw|>': 50356,
+            '<|translate|>': 50358 + shift,
+            '<|transcribe|>': 50359 + shift,
+            '<|notimestamps|>': 50363 + shift,
+        }
+        if self._include_yue:
+          vocab['<|yue|>'] = 50358
+        return vocab.get(token, -1)
+
+    # Class-level call (`speech_cls.get_speech2text_metadata(speech_cls, cfg)`)
+    # without `_model` or `_processor` succeeds and leaves start tokens unset.
+    meta_cls = speech_cls.get_speech2text_metadata(
+        speech_cls, ExportableModuleConfig(model='openai/whisper-small')
+    )
+    self.assertTrue(meta_cls.asr_model_type.HasField('whisper'))
+    self.assertEmpty(meta_cls.decode_start_token_ids)
+
+    with (
+        mock.patch.object(
+            transformers.WhisperForConditionalGeneration,
+            'from_pretrained',
+            return_value=_FakeHfWhisperModel(num_mel_bins=80),
+        ),
+        mock.patch.object(
+            transformers.AutoProcessor,
+            'from_pretrained',
+            return_value=types.SimpleNamespace(
+                tokenizer=_FakeWhisperTokenizer(include_yue=False)
+            ),
+        ),
+    ):
+      whisper_v2 = speech_cls('openai/whisper-small')
+
+    meta_default = whisper_v2.get_speech2text_metadata(
+        ExportableModuleConfig(model='openai/whisper-small')
+    )
+    self.assertTrue(meta_default.asr_model_type.HasField('whisper'))
+    self.assertFalse(meta_default.log_mel_spectrogram_config.HasField('n_mels'))
+    self.assertEqual(
+        list(meta_default.decode_start_token_ids), [50258, 50259, 50359, 50363]
+    )
+
+    meta_ja = whisper_v2.get_speech2text_metadata(
+        ExportableModuleConfig(
+            model='openai/whisper-medium',
+            extra_kwargs={'whisper_language': 'ja-JP'},
+        )
+    )
+    self.assertEqual(
+        list(meta_ja.decode_start_token_ids), [50258, 50266, 50359, 50363]
+    )
+
+    for alias, expected_lang_id in (
+        ('cmn_hans_cn', 50260),
+        ('cn', 50260),
+        ('jp', 50266),
+        ('kr', 50264),
+        ('iw', 50279),
+        ('in', 50275),
+        ('ji', 50335),
+        ('nb-NO', 50288),
+        ('jv', 50356),
+        ('fil', 50348),
+    ):
+      meta_alias = whisper_v2.get_speech2text_metadata(
+          ExportableModuleConfig(
+              model='openai/whisper-small',
+              extra_kwargs={'whisper_language': alias},
+          )
+      )
+      self.assertEqual(
+          list(meta_alias.decode_start_token_ids),
+          [50258, expected_lang_id, 50359, 50363],
+      )
+
+    with self.assertRaises(ValueError):
+      whisper_v2.get_speech2text_metadata(
+          ExportableModuleConfig(
+              model='openai/whisper-small',
+              extra_kwargs={'whisper_language': 'yue'},
+          )
+      )
+
+    with (
+        mock.patch.object(
+            transformers.WhisperForConditionalGeneration,
+            'from_pretrained',
+            return_value=_FakeHfWhisperModel(num_mel_bins=128),
+        ),
+        mock.patch.object(
+            transformers.AutoProcessor,
+            'from_pretrained',
+            return_value=types.SimpleNamespace(
+                tokenizer=_FakeWhisperTokenizer(include_yue=True)
+            ),
+        ),
+    ):
+      whisper_v3 = speech_cls('openai/whisper-large-v3')
+
+    meta_v3_default = whisper_v3.get_speech2text_metadata(
+        ExportableModuleConfig(model='openai/whisper-large-v3')
+    )
+    self.assertEqual(
+        list(meta_v3_default.decode_start_token_ids),
+        [50258, 50259, 50360, 50364],
+    )
+
+    meta_v3_hi = whisper_v3.get_speech2text_metadata(
+        ExportableModuleConfig(
+            model='openai/whisper-large-v3',
+            extra_kwargs={'whisper_language': 'hi'},
+        )
+    )
+    self.assertEqual(meta_v3_hi.log_mel_spectrogram_config.n_mels, 128)
+    self.assertEqual(
+        list(meta_v3_hi.decode_start_token_ids), [50258, 50276, 50360, 50364]
+    )
+
+    meta_v3_yue = whisper_v3.get_speech2text_metadata(
+        ExportableModuleConfig(
+            model='openai/whisper-large-v3',
+            extra_kwargs={'whisper_language': 'yue'},
+        )
+    )
+    self.assertEqual(
+        list(meta_v3_yue.decode_start_token_ids), [50258, 50358, 50360, 50364]
+    )
 
 
 class BuiltinQwen3ExtensionContractTest(

@@ -30,6 +30,7 @@ class WhisperExtension(extension_lib.ModelExtension):
   """Built-in extension for OpenAI Whisper encoder-decoder ASR models."""
 
   model_types = ('whisper',)
+  extra_kwargs_keys = ('whisper_language',)
 
   def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
     """See base class."""

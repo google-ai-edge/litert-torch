@@ -57,6 +57,178 @@ class WhisperEncoder(torch.nn.Module):
     return (encoder_outputs.last_hidden_state,)
 
 
+_WHISPER_START_OF_TRANSCRIPT_TOKEN_ID = 50258
+_WHISPER_DEFAULT_LANGUAGE_TOKEN_ID = 50259  # <|en|>
+_WHISPER_TRANSCRIBE_TOKEN_ID = 50359
+_WHISPER_NO_TIMESTAMPS_TOKEN_ID = 50363
+_WHISPER_END_OF_TEXT_TOKEN_ID = 50257
+
+# Ordered 99 shared Whisper language codes corresponding to token IDs
+# 50259..50357 across whisper-tiny/base/small/medium.
+_WHISPER_LANGUAGE_CODES: tuple[str, ...] = (
+    'en',
+    'zh',
+    'de',
+    'es',
+    'ru',
+    'ko',
+    'fr',
+    'ja',
+    'pt',
+    'tr',
+    'pl',
+    'ca',
+    'nl',
+    'ar',
+    'sv',
+    'it',
+    'id',
+    'hi',
+    'fi',
+    'vi',
+    'he',
+    'uk',
+    'el',
+    'ms',
+    'cs',
+    'ro',
+    'da',
+    'hu',
+    'ta',
+    'no',
+    'th',
+    'ur',
+    'hr',
+    'bg',
+    'lt',
+    'la',
+    'mi',
+    'ml',
+    'cy',
+    'sk',
+    'te',
+    'fa',
+    'lv',
+    'bn',
+    'sr',
+    'az',
+    'sl',
+    'kn',
+    'et',
+    'mk',
+    'br',
+    'eu',
+    'is',
+    'hy',
+    'ne',
+    'mn',
+    'bs',
+    'kk',
+    'sq',
+    'sw',
+    'gl',
+    'mr',
+    'pa',
+    'si',
+    'km',
+    'sn',
+    'yo',
+    'so',
+    'af',
+    'oc',
+    'ka',
+    'be',
+    'tg',
+    'sd',
+    'gu',
+    'am',
+    'yi',
+    'lo',
+    'uz',
+    'fo',
+    'ht',
+    'ps',
+    'tk',
+    'nn',
+    'mt',
+    'sa',
+    'lb',
+    'my',
+    'bo',
+    'tl',
+    'mg',
+    'as',
+    'tt',
+    'haw',
+    'ln',
+    'ha',
+    'ba',
+    'jw',
+    'su',
+)
+
+
+_WHISPER_LANGUAGE_ALIASES = {
+    'cmn': 'zh',
+    'cn': 'zh',
+    'jp': 'ja',
+    'kr': 'ko',
+    'iw': 'he',
+    'in': 'id',
+    'ji': 'yi',
+    'nb': 'no',
+    'jv': 'jw',
+    'fil': 'tl',
+}
+
+
+def _normalize_whisper_language(language: str) -> str:
+  """Normalizes language tags and common aliases (`cmn`/`cn`/`jp`/`kr`)."""
+  normalized = language.strip()
+  if normalized.startswith('<|') and normalized.endswith('|>'):
+    normalized = normalized[2:-2].strip()
+  normalized = normalized.lower().replace('_', '-').split('-', 1)[0]
+  return _WHISPER_LANGUAGE_ALIASES.get(normalized, normalized)
+
+
+def resolve_whisper_start_token_ids(language: str, tokenizer=None) -> list[int]:
+  """Resolves Whisper `[sot, lang, transcribe, notimestamps]` token IDs."""
+  normalized = _normalize_whisper_language(language)
+  if not normalized:
+    raise ValueError(f'Unsupported whisper_language {language!r}.')
+
+  if tokenizer is not None and hasattr(tokenizer, 'convert_tokens_to_ids'):
+    sot_id = tokenizer.convert_tokens_to_ids('<|startoftranscript|>')
+    translate_id = tokenizer.convert_tokens_to_ids('<|translate|>')
+    transcribe_id = tokenizer.convert_tokens_to_ids('<|transcribe|>')
+    notimestamps_id = tokenizer.convert_tokens_to_ids('<|notimestamps|>')
+    if (
+        isinstance(sot_id, int)
+        and isinstance(translate_id, int)
+        and isinstance(transcribe_id, int)
+        and isinstance(notimestamps_id, int)
+        and sot_id < translate_id < transcribe_id < notimestamps_id
+    ):
+      lang_id = tokenizer.convert_tokens_to_ids(f'<|{normalized}|>')
+      if not isinstance(lang_id, int) or not (sot_id < lang_id < translate_id):
+        raise ValueError(f'Unsupported whisper_language {language!r}.')
+      return [sot_id, lang_id, transcribe_id, notimestamps_id]
+
+  try:
+    idx = _WHISPER_LANGUAGE_CODES.index(normalized)
+  except ValueError as exc:
+    raise ValueError(
+        f'Unsupported whisper_language {language!r}; expected one of'
+        f' {_WHISPER_LANGUAGE_CODES}.'
+    ) from exc
+  return [
+      _WHISPER_START_OF_TRANSCRIPT_TOKEN_ID,
+      _WHISPER_DEFAULT_LANGUAGE_TOKEN_ID + idx,
+      _WHISPER_TRANSCRIBE_TOKEN_ID,
+      _WHISPER_NO_TIMESTAMPS_TOKEN_ID,
+  ]
+
+
 class Whisper(asr_model.AsrModel):
   """Wrapper for WhisperForConditionalGeneration for encoder outputs."""
 
@@ -74,11 +246,35 @@ class Whisper(asr_model.AsrModel):
     self._processor = asr_model.TransformersProcessor(model_id)
 
   def get_speech2text_metadata(self, export_config):
-    del export_config
     # WhisperFeatureExtractor and WhisperEncoder always use a fixed 30 s
     # (3000-frame) encoder window regardless of `export_config.input_sec`,
     # matching the runtime's 30 s Whisper defaults.
-    return self.build_speech2text_metadata('whisper')
+    metadata = self.build_speech2text_metadata('whisper')
+    model = getattr(self, '_model', None)
+    model_config = getattr(model, 'config', None)
+    num_mel_bins = getattr(model_config, 'num_mel_bins', 80)
+    if num_mel_bins and int(num_mel_bins) != 80:
+      metadata.log_mel_spectrogram_config.n_mels = int(num_mel_bins)
+
+    extra_kwargs = (
+        getattr(export_config, 'extra_kwargs', None)
+        if export_config is not None
+        else None
+    )
+    whisper_language = (
+        extra_kwargs.get('whisper_language') if extra_kwargs else None
+    )
+    processor = getattr(self, '_processor', None)
+    hf_proc = getattr(processor, '_processor', None)
+    tokenizer = getattr(hf_proc, 'tokenizer', None)
+    if whisper_language or tokenizer is not None:
+      metadata.decode_start_token_ids.extend(
+          resolve_whisper_start_token_ids(
+              str(whisper_language) if whisper_language else 'en',
+              tokenizer,
+          )
+      )
+    return metadata
 
   def get_encoder(self) -> torch.nn.Module:
     return self._encoder
