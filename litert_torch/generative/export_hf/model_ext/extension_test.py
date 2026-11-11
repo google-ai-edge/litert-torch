@@ -505,6 +505,7 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
         'qwen3',
         'qwen3_5',
         'lfm2',
+        'lfm2_audio',
         'lfm2_vl',
         'parakeet_ctc',
         'whisper',

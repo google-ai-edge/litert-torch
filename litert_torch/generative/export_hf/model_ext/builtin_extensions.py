@@ -31,6 +31,7 @@ from litert_torch.generative.export_hf.model_ext.gemma4 import extension as gemm
 from litert_torch.generative.export_hf.model_ext.gemma4_unified import extension as gemma4_unified_ext
 from litert_torch.generative.export_hf.model_ext.kokoro_tts import extension as kokoro_tts_ext
 from litert_torch.generative.export_hf.model_ext.lfm2 import extension as lfm2_ext
+from litert_torch.generative.export_hf.model_ext.lfm2_audio import extension as lfm2_audio_ext
 from litert_torch.generative.export_hf.model_ext.lfm2_vl import extension as lfm2_vl_ext
 from litert_torch.generative.export_hf.model_ext.minicpm_o import extension as minicpm_o_ext
 from litert_torch.generative.export_hf.model_ext.moonshine import extension as moonshine_ext
@@ -48,6 +49,7 @@ Gemma4Extension = gemma4_ext.Gemma4Extension
 Gemma4UnifiedExtension = gemma4_unified_ext.Gemma4UnifiedExtension
 KokoroTtsExtension = kokoro_tts_ext.KokoroTtsExtension
 Lfm2Extension = lfm2_ext.Lfm2Extension
+Lfm2AudioExtension = lfm2_audio_ext.Lfm2AudioExtension
 Lfm2VlExtension = lfm2_vl_ext.Lfm2VlExtension
 MiniCpm5Extension = minicpm_o_ext.MiniCpm5Extension
 MiniCpmOExtension = minicpm_o_ext.MiniCpmOExtension
