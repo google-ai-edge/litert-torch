@@ -520,6 +520,7 @@ def _build_checkpoint_weights_loader(
       ),
       config=config,
       export_config=export_config,
+      weights_dir=export_config.weights_dir,
   )
 
 
@@ -874,12 +875,11 @@ def _v2_convert_kwargs(
   """
   if not export_config.use_v2:
     return {}
-  return {
+  kwargs = {
       'use_v2': True,
       'delete_in_memory_params': delete_in_memory_params,
       'allow_reuse_intermediates': False,
       'weights_loader': weights_loader,
-      'export_dir': os.path.splitext(output_path)[0] + '_intermediates',
       'output_file_path': output_path,
       # Equivalent of `mu_pass_lib`'s `fuse_fp32cast_fc_fp16cast`, which the
       # legacy path applies after conversion.
@@ -887,6 +887,45 @@ def _v2_convert_kwargs(
           'fold_fp16_casts_into_fully_connected': True,
       },
   }
+  # Without `export_dir`, Converter V2 writes its intermediates (`*.mlirbc`,
+  # `params.bin`) to a scratch directory that it deletes after conversion.
+  # Only pin them next to the output when the user asked to keep them.
+  if export_config.keep_temporary_files:
+    kwargs['export_dir'] = os.path.splitext(output_path)[0] + '_intermediates'
+  return kwargs
+
+
+def _quantize_and_cleanup(
+    model_path: str,
+    quantization_recipe: str | None,
+    *,
+    keep_temporary_files: bool,
+) -> str:
+  """Applies each comma-separated recipe in `quantization_recipe` in order.
+
+  Args:
+    model_path: Path of the TFLite model to quantize.
+    quantization_recipe: Comma-separated quantization recipes, or `None`.
+    keep_temporary_files: If False, deletes each input `.tflite` once its
+      quantized version is written, so only the final model stays on disk.
+
+  Returns:
+    Path of the final (possibly unchanged) TFLite model.
+  """
+  quantization_recipe_list = (
+      quantization_recipe.split(',') if quantization_recipe else [None]
+  )
+  for recipe in quantization_recipe_list:
+    prev_path = model_path
+    model_path = maybe_quantize_model(prev_path, recipe)
+    if (
+        not keep_temporary_files
+        and model_path != prev_path
+        and os.path.exists(prev_path)
+    ):
+      os.remove(prev_path)
+    gc.collect()
+  return model_path
 
 
 def update_export_config(
@@ -1064,12 +1103,11 @@ def export_text_prefill_decode_model(
   gc.collect()
 
   # Quantization
-  quantization_recipe_list = (
-      quantization_recipe.split(',') if quantization_recipe else [None]
+  model_path = _quantize_and_cleanup(
+      model_path,
+      quantization_recipe,
+      keep_temporary_files=export_config.keep_temporary_files,
   )
-  for recipe in quantization_recipe_list:
-    model_path = maybe_quantize_model(model_path, recipe)
-    gc.collect()
 
   return dataclasses.replace(
       exported_model_artifacts,
@@ -1133,12 +1171,11 @@ def export_embedder_model(
     )
   if not export_config.use_v2:
     lrt_model.export(model_path)
-  quantization_recipe_list = (
-      quantization_recipe.split(',') if quantization_recipe else [None]
+  model_path = _quantize_and_cleanup(
+      model_path,
+      quantization_recipe,
+      keep_temporary_files=export_config.keep_temporary_files,
   )
-  for recipe in quantization_recipe_list:
-    model_path = maybe_quantize_model(model_path, recipe)
-    gc.collect()
   return dataclasses.replace(
       exported_model_artifacts,
       embedder_model_path=model_path,
@@ -1244,12 +1281,11 @@ def export_vision_encoder_models(
       export_config,
       weights_loader,
   )
-  quantization_recipe_list = (
-      quantization_recipe.split(',') if quantization_recipe else [None]
+  vision_encoder_path = _quantize_and_cleanup(
+      vision_encoder_path,
+      quantization_recipe,
+      keep_temporary_files=export_config.keep_temporary_files,
   )
-  for recipe in quantization_recipe_list:
-    vision_encoder_path = maybe_quantize_model(vision_encoder_path, recipe)
-    gc.collect()
 
   if adapter_module:
     sample_inputs = adapter_module.get_sample_inputs(
@@ -1265,12 +1301,11 @@ def export_vision_encoder_models(
         export_config,
         weights_loader,
     )
-    quantization_recipe_list = (
-        quantization_recipe.split(',') if quantization_recipe else [None]
+    adapter_path = _quantize_and_cleanup(
+        adapter_path,
+        quantization_recipe,
+        keep_temporary_files=export_config.keep_temporary_files,
     )
-    for recipe in quantization_recipe_list:
-      adapter_path = maybe_quantize_model(adapter_path, recipe)
-      gc.collect()
   else:
     adapter_path = None
 
@@ -1351,12 +1386,11 @@ def export_audio_encoder_models_for_llm(
       weights_loader,
       use_v2=False,
   )
-  quantization_recipe_list = (
-      quantization_recipe.split(',') if quantization_recipe else [None]
+  audio_encoder_path = _quantize_and_cleanup(
+      audio_encoder_path,
+      quantization_recipe,
+      keep_temporary_files=export_config.keep_temporary_files,
   )
-  for recipe in quantization_recipe_list:
-    audio_encoder_path = maybe_quantize_model(audio_encoder_path, recipe)
-    gc.collect()
 
   if adapter_module is not None:
     sample_inputs = adapter_module.get_sample_inputs(
@@ -1372,9 +1406,11 @@ def export_audio_encoder_models_for_llm(
         export_config,
         weights_loader,
     )
-    for recipe in quantization_recipe_list:
-      adapter_path = maybe_quantize_model(adapter_path, recipe)
-      gc.collect()
+    adapter_path = _quantize_and_cleanup(
+        adapter_path,
+        quantization_recipe,
+        keep_temporary_files=export_config.keep_temporary_files,
+    )
   else:
     adapter_path = None
 
@@ -1459,12 +1495,11 @@ def export_audio_encoder_models(
   del converter
   gc.collect()
 
-  quantization_recipe_list = (
-      quantization_recipe.split(',') if quantization_recipe else [None]
+  audio_encoder_path = _quantize_and_cleanup(
+      audio_encoder_path,
+      quantization_recipe,
+      keep_temporary_files=export_config.keep_temporary_files,
   )
-  for recipe in quantization_recipe_list:
-    audio_encoder_path = maybe_quantize_model(audio_encoder_path, recipe)
-    gc.collect()
 
   return dataclasses.replace(
       exported_model_artifacts,
@@ -1537,12 +1572,11 @@ def export_asr_models(
   del converter
   gc.collect()
 
-  quantization_recipe_list = (
-      quantization_recipe.split(',') if quantization_recipe else [None]
+  model_path = _quantize_and_cleanup(
+      model_path,
+      quantization_recipe,
+      keep_temporary_files=export_config.keep_temporary_files,
   )
-  for recipe in quantization_recipe_list:
-    model_path = maybe_quantize_model(model_path, recipe)
-    gc.collect()
 
   return dataclasses.replace(
       exported_model_artifacts,
@@ -1712,12 +1746,11 @@ def export_additional_models_impl(
       export_config,
       source_model_artifacts.weights_loader,
   )
-  quantization_recipe_list = (
-      quantization_recipe.split(',') if quantization_recipe else [None]
+  model_path = _quantize_and_cleanup(
+      model_path,
+      quantization_recipe,
+      keep_temporary_files=export_config.keep_temporary_files,
   )
-  for recipe in quantization_recipe_list:
-    model_path = maybe_quantize_model(model_path, recipe)
-    gc.collect()
   additional_models = exported_model_artifacts.additional_model_paths or {}
   additional_models[name] = model_path
   return dataclasses.replace(

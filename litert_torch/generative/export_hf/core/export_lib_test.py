@@ -436,6 +436,56 @@ class ExportLibTest(parameterized.TestCase):
     self.assertEqual(mock_gen_config.cache_implementation, "static")
     self.assertFalse(mock_gen_config.do_sample)
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="keep_temporary_files",
+          keep_temporary_files=True,
+          expected_export_dir="/out/model_intermediates",
+      ),
+      dict(
+          testcase_name="converter_managed_scratch_dir",
+          keep_temporary_files=False,
+          expected_export_dir=None,
+      ),
+  )
+  def test_v2_convert_kwargs_export_dir(
+      self, keep_temporary_files, expected_export_dir
+  ):
+    config = export_lib.exportable_module_config.ExportableModuleConfig(
+        model="dummy_model",
+        use_v2=True,
+        keep_temporary_files=keep_temporary_files,
+    )
+    kwargs = export_lib._v2_convert_kwargs(config, None, "/out/model.tflite")
+    self.assertEqual(kwargs.get("export_dir"), expected_export_dir)
+    self.assertEqual(kwargs["output_file_path"], "/out/model.tflite")
+
+  @parameterized.named_parameters(
+      dict(testcase_name="cleanup", keep_temporary_files=False),
+      dict(testcase_name="keep_temporary_files", keep_temporary_files=True),
+  )
+  def test_quantize_and_cleanup(self, keep_temporary_files):
+    unquantized_path = os.path.join(self.test_dir, "model.tflite")
+    quantized_path = os.path.join(
+        self.test_dir, "model_quantized_dynamic_wi8_afp32.tflite"
+    )
+    with open(unquantized_path, "w") as f:
+      f.write("fp32")
+    with open(quantized_path, "w") as f:
+      f.write("int8")
+
+    with mock.patch.object(
+        export_lib, "maybe_quantize_model", return_value=quantized_path
+    ):
+      result_path = export_lib._quantize_and_cleanup(
+          unquantized_path,
+          "dynamic_wi8_afp32",
+          keep_temporary_files=keep_temporary_files,
+      )
+    self.assertEqual(result_path, quantized_path)
+    self.assertEqual(os.path.exists(unquantized_path), keep_temporary_files)
+    self.assertTrue(os.path.exists(quantized_path))
+
 
 if __name__ == "__main__":
   absltest.main()

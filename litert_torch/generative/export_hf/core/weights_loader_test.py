@@ -373,6 +373,17 @@ class HFCheckpointWeightsLoaderTest(absltest.TestCase):
         tensors["raw_packed.proj_t"].t(),
     )
 
+  def test_weights_dir_separate_from_checkpoint_dir(self):
+    # Config-only checkpoint dir; the shards live in `self.ckpt_dir`.
+    config_dir = self.create_tempdir().full_path
+    loader = weights_loader_lib.HFCheckpointWeightsLoader(
+        config_dir, weights_dir=self.ckpt_dir
+    )
+    torch.testing.assert_close(
+        loader("model.model.language_model.embed_tokens.weight"),
+        self.tensors["model.language_model.embed_tokens.weight"],
+    )
+
 
 class ResolveCheckpointDirTest(absltest.TestCase):
 

@@ -137,6 +137,10 @@ class ExportableModuleConfig:
   """Config for exportable modules."""
 
   model: str
+  # Directory holding the `*.safetensors` shards when they live apart from the
+  # config / tokenizer files in `model` (e.g. remote storage streamed by
+  # `HFCheckpointWeightsLoader`). Defaults to `model`.
+  weights_dir: str | None = None
   output_dir: str | None = None
   task: ExportTask | str = ExportTask.TEXT_GENERATION
   keep_temporary_files: bool = False

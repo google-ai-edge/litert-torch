@@ -378,6 +378,12 @@ def _has_all_weights(checkpoint_dir: str) -> bool:
   return bool(glob.glob(os.path.join(checkpoint_dir, "*.safetensors")))
 
 
+def _list_safetensors(weights_dir: str) -> list[str]:
+  """Returns the `*.safetensors` file paths in `weights_dir`."""
+  glob_fn = glob.glob
+  return sorted(glob_fn(os.path.join(weights_dir, "*.safetensors")))
+
+
 def _resolver_accepts_configs(resolver: Callable[..., Any] | None) -> bool:
   """Returns True if `resolver` accepts `(model_config, export_config)` args."""
   if resolver is None:
@@ -429,6 +435,7 @@ class HFCheckpointWeightsLoader:
       tensor_resolver: Callable[..., torch.Tensor | None] | None = None,
       config: Any = None,
       export_config: Any = None,
+      weights_dir: str | None = None,
   ):
     """Initializes the safetensors checkpoint weight loader.
 
@@ -453,6 +460,10 @@ class HFCheckpointWeightsLoader:
         when accepted by its signature.
       export_config: Optional export configuration forwarded to
         `tensor_resolver` when accepted by its signature.
+      weights_dir: Optional directory holding the `*.safetensors` shards, if
+        different from the checkpoint directory. Accepts any path that
+        `safetensors.safe_open` can read, so shards can be streamed from
+        remote storage without copying them next to the config files.
     """
     self._tie_word_embeddings = tie_word_embeddings
     self._extra_prefixes = tuple(
@@ -469,16 +480,17 @@ class HFCheckpointWeightsLoader:
     self.export_config = export_config
     self._handles: dict[str, Any] = {}
     self._checkpoint_dir = self._resolve_checkpoint_dir(model_path)
+    self._weights_dir = weights_dir or self._checkpoint_dir
     self._weight_map = self._load_weight_map()
     if not self._weight_map:
       raise ValueError(
           f"No safetensors weights found for {model_path!r} in"
-          f" {self._checkpoint_dir}."
+          f" {self._weights_dir}."
       )
     logging.info(
         "HFCheckpointWeightsLoader: %d tensors from %s.",
         len(self._weight_map),
-        self._checkpoint_dir,
+        self._weights_dir,
     )
 
   @staticmethod
@@ -509,7 +521,7 @@ class HFCheckpointWeightsLoader:
       with open(index_path, "r") as f:
         return json.load(f).get("weight_map", {})
     weight_map = {}
-    for path in glob.glob(os.path.join(self._checkpoint_dir, "*.safetensors")):
+    for path in _list_safetensors(self._weights_dir):
       for key in self._handle(path).keys():
         weight_map[key] = os.path.basename(path)
     return weight_map
@@ -522,7 +534,7 @@ class HFCheckpointWeightsLoader:
     return self._handles[path]
 
   def _get(self, key: str) -> torch.Tensor:
-    path = os.path.join(self._checkpoint_dir, self._weight_map[key])
+    path = os.path.join(self._weights_dir, self._weight_map[key])
     return self._handle(path).get_tensor(key)
 
   @staticmethod
