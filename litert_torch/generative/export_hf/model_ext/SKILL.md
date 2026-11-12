@@ -122,6 +122,26 @@ tiny model (2–3 layers, `vocab_size=256`, `dtype=torch.float32`) using
   `python -m litert_torch.generative.export_hf.export_main ...` (do **not** run
   `python -m litert_torch.generative.export_hf.export`, which has no `__main__`
   block).
+* **Run the exported file in LiteRT-LM, on CPU and on GPU.** The tiny tests and
+  a successful export do not catch the three errors below.
+  ```bash
+  litert-lm run "$HOME/export_hf_test_models/outputs/my_model/model.litertlm" \
+    --backend cpu --prompt "What is the capital of France?"
+  ```
+  Then run it again with `--backend gpu`.
+  * `Failed to create engine: INVALID_ARGUMENT: Pad token should only contain a
+    single token ID`: the packed SentencePiece `tokenizer.model` splits the
+    model's added special tokens. In `update_export_config`, set
+    `tokenizer_path_override` to the checkpoint's `tokenizer.json`, and pin the
+    pad and stop token ids in `build_llm_metadata`.
+  * `Failed to apply template: ... tried to use + operator on unsupported types
+    string and sequence`: LiteRT-LM passes `message["content"]` as a list of
+    parts. Point `jinja_chat_template_override` at a copy of the template that
+    accepts a string or a list of parts.
+  * `Failed to modify graph with delegate` with `Tensor dimensions must be less
+    than 5` (GPU only): the graph has a tensor of rank 5 or more, for example
+    from interleaved RoPE (`torch.stack((-x2, x1), dim=-1).flatten(-2)`). In
+    `patch_model`, swap it for a rank-4 form.
 
 ---
 

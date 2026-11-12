@@ -662,7 +662,16 @@ bazel run //third_party/py/litert_torch/generative/export_hf/model_ext:inspector
   --split_cache
 ```
 
-Pass `--extension_modules=/path/to/my_arch_extension.py` (or `--format=json`) to
+Or via Python:
+
+```bash
+python -m litert_torch.generative.export_hf.model_ext.inspector \
+  --model=/path/to/checkpoint \
+  --trust_remote_code \
+  --split_cache
+```
+
+Pass `--extension_modules=/path/to/my_arch_extension.py` (or `--output_format=json`) to
 verify that your extension resolves all dry-run checks before running a full
 multi-gigabyte export. You can also call `inspect_model_architecture(...)`
 directly from Python (`from litert_torch.generative.export_hf.model_ext import
@@ -693,13 +702,18 @@ standalone fast-inner-loop helpers that verify numerical parity,
   `resolve_checkpoint_tensor` exactly as `export_lib` does, and checks that
   every patched parameter loads with the right shape and value. Reports all
   misses at once instead of the first `KeyError` a full `--use_v2` export would
-  hit after minutes of tracing. If `patch_context` swaps classes in a way that
-  renames parameters, build the tiny model inside
-  `patches.get_patch_context(model_type)`.
+  hit after minutes of tracing.
+
+Build the tiny model inside
+`patches.get_patch_context(model_type, export_config)`, as the export does (the
+example below shows how). A model built outside it keeps the original classes
+where an extension swaps them at load time (e.g. LFM2's `Lfm2ShortConv`), and
+the checks then test a model the export never builds.
 
 ```python
 from absl.testing import absltest
 from litert_torch.generative.export_hf.core import exportable_module_config
+from litert_torch.generative.export_hf.model_ext import patches as model_ext_patches
 from litert_torch.generative.export_hf.model_ext import testing as ext_testing
 import torch
 import transformers
@@ -722,7 +736,6 @@ class MyArchExtensionTest(
         num_key_value_heads=2,
         head_dim=8,
     )
-    tiny_model = transformers.AutoModelForCausalLM.from_config(tiny_cfg).eval()
     export_cfg = exportable_module_config.ExportableModuleConfig(
         model='dummy',
         prefill_lengths=[8],
@@ -731,6 +744,10 @@ class MyArchExtensionTest(
         fuse_gate_up=True,
         fuse_qkv=True,
     )
+    with model_ext_patches.get_patch_context(tiny_cfg.model_type, export_cfg):
+      tiny_model = transformers.AutoModelForCausalLM.from_config(
+          tiny_cfg
+      ).eval()
     # 1. Verify eager numerical parity & clean unpatching after exiting context:
     self.assert_patch_numerical_parity(
         tiny_model,

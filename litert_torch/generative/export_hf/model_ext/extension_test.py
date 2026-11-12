@@ -1325,6 +1325,25 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
     self.assertIn('def _find_qwen2_vl_modeling_module():', skeleton)
     self.assertIn('mod = _find_qwen2_vl_modeling_module()', skeleton)
 
+  def test_skeleton_rmsnorm_patch_needs_a_single_input_forward(self):
+    class _RMSNorm(torch.nn.Module):
+
+      def forward(self, hidden_states):
+        return hidden_states
+
+    class _RMSNormGated(torch.nn.Module):
+
+      def forward(self, hidden_states, gate=None):
+        del gate
+        return hidden_states
+
+    self.assertTrue(
+        inspector._forward_takes_only_hidden_states(_RMSNorm)  # pylint: disable=protected-access
+    )
+    self.assertFalse(
+        inspector._forward_takes_only_hidden_states(_RMSNormGated)  # pylint: disable=protected-access
+    )
+
   def test_tiny_prefill_decode_export_auto_enables_gpu_composites_after_update_export_config(
       self,
   ):

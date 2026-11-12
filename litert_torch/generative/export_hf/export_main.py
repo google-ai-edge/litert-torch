@@ -28,7 +28,7 @@ from litert_torch.generative.export_hf import export as lib
 # * Models other than CausalLM.
 
 
-def main(_):
+def main(_=None):
   fire.Fire(lib.export)
 
 
