@@ -456,9 +456,7 @@ class _FlowConformerBlock(nn.Module):
         q + self.pos_bias_v.reshape(1, 1, self.num_heads, self.head_dim)
     ).permute(0, 2, 1, 3)
     matrix_ac = torch.matmul(q_with_bias_u, k.permute(0, 1, 3, 2))
-    matrix_bd = _rel_shift(
-        torch.matmul(q_with_bias_v, p.permute(0, 1, 3, 2))
-    )
+    matrix_bd = _rel_shift(torch.matmul(q_with_bias_v, p.permute(0, 1, 3, 2)))
     scores = (matrix_ac + matrix_bd) * (1.0 / math.sqrt(float(self.head_dim)))
     attn = F.softmax(scores, dim=-1)
     attn_out = torch.matmul(attn, v).permute(0, 2, 1, 3).reshape(b, t, d)
@@ -1137,64 +1135,50 @@ class MiniCpmOAudioVocoderModule(nn.Module):
     return {"waveform": wav}
 
 
-def _copy_conformer_block(
-    blk: Any,
-    flow_sd: dict[str, torch.Tensor],
-    prefix: str,
-    strict: bool,
-    populated: set[int],
-) -> None:
-  """Copies weights for a single `_FlowConformerBlock` from `flow_sd`."""
-  weights_utils.copy_linear_from_dict(
-      blk.norm_mha, flow_sd, f"{prefix}.norm_mha", strict, populated
-  )
-  weights_utils.copy_from_dict(
-      blk.pos_bias_u,
-      flow_sd,
-      f"{prefix}.self_attn.pos_bias_u",
-      strict,
-      populated,
-  )
-  weights_utils.copy_from_dict(
-      blk.pos_bias_v,
-      flow_sd,
-      f"{prefix}.self_attn.pos_bias_v",
-      strict,
-      populated,
-  )
-  weights_utils.copy_linear_from_dict(
-      blk.linear_q, flow_sd, f"{prefix}.self_attn.linear_q", strict, populated
-  )
-  weights_utils.copy_linear_from_dict(
-      blk.linear_k, flow_sd, f"{prefix}.self_attn.linear_k", strict, populated
-  )
-  weights_utils.copy_linear_from_dict(
-      blk.linear_v, flow_sd, f"{prefix}.self_attn.linear_v", strict, populated
-  )
-  weights_utils.copy_linear_from_dict(
-      blk.linear_out,
-      flow_sd,
-      f"{prefix}.self_attn.linear_out",
-      strict,
-      populated,
-  )
-  weights_utils.copy_linear_from_dict(
-      blk.linear_pos,
-      flow_sd,
-      f"{prefix}.self_attn.linear_pos",
-      strict,
-      populated,
-      has_bias=False,
-  )
-  weights_utils.copy_linear_from_dict(
-      blk.norm_ff, flow_sd, f"{prefix}.norm_ff", strict, populated
-  )
-  weights_utils.copy_linear_from_dict(
-      blk.ff_w1, flow_sd, f"{prefix}.feed_forward.w_1", strict, populated
-  )
-  weights_utils.copy_linear_from_dict(
-      blk.ff_w2, flow_sd, f"{prefix}.feed_forward.w_2", strict, populated
-  )
+_CONFORMER_BLOCK_PARAM_MAP = {
+    "pos_bias_u": "self_attn.pos_bias_u",
+    "pos_bias_v": "self_attn.pos_bias_v",
+    "linear_q.weight": "self_attn.linear_q.weight",
+    "linear_q.bias": "self_attn.linear_q.bias",
+    "linear_k.weight": "self_attn.linear_k.weight",
+    "linear_k.bias": "self_attn.linear_k.bias",
+    "linear_v.weight": "self_attn.linear_v.weight",
+    "linear_v.bias": "self_attn.linear_v.bias",
+    "linear_out.weight": "self_attn.linear_out.weight",
+    "linear_out.bias": "self_attn.linear_out.bias",
+    "linear_pos.weight": "self_attn.linear_pos.weight",
+    "ff_w1.weight": "feed_forward.w_1.weight",
+    "ff_w1.bias": "feed_forward.w_1.bias",
+    "ff_w2.weight": "feed_forward.w_2.weight",
+    "ff_w2.bias": "feed_forward.w_2.bias",
+}
+
+_DIT_BLOCK_PARAM_MAP = {
+    "adaLN_linear.weight": "adaLN_modulation.1.weight",
+    "adaLN_linear.bias": "adaLN_modulation.1.bias",
+    "attn_to_q.weight": "attn.to_q.weight",
+    "attn_to_q.bias": "attn.to_q.bias",
+    "attn_to_k.weight": "attn.to_k.weight",
+    "attn_to_k.bias": "attn.to_k.bias",
+    "attn_to_v.weight": "attn.to_v.weight",
+    "attn_to_v.bias": "attn.to_v.bias",
+    "attn_q_norm.weight": "attn.q_norm.weight",
+    "attn_q_norm.bias": "attn.q_norm.bias",
+    "attn_k_norm.weight": "attn.k_norm.weight",
+    "attn_k_norm.bias": "attn.k_norm.bias",
+    "attn_proj.weight": "attn.proj.weight",
+    "attn_proj.bias": "attn.proj.bias",
+    "conv_1.weight": "conv.block.1.weight",
+    "conv_1.bias": "conv.block.1.bias",
+    "conv_norm.weight": "conv.block.3.weight",
+    "conv_norm.bias": "conv.block.3.bias",
+    "conv_6.weight": "conv.block.6.weight",
+    "conv_6.bias": "conv.block.6.bias",
+    "mlp_fc1.weight": "mlp.fc1.weight",
+    "mlp_fc1.bias": "mlp.fc1.bias",
+    "mlp_fc2.weight": "mlp.fc2.weight",
+    "mlp_fc2.bias": "mlp.fc2.bias",
+}
 
 
 def _copy_hift_resblock(
@@ -1282,8 +1266,14 @@ def load_token2wav_weights(
   )
 
   for idx, enc in enumerate(fe.encoders):
-    _copy_conformer_block(
-        enc, flow_sd, f"encoder.encoders.{idx}", strict, populated
+    weights_utils.copy_module_parameters(
+        enc,
+        flow_sd,
+        {},
+        f"encoder.encoders.{idx}",
+        param_map=_CONFORMER_BLOCK_PARAM_MAP,
+        strict=strict,
+        populated=populated,
     )
   weights_utils.copy_linear_from_dict(
       fe.up_conv, flow_sd, "encoder.up_layer.conv", strict, populated
@@ -1295,8 +1285,14 @@ def load_token2wav_weights(
       fe.up_embed_norm, flow_sd, "encoder.up_embed.out.1", strict, populated
   )
   for idx, enc in enumerate(fe.up_encoders):
-    _copy_conformer_block(
-        enc, flow_sd, f"encoder.up_encoders.{idx}", strict, populated
+    weights_utils.copy_module_parameters(
+        enc,
+        flow_sd,
+        {},
+        f"encoder.up_encoders.{idx}",
+        param_map=_CONFORMER_BLOCK_PARAM_MAP,
+        strict=strict,
+        populated=populated,
     )
   weights_utils.copy_linear_from_dict(
       fe.after_norm, flow_sd, "encoder.after_norm", strict, populated
@@ -1331,46 +1327,14 @@ def load_token2wav_weights(
       fd.in_proj, flow_sd, "decoder.estimator.in_proj", strict, populated
   )
   for idx, blk in enumerate(fd.blocks):
-    p = f"decoder.estimator.blocks.{idx}"
-    weights_utils.copy_linear_from_dict(
-        blk.adaLN_linear,
+    weights_utils.copy_module_parameters(
+        blk,
         flow_sd,
-        f"{p}.adaLN_modulation.1",
-        strict,
-        populated,
-    )
-    weights_utils.copy_linear_from_dict(
-        blk.attn_to_q, flow_sd, f"{p}.attn.to_q", strict, populated
-    )
-    weights_utils.copy_linear_from_dict(
-        blk.attn_to_k, flow_sd, f"{p}.attn.to_k", strict, populated
-    )
-    weights_utils.copy_linear_from_dict(
-        blk.attn_to_v, flow_sd, f"{p}.attn.to_v", strict, populated
-    )
-    weights_utils.copy_linear_from_dict(
-        blk.attn_q_norm, flow_sd, f"{p}.attn.q_norm", strict, populated
-    )
-    weights_utils.copy_linear_from_dict(
-        blk.attn_k_norm, flow_sd, f"{p}.attn.k_norm", strict, populated
-    )
-    weights_utils.copy_linear_from_dict(
-        blk.attn_proj, flow_sd, f"{p}.attn.proj", strict, populated
-    )
-    weights_utils.copy_linear_from_dict(
-        blk.conv_1, flow_sd, f"{p}.conv.block.1", strict, populated
-    )
-    weights_utils.copy_linear_from_dict(
-        blk.conv_norm, flow_sd, f"{p}.conv.block.3", strict, populated
-    )
-    weights_utils.copy_linear_from_dict(
-        blk.conv_6, flow_sd, f"{p}.conv.block.6", strict, populated
-    )
-    weights_utils.copy_linear_from_dict(
-        blk.mlp_fc1, flow_sd, f"{p}.mlp.fc1", strict, populated
-    )
-    weights_utils.copy_linear_from_dict(
-        blk.mlp_fc2, flow_sd, f"{p}.mlp.fc2", strict, populated
+        {},
+        f"decoder.estimator.blocks.{idx}",
+        param_map=_DIT_BLOCK_PARAM_MAP,
+        strict=strict,
+        populated=populated,
     )
   weights_utils.copy_linear_from_dict(
       fd.final_adaLN_linear,

@@ -414,39 +414,27 @@ def load_tts_projector_weights(
       if 0 <= audio_bos_id < num_text_tokens and 151676 < num_text_tokens:
         mod.emb_text.weight[151676].copy_(mod.emb_text.weight[audio_bos_id])
 
-  cw(
-      mod.linear1.weight,
+  weights_utils.copy_parameter_dict(
+      {
+          mod.linear1.weight: (
+              "tts.projector_semantic.linear1.weight",
+              "tts.projector.linear1.weight",
+          ),
+          mod.linear1.bias: (
+              "tts.projector_semantic.linear1.bias",
+              "tts.projector.linear1.bias",
+          ),
+          mod.linear2.weight: (
+              "tts.projector_semantic.linear2.weight",
+              "tts.projector.linear2.weight",
+          ),
+          mod.linear2.bias: (
+              "tts.projector_semantic.linear2.bias",
+              "tts.projector.linear2.bias",
+          ),
+      },
       state_dict,
       weight_map,
-      "tts.projector_semantic.linear1.weight",
-      "tts.projector.linear1.weight",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.linear1.bias,
-      state_dict,
-      weight_map,
-      "tts.projector_semantic.linear1.bias",
-      "tts.projector.linear1.bias",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.linear2.weight,
-      state_dict,
-      weight_map,
-      "tts.projector_semantic.linear2.weight",
-      "tts.projector.linear2.weight",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.linear2.bias,
-      state_dict,
-      weight_map,
-      "tts.projector_semantic.linear2.bias",
-      "tts.projector.linear2.bias",
       strict=strict,
       populated=populated,
   )
@@ -454,6 +442,17 @@ def load_tts_projector_weights(
     weights_utils.verify_all_parameters_populated(
         mod, populated, "tts_projector"
     )
+
+
+_TTS_LAYER_PARAM_MAP = {
+    "q_proj.weight": "self_attn.q_proj.weight",
+    "k_proj.weight": "self_attn.k_proj.weight",
+    "v_proj.weight": "self_attn.v_proj.weight",
+    "o_proj.weight": "self_attn.o_proj.weight",
+    "gate_proj.weight": "mlp.gate_proj.weight",
+    "up_proj.weight": "mlp.up_proj.weight",
+    "down_proj.weight": "mlp.down_proj.weight",
+}
 
 
 def load_tts_decoder_weights(
@@ -482,76 +481,12 @@ def load_tts_decoder_weights(
       populated=populated,
   )
   for idx, layer in enumerate(mod.layers):
-    p = f"tts.model.layers.{idx}"
-    cw(
-        layer.input_layernorm.weight,
+    weights_utils.copy_module_parameters(
+        layer,
         state_dict,
         weight_map,
-        f"{p}.input_layernorm.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        layer.q_proj.weight,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.q_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        layer.k_proj.weight,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.k_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        layer.v_proj.weight,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.v_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        layer.o_proj.weight,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.o_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        layer.post_attention_layernorm.weight,
-        state_dict,
-        weight_map,
-        f"{p}.post_attention_layernorm.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        layer.gate_proj.weight,
-        state_dict,
-        weight_map,
-        f"{p}.mlp.gate_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        layer.up_proj.weight,
-        state_dict,
-        weight_map,
-        f"{p}.mlp.up_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        layer.down_proj.weight,
-        state_dict,
-        weight_map,
-        f"{p}.mlp.down_proj.weight",
+        f"tts.model.layers.{idx}",
+        param_map=_TTS_LAYER_PARAM_MAP,
         strict=strict,
         populated=populated,
     )

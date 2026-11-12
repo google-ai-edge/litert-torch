@@ -653,124 +653,25 @@ class MiniCpmO:
       else:
         qwen_model = model_cls(llm_config).eval().to(torch.float32)
         populated: set[int] = set()
-        self._copy_weight(
-            qwen_model.model.embed_tokens.weight,
-            "llm.model.embed_tokens.weight",
+        weights_utils.copy_module_parameters(
+            qwen_model.model,
+            self._state_dict,
+            self._weight_map,
+            "llm.model",
             strict=strict,
             populated=populated,
         )
-        for idx, layer in enumerate(qwen_model.model.layers):
-          p = f"llm.model.layers.{idx}"
-          self._copy_weight(
-              layer.input_layernorm.weight,
-              f"{p}.input_layernorm.weight",
-              strict=strict,
-              populated=populated,
-          )
-          self._copy_weight(
-              layer.self_attn.q_proj.weight,
-              f"{p}.self_attn.q_proj.weight",
-              strict=strict,
-              populated=populated,
-          )
-          if layer.self_attn.q_proj.bias is not None:
-            self._copy_weight(
-                layer.self_attn.q_proj.bias,
-                f"{p}.self_attn.q_proj.bias",
-                strict=strict,
-                populated=populated,
-            )
-          self._copy_weight(
-              layer.self_attn.k_proj.weight,
-              f"{p}.self_attn.k_proj.weight",
-              strict=strict,
-              populated=populated,
-          )
-          if layer.self_attn.k_proj.bias is not None:
-            self._copy_weight(
-                layer.self_attn.k_proj.bias,
-                f"{p}.self_attn.k_proj.bias",
-                strict=strict,
-                populated=populated,
-            )
-          self._copy_weight(
-              layer.self_attn.v_proj.weight,
-              f"{p}.self_attn.v_proj.weight",
-              strict=strict,
-              populated=populated,
-          )
-          if layer.self_attn.v_proj.bias is not None:
-            self._copy_weight(
-                layer.self_attn.v_proj.bias,
-                f"{p}.self_attn.v_proj.bias",
-                strict=strict,
-                populated=populated,
-            )
-          if hasattr(layer.self_attn, "q_norm"):
-            self._copy_weight(
-                layer.self_attn.q_norm.weight,
-                f"{p}.self_attn.q_norm.weight",
-                strict=strict,
-                populated=populated,
-            )
-          if hasattr(layer.self_attn, "k_norm"):
-            self._copy_weight(
-                layer.self_attn.k_norm.weight,
-                f"{p}.self_attn.k_norm.weight",
-                strict=strict,
-                populated=populated,
-            )
-          self._copy_weight(
-              layer.self_attn.o_proj.weight,
-              f"{p}.self_attn.o_proj.weight",
-              strict=strict,
-              populated=populated,
-          )
-          self._copy_weight(
-              layer.post_attention_layernorm.weight,
-              f"{p}.post_attention_layernorm.weight",
-              strict=strict,
-              populated=populated,
-          )
-          self._copy_weight(
-              layer.mlp.gate_proj.weight,
-              f"{p}.mlp.gate_proj.weight",
-              strict=strict,
-              populated=populated,
-          )
-          self._copy_weight(
-              layer.mlp.up_proj.weight,
-              f"{p}.mlp.up_proj.weight",
-              strict=strict,
-              populated=populated,
-          )
-          self._copy_weight(
-              layer.mlp.down_proj.weight,
-              f"{p}.mlp.down_proj.weight",
-              strict=strict,
-              populated=populated,
-          )
+        lm_head_keys = (
+            ("llm.lm_head.weight", "llm.model.embed_tokens.weight")
+            if tie_word_embeddings
+            else ("llm.lm_head.weight",)
+        )
         self._copy_weight(
-            qwen_model.model.norm.weight,
-            "llm.model.norm.weight",
+            qwen_model.lm_head.weight,
+            *lm_head_keys,
             strict=strict,
             populated=populated,
         )
-        if tie_word_embeddings:
-          self._copy_weight(
-              qwen_model.lm_head.weight,
-              "llm.lm_head.weight",
-              "llm.model.embed_tokens.weight",
-              strict=strict,
-              populated=populated,
-          )
-        else:
-          self._copy_weight(
-              qwen_model.lm_head.weight,
-              "llm.lm_head.weight",
-              strict=strict,
-              populated=populated,
-          )
         if strict:
           weights_utils.verify_all_parameters_populated(
               qwen_model, populated, "llm_backbone"

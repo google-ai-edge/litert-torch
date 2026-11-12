@@ -433,6 +433,40 @@ class MiniCpmOTextEmbedderModule(nn.Module):
     return {"token_embeds": self.embed_tokens(token_ids)}
 
 
+SIGLIP_BLOCK_PARAM_MAP = {
+    "norm1.weight": "layer_norm1.weight",
+    "norm1.bias": "layer_norm1.bias",
+    "q_proj.weight": "self_attn.q_proj.weight",
+    "q_proj.bias": "self_attn.q_proj.bias",
+    "k_proj.weight": "self_attn.k_proj.weight",
+    "k_proj.bias": "self_attn.k_proj.bias",
+    "v_proj.weight": "self_attn.v_proj.weight",
+    "v_proj.bias": "self_attn.v_proj.bias",
+    "o_proj.weight": "self_attn.out_proj.weight",
+    "o_proj.bias": "self_attn.out_proj.bias",
+    "norm2.weight": "layer_norm2.weight",
+    "norm2.bias": "layer_norm2.bias",
+    "fc1.weight": "mlp.fc1.weight",
+    "fc1.bias": "mlp.fc1.bias",
+    "fc2.weight": "mlp.fc2.weight",
+    "fc2.bias": "mlp.fc2.bias",
+}
+
+WHISPER_BLOCK_PARAM_MAP = {
+    "norm1.weight": "self_attn_layer_norm.weight",
+    "norm1.bias": "self_attn_layer_norm.bias",
+    "q_proj.weight": "self_attn.q_proj.weight",
+    "q_proj.bias": "self_attn.q_proj.bias",
+    "k_proj.weight": "self_attn.k_proj.weight",
+    "v_proj.weight": "self_attn.v_proj.weight",
+    "v_proj.bias": "self_attn.v_proj.bias",
+    "o_proj.weight": "self_attn.out_proj.weight",
+    "o_proj.bias": "self_attn.out_proj.bias",
+    "norm2.weight": "final_layer_norm.weight",
+    "norm2.bias": "final_layer_norm.bias",
+}
+
+
 def load_vision_encoder_weights(
     mod: MiniCpmOVisionEncoderModule,
     state_dict: dict[str, torch.Tensor],
@@ -448,225 +482,40 @@ def load_vision_encoder_weights(
     strict: Whether missing or shape-mismatched tensors raise errors.
   """
   populated: set[int] = set()
-  cw = weights_utils.copy_weight
-  cw(
-      mod.patch_embedding.weight,
+  weights_utils.copy_parameter_dict(
+      {
+          mod.patch_embedding.weight: "vpm.embeddings.patch_embedding.weight",
+          mod.patch_embedding.bias: "vpm.embeddings.patch_embedding.bias",
+          mod.pos_embedding.weight: "vpm.embeddings.position_embedding.weight",
+          mod.post_layernorm.weight: "vpm.post_layernorm.weight",
+          mod.post_layernorm.bias: "vpm.post_layernorm.bias",
+          mod.latents: "resampler.query",
+          mod.kv_proj.weight: "resampler.kv_proj.weight",
+          mod.ln_q.weight: "resampler.ln_q.weight",
+          mod.ln_q.bias: "resampler.ln_q.bias",
+          mod.ln_kv.weight: "resampler.ln_kv.weight",
+          mod.ln_kv.bias: "resampler.ln_kv.bias",
+          mod.attn_out.weight: "resampler.attn.out_proj.weight",
+          mod.attn_out.bias: "resampler.attn.out_proj.bias",
+          mod.ln_post.weight: "resampler.ln_post.weight",
+          mod.ln_post.bias: "resampler.ln_post.bias",
+          mod.proj: "resampler.proj",
+      },
       state_dict,
       weight_map,
-      "vpm.embeddings.patch_embedding.weight",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.patch_embedding.bias,
-      state_dict,
-      weight_map,
-      "vpm.embeddings.patch_embedding.bias",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.pos_embedding.weight,
-      state_dict,
-      weight_map,
-      "vpm.embeddings.position_embedding.weight",
       strict=strict,
       populated=populated,
   )
   for idx, blk in enumerate(mod.blocks):
-    p = f"vpm.encoder.layers.{idx}"
-    cw(
-        blk.norm1.weight,
+    weights_utils.copy_module_parameters(
+        blk,
         state_dict,
         weight_map,
-        f"{p}.layer_norm1.weight",
+        f"vpm.encoder.layers.{idx}",
+        param_map=SIGLIP_BLOCK_PARAM_MAP,
         strict=strict,
         populated=populated,
     )
-    cw(
-        blk.norm1.bias,
-        state_dict,
-        weight_map,
-        f"{p}.layer_norm1.bias",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.q_proj.weight,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.q_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.q_proj.bias,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.q_proj.bias",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.k_proj.weight,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.k_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.k_proj.bias,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.k_proj.bias",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.v_proj.weight,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.v_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.v_proj.bias,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.v_proj.bias",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.o_proj.weight,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.out_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.o_proj.bias,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.out_proj.bias",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.norm2.weight,
-        state_dict,
-        weight_map,
-        f"{p}.layer_norm2.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.norm2.bias,
-        state_dict,
-        weight_map,
-        f"{p}.layer_norm2.bias",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.fc1.weight,
-        state_dict,
-        weight_map,
-        f"{p}.mlp.fc1.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.fc1.bias,
-        state_dict,
-        weight_map,
-        f"{p}.mlp.fc1.bias",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.fc2.weight,
-        state_dict,
-        weight_map,
-        f"{p}.mlp.fc2.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.fc2.bias,
-        state_dict,
-        weight_map,
-        f"{p}.mlp.fc2.bias",
-        strict=strict,
-        populated=populated,
-    )
-  cw(
-      mod.post_layernorm.weight,
-      state_dict,
-      weight_map,
-      "vpm.post_layernorm.weight",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.post_layernorm.bias,
-      state_dict,
-      weight_map,
-      "vpm.post_layernorm.bias",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.latents,
-      state_dict,
-      weight_map,
-      "resampler.query",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.kv_proj.weight,
-      state_dict,
-      weight_map,
-      "resampler.kv_proj.weight",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.ln_q.weight,
-      state_dict,
-      weight_map,
-      "resampler.ln_q.weight",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.ln_q.bias,
-      state_dict,
-      weight_map,
-      "resampler.ln_q.bias",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.ln_kv.weight,
-      state_dict,
-      weight_map,
-      "resampler.ln_kv.weight",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.ln_kv.bias,
-      state_dict,
-      weight_map,
-      "resampler.ln_kv.bias",
-      strict=strict,
-      populated=populated,
-  )
   weights_utils.copy_qkv_in_proj(
       mod.attn_q,
       mod.attn_k,
@@ -675,46 +524,6 @@ def load_vision_encoder_weights(
       weight_map,
       "resampler.attn.in_proj_weight",
       "resampler.attn.in_proj_bias",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.attn_out.weight,
-      state_dict,
-      weight_map,
-      "resampler.attn.out_proj.weight",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.attn_out.bias,
-      state_dict,
-      weight_map,
-      "resampler.attn.out_proj.bias",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.ln_post.weight,
-      state_dict,
-      weight_map,
-      "resampler.ln_post.weight",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.ln_post.bias,
-      state_dict,
-      weight_map,
-      "resampler.ln_post.bias",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.proj,
-      state_dict,
-      weight_map,
-      "resampler.proj",
       strict=strict,
       populated=populated,
   )
@@ -739,217 +548,35 @@ def load_audio_encoder_weights(
     strict: Whether missing or shape-mismatched tensors raise errors.
   """
   populated: set[int] = set()
-  cw = weights_utils.copy_weight
-  cw(
-      mod.conv1.weight,
+  weights_utils.copy_parameter_dict(
+      {
+          mod.conv1.weight: "apm.conv1.weight",
+          mod.conv1.bias: "apm.conv1.bias",
+          mod.conv2.weight: "apm.conv2.weight",
+          mod.conv2.bias: "apm.conv2.bias",
+          mod.embed_positions.weight: "apm.embed_positions.weight",
+          mod.layer_norm.weight: "apm.layer_norm.weight",
+          mod.layer_norm.bias: "apm.layer_norm.bias",
+          mod.proj1.weight: "audio_projection_layer.linear1.weight",
+          mod.proj1.bias: "audio_projection_layer.linear1.bias",
+          mod.proj2.weight: "audio_projection_layer.linear2.weight",
+          mod.proj2.bias: "audio_projection_layer.linear2.bias",
+      },
       state_dict,
       weight_map,
-      "apm.conv1.weight",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.conv1.bias,
-      state_dict,
-      weight_map,
-      "apm.conv1.bias",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.conv2.weight,
-      state_dict,
-      weight_map,
-      "apm.conv2.weight",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.conv2.bias,
-      state_dict,
-      weight_map,
-      "apm.conv2.bias",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.embed_positions.weight,
-      state_dict,
-      weight_map,
-      "apm.embed_positions.weight",
       strict=strict,
       populated=populated,
   )
   for idx, blk in enumerate(mod.blocks):
-    p = f"apm.layers.{idx}"
-    cw(
-        blk.norm1.weight,
+    weights_utils.copy_module_parameters(
+        blk,
         state_dict,
         weight_map,
-        f"{p}.self_attn_layer_norm.weight",
+        f"apm.layers.{idx}",
+        param_map=WHISPER_BLOCK_PARAM_MAP,
         strict=strict,
         populated=populated,
     )
-    cw(
-        blk.norm1.bias,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn_layer_norm.bias",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.q_proj.weight,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.q_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.q_proj.bias,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.q_proj.bias",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.k_proj.weight,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.k_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.v_proj.weight,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.v_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.v_proj.bias,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.v_proj.bias",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.o_proj.weight,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.out_proj.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.o_proj.bias,
-        state_dict,
-        weight_map,
-        f"{p}.self_attn.out_proj.bias",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.norm2.weight,
-        state_dict,
-        weight_map,
-        f"{p}.final_layer_norm.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.norm2.bias,
-        state_dict,
-        weight_map,
-        f"{p}.final_layer_norm.bias",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.fc1.weight,
-        state_dict,
-        weight_map,
-        f"{p}.fc1.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.fc1.bias,
-        state_dict,
-        weight_map,
-        f"{p}.fc1.bias",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.fc2.weight,
-        state_dict,
-        weight_map,
-        f"{p}.fc2.weight",
-        strict=strict,
-        populated=populated,
-    )
-    cw(
-        blk.fc2.bias,
-        state_dict,
-        weight_map,
-        f"{p}.fc2.bias",
-        strict=strict,
-        populated=populated,
-    )
-  cw(
-      mod.layer_norm.weight,
-      state_dict,
-      weight_map,
-      "apm.layer_norm.weight",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.layer_norm.bias,
-      state_dict,
-      weight_map,
-      "apm.layer_norm.bias",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.proj1.weight,
-      state_dict,
-      weight_map,
-      "audio_projection_layer.linear1.weight",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.proj1.bias,
-      state_dict,
-      weight_map,
-      "audio_projection_layer.linear1.bias",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.proj2.weight,
-      state_dict,
-      weight_map,
-      "audio_projection_layer.linear2.weight",
-      strict=strict,
-      populated=populated,
-  )
-  cw(
-      mod.proj2.bias,
-      state_dict,
-      weight_map,
-      "audio_projection_layer.linear2.bias",
-      strict=strict,
-      populated=populated,
-  )
   if strict:
     weights_utils.verify_all_parameters_populated(
         mod, populated, "audio_encoder"

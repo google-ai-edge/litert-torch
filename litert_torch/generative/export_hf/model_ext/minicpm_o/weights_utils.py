@@ -298,6 +298,68 @@ def copy_weight_norm(
     )
 
 
+def copy_module_parameters(
+    module: nn.Module,
+    state_dict: dict[str, torch.Tensor],
+    weight_map: dict[str, str],
+    prefix: str,
+    param_map: dict[str, str] | None = None,
+    strict: bool = True,
+    populated: set[int] | None = None,
+) -> None:
+  """Copies checkpoint weights into `module`'s named parameters.
+
+  Args:
+    module: Module whose parameters will be populated.
+    state_dict: In-memory mapping of tensor keys to tensors.
+    weight_map: Mapping of tensor keys to safetensors shard file paths.
+    prefix: Checkpoint prefix prepended to parameter names.
+    param_map: Optional mapping from local parameter name to checkpoint suffix.
+      If None or identity, local name is appended directly to `prefix`.
+    strict: Whether missing or shape-mismatched tensors raise errors.
+    populated: Set of `data_ptr()` integers tracking populated parameters.
+  """
+  for name, param in module.named_parameters():
+    suffix = param_map.get(name, name) if param_map is not None else name
+    ckpt_key = f"{prefix}.{suffix}" if prefix else suffix
+    copy_weight(
+        param,
+        state_dict,
+        weight_map,
+        ckpt_key,
+        strict=strict,
+        populated=populated,
+    )
+
+
+def copy_parameter_dict(
+    mapping: dict[torch.Tensor, str | tuple[str, ...]],
+    state_dict: dict[str, torch.Tensor],
+    weight_map: dict[str, str],
+    strict: bool = True,
+    populated: set[int] | None = None,
+) -> None:
+  """Copies checkpoint keys to destination parameter tensors in `mapping`.
+
+  Args:
+    mapping: Dict mapping destination tensors to checkpoint key(s).
+    state_dict: In-memory mapping of tensor keys to tensors.
+    weight_map: Mapping of tensor keys to safetensors shard file paths.
+    strict: Whether missing or shape-mismatched tensors raise errors.
+    populated: Set of `data_ptr()` integers tracking populated parameters.
+  """
+  for target, keys in mapping.items():
+    key_tuple = (keys,) if isinstance(keys, str) else keys
+    copy_weight(
+        target,
+        state_dict,
+        weight_map,
+        *key_tuple,
+        strict=strict,
+        populated=populated,
+    )
+
+
 def copy_from_dict(
     target: torch.Tensor,
     sd: dict[str, torch.Tensor],
@@ -394,9 +456,7 @@ def copy_wn_from_dict(
             f"Missing weight_norm keys for {prefix!r}: tried"
             f" {(w_key, g_key, v_key)}."
         )
-    elif (
-        v.shape != layer.weight.shape or g.shape[0] != layer.weight.shape[0]
-    ):
+    elif v.shape != layer.weight.shape or g.shape[0] != layer.weight.shape[0]:
       if strict:
         raise ValueError(
             f"Weight shape mismatch for ({g_key!r}, {v_key!r}):"

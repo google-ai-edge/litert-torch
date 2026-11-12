@@ -42,9 +42,7 @@ class WeightsUtilsTest(absltest.TestCase):
 
     above_thresh_with_bias = weights_utils.make_linear(1001, 1000, bias=True)
     self.assertIsNotNone(above_thresh_with_bias.bias)
-    self.assertEqual(
-        float(above_thresh_with_bias.bias.abs().sum().item()), 0.0
-    )
+    self.assertEqual(float(above_thresh_with_bias.bias.abs().sum().item()), 0.0)
 
     at_thresh_emb = weights_utils.make_embedding(1000, 1000)
     self.assertEqual(at_thresh_emb.weight.shape, (1000, 1000))
@@ -174,9 +172,7 @@ class WeightsUtilsTest(absltest.TestCase):
     torch.testing.assert_close(
         v_proj.weight.data, state_dict["in_proj.weight"][8:]
     )
-    torch.testing.assert_close(
-        q_proj.bias.data, state_dict["in_proj.bias"][:4]
-    )
+    torch.testing.assert_close(q_proj.bias.data, state_dict["in_proj.bias"][:4])
 
     # Missing weight key in non-strict vs strict mode.
     weights_utils.copy_qkv_in_proj(
@@ -407,12 +403,8 @@ class WeightsUtilsTest(absltest.TestCase):
         "conv_direct.weight": torch.full((2, 3, 1), 4.0),
         "conv_direct.bias": torch.full((2,), 0.5),
         "conv_bad.weight": torch.ones(9, 9, 9),
-        "conv_wn.parametrizations.weight.original0": torch.full(
-            (2, 1, 1), 2.0
-        ),
-        "conv_wn.parametrizations.weight.original1": torch.full(
-            (2, 1, 1), 1.0
-        ),
+        "conv_wn.parametrizations.weight.original0": torch.full((2, 1, 1), 2.0),
+        "conv_wn.parametrizations.weight.original1": torch.full((2, 1, 1), 1.0),
         "conv_wn.bias": torch.full((2,), -1.0),
         "conv_wn_bad.parametrizations.weight.original0": torch.ones(5, 1, 1),
         "conv_wn_bad.parametrizations.weight.original1": torch.ones(5, 1, 1),
@@ -494,9 +486,7 @@ class WeightsUtilsTest(absltest.TestCase):
     self.assertIn(conv_wn.weight.data_ptr(), pop_wn)
     assert conv_wn.bias is not None
     self.assertIn(conv_wn.bias.data_ptr(), pop_wn)
-    torch.testing.assert_close(
-        conv_wn.weight.data, torch.full((2, 1, 1), 2.0)
-    )
+    torch.testing.assert_close(conv_wn.weight.data, torch.full((2, 1, 1), 2.0))
 
     # Parametrized weight shape mismatch in non-strict and strict mode.
     weights_utils.copy_wn_from_dict(
@@ -539,6 +529,67 @@ class WeightsUtilsTest(absltest.TestCase):
       self.assertNotEqual(out_q, raw_path)
       self.assertTrue(os.path.exists(out_q))
       self.assertFalse(os.path.exists(raw_path))
+
+  def test_copy_module_parameters_and_parameter_dict(self):
+    """Tests copy_module_parameters and copy_parameter_dict."""
+    mod = nn.Sequential(nn.Linear(4, 2, bias=True), nn.LayerNorm(2))
+    sd = {
+        "blk.0.weight": torch.ones(2, 4),
+        "blk.0.bias": torch.full((2,), 0.5),
+        "blk.1.weight": torch.full((2,), 2.0),
+        "blk.1.bias": torch.full((2,), -1.0),
+    }
+    pop: set[int] = set()
+    weights_utils.copy_module_parameters(
+        mod, sd, {}, "blk", strict=True, populated=pop
+    )
+    self.assertLen(pop, 4)
+    torch.testing.assert_close(mod[0].weight, sd["blk.0.weight"])
+    torch.testing.assert_close(mod[1].bias, sd["blk.1.bias"])
+
+    # Exercise param_map (including identity fallback for unmapped params) with
+    # an empty prefix.
+    sd_mapped = {
+        "linear.w": torch.full((2, 4), -2.0),
+        "linear.b": torch.full((2,), 3.0),
+        "1.weight": torch.full((2,), 4.0),
+        "1.bias": torch.full((2,), -0.5),
+    }
+    pop_mapped: set[int] = set()
+    weights_utils.copy_module_parameters(
+        mod,
+        sd_mapped,
+        {},
+        "",
+        param_map={"0.weight": "linear.w", "0.bias": "linear.b"},
+        strict=True,
+        populated=pop_mapped,
+    )
+    self.assertLen(pop_mapped, 4)
+    torch.testing.assert_close(mod[0].weight, sd_mapped["linear.w"])
+    torch.testing.assert_close(mod[0].bias, sd_mapped["linear.b"])
+    torch.testing.assert_close(mod[1].weight, sd_mapped["1.weight"])
+    torch.testing.assert_close(mod[1].bias, sd_mapped["1.bias"])
+
+    lin = nn.Linear(3, 3, bias=True)
+    sd2 = {
+        "primary.weight": torch.full((3, 3), 3.0),
+        "primary.bias": torch.full((3,), 1.5),
+    }
+    pop2: set[int] = set()
+    weights_utils.copy_parameter_dict(
+        {
+            lin.weight: ("fallback.weight", "primary.weight"),
+            lin.bias: "primary.bias",
+        },
+        sd2,
+        {},
+        strict=True,
+        populated=pop2,
+    )
+    self.assertLen(pop2, 2)
+    torch.testing.assert_close(lin.weight, sd2["primary.weight"])
+    torch.testing.assert_close(lin.bias, sd2["primary.bias"])
 
 
 if __name__ == "__main__":
