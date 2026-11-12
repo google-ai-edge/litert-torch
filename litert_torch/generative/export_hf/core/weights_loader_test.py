@@ -93,11 +93,79 @@ class InitAndCastTest(absltest.TestCase):
     # Patch is removed on exit.
     self.assertFalse(nn.Linear(2, 2).weight.is_meta)
 
-  def test_cast_params_keeps_buffers_and_ties(self):
-    model = weights_loader_lib.cast_params_(_Tiny(), torch.bfloat16)
+  def test_cast_params_keeps_buffers_ties_and_skipped_suffixes(self):
+    tiny = _Tiny()
+    tiny.proj.weight_scale = nn.Parameter(
+        torch.ones(4, 1, dtype=torch.float32), requires_grad=False
+    )
+    model = weights_loader_lib.cast_params_(
+        tiny, torch.bfloat16, skip_suffixes=("weight_scale",)
+    )
     self.assertEqual(model.proj.weight.dtype, torch.bfloat16)
+    self.assertEqual(model.proj.weight_scale.dtype, torch.float32)
     self.assertEqual(model.rotary.inv_freq.dtype, torch.float32)
     self.assertIs(model.lm_head.weight, model.embed_tokens.weight)
+
+  def test_prepare_for_export_with_module_weights(self):
+    class _CustomQuant(nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.register_buffer(
+            "weight", torch.empty((4, 4), dtype=torch.int8, device="meta")
+        )
+        self.register_buffer("scale", torch.full((4,), 0.5))
+
+      def load_export_weight(self, wl, prefix, attr):
+        if attr == "weight":
+          return wl(f"{prefix}.raw_weight") * 2
+        return None
+
+    root = _Wrapper(_CustomQuant())
+    base_tensors = {
+        "model.raw_weight": torch.ones((4, 4), dtype=torch.int8),
+    }
+
+    def base_loader(name):
+      return base_tensors[name]
+
+    closed = []
+    base_loader.close = lambda: closed.append(True)
+
+    with weights_loader_lib.prepare_for_export(base_loader, root) as loader:
+      self.assertTrue(root.model.scale.is_meta)
+      torch.testing.assert_close(loader("model.scale"), torch.full((4,), 0.5))
+      torch.testing.assert_close(
+          loader("model.weight"), torch.full((4, 4), 2, dtype=torch.int8)
+      )
+      self.assertTrue(hasattr(loader, "close"))
+      loader.close()
+      self.assertEqual(closed, [True])
+    self.assertFalse(root.model.scale.is_meta)
+
+  def test_embed_tokens_on_cpu_delegates_to_custom_hook(self):
+    class _CustomEmb(nn.Module):
+
+      def embed_tokens_on_cpu(self, ids, wl, prefix):
+        return wl(f"{prefix}.packed")[ids.long()].float() * 3.0
+
+    class _ModelWithCustomEmb(nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.embed_tokens = _CustomEmb()
+
+      def get_input_embeddings(self):
+        return self.embed_tokens
+
+    model = _ModelWithCustomEmb()
+    tensors = {"embed_tokens.packed": torch.arange(8).reshape(4, 2)}
+    out = weights_loader_lib.embed_tokens_on_cpu(
+        model, [1, 3], weights_loader=tensors.__getitem__
+    )
+    torch.testing.assert_close(
+        out, tensors["embed_tokens.packed"][[1, 3]].unsqueeze(0).float() * 3.0
+    )
 
   def test_submodule_weights_loader(self):
     root = _Wrapper(_Tiny())
@@ -269,9 +337,9 @@ class HFCheckpointWeightsLoaderTest(absltest.TestCase):
   def test_load_persistent_buffers(self):
     with weights_loader_lib.init_params_on_meta():
       model = _Multimodal()
-    layer = model.model.language_model.layers[0]
     with self.assertLogs(level="WARNING") as logs:
       weights_loader_lib.load_persistent_buffers_(model, self.loader)
+    layer = model.model.language_model.layers[0]
     # Resolved by the same lookup as `model.language_model.layers.0.*` params.
     torch.testing.assert_close(
         layer.layer_scalar,

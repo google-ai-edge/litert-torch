@@ -15,6 +15,7 @@
 """LiteRT exportable wrappers for HuggingFace gemma_quant layers."""
 
 from collections.abc import Callable
+import types
 from typing import Any
 
 from litert_torch._convert.fx_passes import lower_torchao_pass
@@ -37,6 +38,13 @@ _NUM_BITS_TO_DTYPE: dict[int, str] = {
     4: "i4",
     8: "i8",
 }
+
+QUANT_PARAM_SUFFIXES: tuple[str, ...] = (
+    "weight_scale",
+    "embedding_scale",
+    "input_activation_scale",
+    "output_activation_scale",
+)
 
 
 def quant_dtype_str(num_bits: int) -> str:
@@ -104,6 +112,17 @@ def create_per_tensor_fake_quant_fn(
       "narrow_range": False,
   }
   return lower_torchao_pass._create_fake_quant_function(attrs)  # pylint: disable=protected-access
+
+
+def _embed_tokens_on_cpu_method(
+    self: Any,
+    ids: torch.Tensor,
+    weights_loader: WeightsLoader | None = None,
+    prefix: str = "embed_tokens",
+) -> torch.Tensor:
+  """Evaluates a quantized embedding module on `ids` on CPU."""
+  fqn = f"{prefix}.embedding_quantized" if prefix else "embedding_quantized"
+  return embed_quantized_tokens_on_cpu(self, ids, weights_loader, fqn)
 
 
 class LiteRTQuantizedLinear(torch.nn.Module):
@@ -243,6 +262,8 @@ class LiteRTQuantizedEmbedding(torch.nn.Module):
     key = f"{prefix}.embedding_quantized" if prefix else "embedding_quantized"
     return self._unpack_and_reshape(weights_loader(key))
 
+  embed_tokens_on_cpu = _embed_tokens_on_cpu_method
+
   def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
     """Looks up quantized embeddings and applies `scalar_embed_scale`."""
     dequant_table = self.dequant_fn(self.weight)
@@ -369,3 +390,47 @@ def extract_gemma_kv_cache_scales(
         except KeyError:
           pass
   return kv_cache_scales
+
+
+def load_gemma_quant_scales_(
+    model: torch.nn.Module,
+    weights_loader: WeightsLoader,
+) -> torch.nn.Module:
+  """Loads Gemma quantization scale parameters onto CPU and extracts KV scales."""
+  for prefix, module in model.named_modules():
+    if QuantizedEmbedding is not None and isinstance(
+        module, QuantizedEmbedding
+    ):
+      setattr(
+          module,
+          "embed_tokens_on_cpu",
+          types.MethodType(_embed_tokens_on_cpu_method, module),
+      )
+    for name, param in list(module._parameters.items()):  # pylint: disable=protected-access
+      if param is None or not name.endswith(QUANT_PARAM_SUFFIXES):
+        continue
+      fqn = f"{prefix}.{name}" if prefix else name
+      try:
+        value = weights_loader(fqn)
+      except KeyError:
+        if name.endswith("activation_scale"):
+          if param.is_meta:
+            module._parameters[name] = torch.nn.Parameter(  # pylint: disable=protected-access
+                torch.zeros(param.shape, dtype=param.dtype),
+                requires_grad=False,
+            )
+          continue
+        raise
+      target_dtype = (
+          torch.float32 if value.is_floating_point() else value.dtype
+      )
+      module._parameters[name] = torch.nn.Parameter(  # pylint: disable=protected-access
+          value.to(target_dtype), requires_grad=False
+      )
+  kv_cache_scales = extract_gemma_kv_cache_scales(model, weights_loader)
+  cfg: Any = getattr(model, "config", None)
+  if kv_cache_scales and cfg is not None:
+    cfg.kv_cache_scales = kv_cache_scales
+    if hasattr(cfg, "text_config") and cfg.text_config is not None:
+      cfg.text_config.kv_cache_scales = kv_cache_scales
+  return model

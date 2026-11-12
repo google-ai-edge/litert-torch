@@ -86,16 +86,22 @@ def init_params_on_meta() -> Iterator[None]:
     nn.Module.register_parameter = original_register_parameter
 
 
-def cast_params_(model: nn.Module, dtype: torch.dtype) -> nn.Module:
+def cast_params_(
+    model: nn.Module,
+    dtype: torch.dtype,
+    skip_suffixes: tuple[str, ...] = (),
+) -> nn.Module:
   """Casts floating-point parameters in place, leaving buffers untouched.
 
   `nn.Module.to(dtype)` would also cast buffers such as RoPE `inv_freq`, whose
   precision matters (bf16 phase error grows linearly with position). Shared
-  (tied) parameters stay shared.
+  (tied) parameters stay shared, and parameters matching `skip_suffixes` (e.g.
+  quantization scales) keep their original precision.
 
   Args:
     model: The model to cast.
     dtype: The target floating-point dtype.
+    skip_suffixes: Parameter name suffixes to leave in their original dtype.
 
   Returns:
     The same model.
@@ -103,7 +109,12 @@ def cast_params_(model: nn.Module, dtype: torch.dtype) -> nn.Module:
   cast: dict[int, nn.Parameter] = {}
   for module in model.modules():
     for name, param in list(module._parameters.items()):  # pylint: disable=protected-access
-      if param is None or not param.is_floating_point() or param.dtype == dtype:
+      if (
+          param is None
+          or not param.is_floating_point()
+          or param.dtype == dtype
+          or (skip_suffixes and name.endswith(skip_suffixes))
+      ):
         continue
       if id(param) not in cast:
         cast[id(param)] = nn.Parameter(
@@ -194,10 +205,17 @@ def embed_tokens_on_cpu(
   emb = model.get_input_embeddings()
   ids = torch.tensor([token_ids], dtype=torch.int32)
   with torch.no_grad():
-    if not emb.weight.is_meta:
-      return emb(ids.to(emb.weight.device)).detach().cpu().clone()
     if weights_loader is None:
       weights_loader = getattr(model, "_weights_loader", None)
+    custom_embed = getattr(emb, "embed_tokens_on_cpu", None)
+    if callable(custom_embed):
+      prefix = next(
+          (n for n, m in model.named_modules() if m is emb),
+          "embed_tokens",
+      )
+      return custom_embed(ids, weights_loader, prefix)
+    if not emb.weight.is_meta:
+      return emb(ids.to(emb.weight.device)).detach().cpu().clone()
     if weights_loader is None:
       raise RuntimeError(
           "Input embedding weights are on the meta device, but no"
@@ -278,7 +296,81 @@ def with_tensors(
       return tensors[name]
     return weights_loader(name)
 
+  if hasattr(weights_loader, "close"):
+    setattr(load, "close", weights_loader.close)
   return load
+
+
+def with_module_weights(
+    weights_loader: WeightsLoader | None,
+    *roots: nn.Module,
+) -> WeightsLoader | None:
+  """Returns a loader that delegates to submodules defining `load_export_weight`.
+
+  Patched modules whose export-time weight representation differs from the
+  checkpoint (e.g. unpacked/reshaped quantized weights or per-layer sliced
+  embeddings) can implement `load_export_weight(weights_loader, prefix, attr)`
+  to transform checkpoint tensors lazily on demand during Converter V2
+  serialization.
+
+  Args:
+    weights_loader: Base loader resolving checkpoint FQNs relative to `roots`.
+    *roots: The exportable root modules.
+
+  Returns:
+    A wrapped `WeightsLoader`, or `weights_loader` if no submodules define
+    `load_export_weight`.
+  """
+  if weights_loader is None:
+    return None
+  module_loaders: dict[str, Callable[[WeightsLoader, str, str], Any]] = {}
+  for root in roots:
+    for prefix, module in root.named_modules(remove_duplicate=False):
+      loader_fn = getattr(module, "load_export_weight", None)
+      if callable(loader_fn):
+        module_loaders[prefix] = loader_fn
+  if not module_loaders:
+    return weights_loader
+
+  def load(name: str) -> torch.Tensor:
+    parent_fqn, _, attr = name.rpartition(".")
+    loader_fn = module_loaders.get(parent_fqn)
+    if loader_fn is not None:
+      tensor = loader_fn(weights_loader, parent_fqn, attr)
+      if tensor is not None:
+        return tensor
+    return weights_loader(name)
+
+  if hasattr(weights_loader, "close"):
+    setattr(load, "close", weights_loader.close)
+  return load
+
+
+@contextlib.contextmanager
+def prepare_for_export(
+    weights_loader: WeightsLoader | None,
+    *roots: nn.Module,
+) -> Iterator[WeightsLoader | None]:
+  """Prepares `roots` and `weights_loader` for meta-device Converter V2 export.
+
+  Temporarily moves real CPU buffers in `roots` to the meta device and yields a
+  wrapped `WeightsLoader` that serves those buffer values and any custom module
+  weights (via `with_module_weights`).
+
+  Args:
+    weights_loader: Base weights loader, or None if not using meta export.
+    *roots: Exportable root modules to be traced.
+
+  Yields:
+    The wrapped `WeightsLoader`, or None if `weights_loader` is None.
+  """
+  if weights_loader is None:
+    yield None
+    return
+  with buffers_on_meta(*roots) as buffer_values:
+    loader = with_module_weights(weights_loader, *roots)
+    loader = with_tensors(loader, buffer_values)
+    yield loader
 
 
 def submodule_weights_loader(

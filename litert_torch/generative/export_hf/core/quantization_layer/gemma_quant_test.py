@@ -14,8 +14,12 @@
 # ==============================================================================
 """Tests for LiteRT gemma_quant layer wrappers."""
 
+import copy
+
 from absl.testing import parameterized
 import litert_torch
+from litert_torch.generative.export_hf.core import quantization_layer
+from litert_torch.generative.export_hf.core import weights_loader as weights_loader_lib
 from litert_torch.generative.export_hf.core.quantization_layer import gemma_quant as lrt_gemma_quant
 import numpy as np
 import torch
@@ -340,7 +344,7 @@ class GemmaQuantTest(parameterized.TestCase):
         + 0.01,
         requires_grad=False,
     )
-    ids = torch.tensor([1, 5, 12], dtype=torch.int64)
+    ids = torch.tensor([[1, 5, 12]], dtype=torch.int32)
     with torch.no_grad():
       expected = orig_emb(ids).float()
 
@@ -354,21 +358,31 @@ class GemmaQuantTest(parameterized.TestCase):
 
     raw_weight = orig_emb.embedding_quantized.detach().clone()
     scale_weight = orig_emb.embedding_scale.detach().clone()
-    with torch.device("meta"):
-      meta_emb = hf_gemma_quant.QuantizedEmbedding(
-          num_embeddings=num_embeddings,
-          embedding_dim=embedding_dim,
-          output_dtype=torch.float32,
-          embed_scale=2.0,
-          num_bits=num_bits,
-      ).eval()
+
+    class _ModelWithQuantEmb(nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.embed_tokens = hf_gemma_quant.QuantizedEmbedding(
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            output_dtype=torch.float32,
+            embed_scale=2.0,
+            num_bits=num_bits,
+        ).eval()
+
+      def get_input_embeddings(self):
+        return self.embed_tokens
+
+    with weights_loader_lib.init_params_on_meta():
+      meta_model = _ModelWithQuantEmb()
     loader = {
         "embed_tokens.embedding_quantized": raw_weight,
         "embed_tokens.embedding_scale": scale_weight,
     }.__getitem__
     # Works when `meta_emb.embedding_scale` is still on `meta`.
     actual_unpatched_meta = lrt_gemma_quant.embed_quantized_tokens_on_cpu(
-        meta_emb,
+        meta_model.embed_tokens,
         ids,
         weights_loader=loader,
         fqn="embed_tokens.embedding_quantized",
@@ -377,16 +391,27 @@ class GemmaQuantTest(parameterized.TestCase):
         actual_unpatched_meta, expected, rtol=1e-4, atol=1e-4
     )
 
-    meta_emb.embedding_scale = nn.Parameter(scale_weight, requires_grad=False)
-    lrt_meta_emb = lrt_gemma_quant.LiteRTQuantizedEmbedding(meta_emb).eval()
-    self.assertTrue(lrt_meta_emb.weight.is_meta)
-    actual_meta = lrt_gemma_quant.embed_quantized_tokens_on_cpu(
-        lrt_meta_emb,
-        ids,
-        weights_loader=loader,
-        fqn="embed_tokens.embedding_quantized",
+    # `load_quant_scales_` binds `embed_tokens_on_cpu` onto unpatched
+    # `QuantizedEmbedding`, so `weights_loader.embed_tokens_on_cpu` works both
+    # before and after `replace_gemma_quant_layers`.
+    quantization_layer.load_quant_scales_(meta_model, loader)
+    actual_via_wl_unpatched = weights_loader_lib.embed_tokens_on_cpu(
+        meta_model, [1, 5, 12], weights_loader=loader
     )
-    torch.testing.assert_close(actual_meta, expected, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(
+        actual_via_wl_unpatched, expected, rtol=1e-4, atol=1e-4
+    )
+
+    lrt_gemma_quant.replace_gemma_quant_layers(meta_model)
+    self.assertIsInstance(
+        meta_model.embed_tokens, lrt_gemma_quant.LiteRTQuantizedEmbedding
+    )
+    actual_via_wl_patched = weights_loader_lib.embed_tokens_on_cpu(
+        meta_model, [1, 5, 12], weights_loader=loader
+    )
+    torch.testing.assert_close(
+        actual_via_wl_patched, expected, rtol=1e-4, atol=1e-4
+    )
 
   def test_extract_gemma_kv_cache_scales_ignores_vision_and_audio(self):
     class Model(nn.Module):
@@ -415,6 +440,116 @@ class GemmaQuantTest(parameterized.TestCase):
         Model(), tensors.__getitem__
     )
     self.assertEqual(scales, {0: (0.125, 0.25)})
+
+  def test_load_quant_scales_and_suffixes(self):
+    self.assertEqual(
+        quantization_layer.get_quant_param_suffixes("gemma"),
+        lrt_gemma_quant.QUANT_PARAM_SUFFIXES,
+    )
+    self.assertEqual(quantization_layer.get_quant_param_suffixes(None), ())
+
+    with weights_loader_lib.init_params_on_meta():
+      proj = nn.Linear(4, 4)
+      proj.weight_scale = nn.Parameter(
+          torch.ones(4, 1, dtype=torch.float32), requires_grad=False
+      )
+      proj.input_activation_scale = nn.Parameter(
+          torch.tensor(0.0, dtype=torch.float32), requires_grad=False
+      )
+      proj.per_dim_scale = nn.Parameter(
+          torch.zeros(4, dtype=torch.float32), requires_grad=False
+      )
+    self.assertTrue(proj.weight_scale.is_meta)
+
+    # `quant_method=None` is a no-op.
+    quantization_layer.load_quant_scales_(
+        proj, {}.__getitem__, quant_method=None
+    )
+    self.assertTrue(proj.weight_scale.is_meta)
+
+    # Missing required `weight_scale` raises KeyError.
+    with self.assertRaises(KeyError):
+      quantization_layer.load_quant_scales_(
+          proj, {}.__getitem__, quant_method="gemma"
+      )
+
+    scales = {"weight_scale": torch.full((4, 1), 0.25, dtype=torch.bfloat16)}
+    quantization_layer.load_quant_scales_(
+        proj, scales.__getitem__, quant_method="gemma"
+    )
+    self.assertFalse(proj.weight_scale.is_meta)
+    self.assertEqual(proj.weight_scale.dtype, torch.float32)
+    torch.testing.assert_close(
+        proj.weight_scale, torch.full((4, 1), 0.25, dtype=torch.float32)
+    )
+    self.assertFalse(proj.input_activation_scale.is_meta)
+    self.assertEqual(proj.input_activation_scale.item(), 0.0)
+    self.assertTrue(proj.per_dim_scale.is_meta)
+
+    # Calling `load_quant_scales_` again when `input_activation_scale` is
+    # already on CPU (`is_meta == False`) and missing from `scales` keeps its
+    # existing value without raising KeyError.
+    quantization_layer.load_quant_scales_(
+        proj, scales.__getitem__, quant_method="gemma"
+    )
+    self.assertEqual(proj.input_activation_scale.item(), 0.0)
+
+  def test_gemma_quant_linear_meta_convert_v2(self):
+    if not litert_torch.converter_v2.is_supported():
+      self.skipTest(
+          "Converter V2 is not supported by the installed TensorFlow."
+      )
+    torch.manual_seed(42)
+    in_features = 64
+    out_features = 16
+    orig_linear = hf_gemma_quant.QuantizedLinear(
+        in_features=in_features, out_features=out_features, num_bits=4
+    ).eval()
+    orig_linear.weight.data = torch.randint(
+        0, 256, orig_linear.weight.shape, dtype=torch.uint8
+    )
+    orig_linear.weight_scale = nn.Parameter(
+        torch.rand(out_features, 2, dtype=torch.float32) * 0.1 + 0.01,
+        requires_grad=False,
+    )
+    orig_linear.input_activation_scale.data = torch.tensor(
+        0.1, dtype=torch.float32
+    )
+    orig_linear.output_activation_scale.data = torch.tensor(
+        0.2, dtype=torch.float32
+    )
+
+    ref_linear = lrt_gemma_quant.LiteRTQuantizedLinear(
+        copy.deepcopy(orig_linear)
+    ).eval()
+    x = torch.randn((2, in_features), dtype=torch.float32)
+    with torch.no_grad():
+      expected = ref_linear(x).detach().numpy()
+
+    ckpt = orig_linear.state_dict()
+    with weights_loader_lib.init_params_on_meta():
+      meta_orig = hf_gemma_quant.QuantizedLinear(
+          in_features=in_features, out_features=out_features, num_bits=4
+      ).eval()
+      meta_orig.weight_scale = nn.Parameter(
+          torch.empty(out_features, 2, dtype=torch.float32),
+          requires_grad=False,
+      )
+    quantization_layer.load_quant_scales_(meta_orig, ckpt.__getitem__)
+    meta_linear = lrt_gemma_quant.LiteRTQuantizedLinear(meta_orig).eval()
+    self.assertEqual(meta_linear.weight.device.type, "meta")
+
+    with weights_loader_lib.prepare_for_export(
+        ckpt.__getitem__, meta_linear
+    ) as loader:
+      edge_model = litert_torch.convert(
+          meta_linear,
+          (x.to("meta"),),
+          use_v2=True,
+          weights_loader=loader,
+      )
+    actual = edge_model(x)
+    np.testing.assert_allclose(actual, expected, rtol=5e-2, atol=5e-2)
 
 
 if __name__ == "__main__":
