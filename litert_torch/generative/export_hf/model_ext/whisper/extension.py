@@ -19,6 +19,7 @@ patches (`whisper/patch.py`) while using the default ASR encode + decode
 exportables in `model_ext/exportables.py`.
 """
 
+import dataclasses
 from litert_torch.generative.export_hf.model_ext import extension as extension_lib
 # Registers whisper patches.
 from litert_torch.generative.export_hf.model_ext.whisper import patch as _
@@ -41,6 +42,13 @@ class WhisperExtension(extension_lib.ModelExtension):
             'input_sec': 30.0,
         },
     )
+
+  def update_export_config(self, export_config, model_config):
+    """Enables stateful decoding with recurrent KV cache by default."""
+    del model_config
+    if export_config.stateful_after is None or export_config.stateful_after < 0:
+      return dataclasses.replace(export_config, stateful_after=1)
+    return export_config
 
   def get_speech_model_cls(self, model_type):
     """See base class."""
