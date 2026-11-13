@@ -38,6 +38,7 @@ from litert_torch.generative.export_hf.model_ext.parakeet import extension as pa
 from litert_torch.generative.export_hf.model_ext.qwen3 import extension as qwen3_ext
 from litert_torch.generative.export_hf.model_ext.qwen3_5 import extension as qwen3_5_ext
 from litert_torch.generative.export_hf.model_ext.qwen3_tts import extension as qwen3_tts_ext
+from litert_torch.generative.export_hf.model_ext.qwen_omni import extension as qwen_omni_ext
 from litert_torch.generative.export_hf.model_ext.whisper import extension as whisper_ext
 
 BonsaiFlux2Extension = bonsai_flux2_ext.BonsaiFlux2Extension
@@ -59,4 +60,5 @@ Qwen3AsrExtension = qwen3_ext.Qwen3AsrExtension
 Qwen3Extension = qwen3_ext.Qwen3Extension
 Qwen3TtsExtension = qwen3_tts_ext.Qwen3TtsExtension
 Qwen3_5Extension = qwen3_5_ext.Qwen3_5Extension
+QwenOmniExtension = qwen_omni_ext.QwenOmniExtension
 WhisperExtension = whisper_ext.WhisperExtension
