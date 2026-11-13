@@ -467,6 +467,8 @@ def compile_litertlm(
       toml_data = tomllib.loads(f.read())
 
     sections_to_clear_constraint: list[str] = []
+    found_model_types: list[str] = []
+    num_compiled = 0
 
     if 'section' in toml_data:
       for section in toml_data['section']:
@@ -519,6 +521,7 @@ def compile_litertlm(
             )
         elif section.get('section_type') == 'TFLiteModel':
           model_type = section.get('model_type')
+          found_model_types.append(model_type)
           relative_data_path = section.get('data_path')
           model_path = temp_dir_path / relative_data_path
 
@@ -727,6 +730,7 @@ def compile_litertlm(
                   **kwargs,
               )
               os.replace(compiled_model_path, model_path)
+              num_compiled += 1
               logging.info('Successfully compiled %s', model_type)
             except Exception as e:
               if model_path.exists():
@@ -739,6 +743,16 @@ def compile_litertlm(
                 logging.error('Model path %s does not exist!', model_path)
               logging.error('Failed to compile %s: %s', model_type, e)
               raise
+
+    if num_compiled == 0:
+      logging.warning(
+          'No model was compiled for backend %s; the output package will be'
+          ' uncompiled. Model types in the package: %s. Compile config keys:'
+          ' %s.',
+          backend,
+          found_model_types,
+          sorted(configs),
+      )
 
     logging.info('Repacking to %s', output_litertlm)
     output_dir = os.path.dirname(output_litertlm)
