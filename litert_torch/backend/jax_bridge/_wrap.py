@@ -292,11 +292,15 @@ def wrap(jaxfn: Callable[Any, Any], ir_input_names: list[str] = None):
           ir.RankedTensorType.get(result.type.shape, target_elty), result
       )
 
-    if len(results) == 1:
+    # Multi-output ops (e.g. 1-element `aten.split_with_sizes`) store a
+    # sequence in `out_avals` even when `len(results) == 1`; check `.dtype`
+    # rather than `isinstance(..., tuple)` since `TensorMetadata` is a
+    # `NamedTuple`.
+    if len(results) == 1 and hasattr(out_avals, "dtype"):
       return sanitize_result_elty(results[0], out_avals)
     return [
         sanitize_result_elty(result, aval)
-        for result, aval in zip(results, out_avals)
+        for result, aval in zip(results, out_avals, strict=True)
     ]
 
   return wrapped
