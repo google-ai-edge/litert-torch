@@ -16,6 +16,7 @@
 
 import contextlib
 from typing import Any
+from litert_torch.generative.export_hf.core import fused_linear
 from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope as qkv_norm_rope_composite
 from litert_torch.generative.export_hf.experimental.composites import rope as rope_composite
 from litert_torch.generative.export_hf.experimental.composites import swiglu as swiglu_composite
@@ -79,18 +80,14 @@ class FusedQwen3_5MLP(torch.nn.Module):
     self.down_proj = original_mlp.down_proj
     self.use_swiglu_composite = use_swiglu_composite
 
-    gate_w = original_mlp.gate_proj.weight.data
-    up_w = original_mlp.up_proj.weight.data
-    fused_weight = torch.cat([gate_w, up_w], dim=0)
-
-    self.gate_up_proj = torch.nn.Linear(
-        self.hidden_size,
-        2 * self.intermediate_size,
-        bias=False,
-        device=fused_weight.device,
-        dtype=fused_weight.dtype,
+    self.gate_up_proj = fused_linear.fuse_linear_modules(
+        {
+            "gate_proj": original_mlp.gate_proj,
+            "up_proj": original_mlp.up_proj,
+        },
+        fused_name="gate_up_proj",
+        disable_flags=fused_linear.FUSE_GATE_UP_FLAGS,
     )
-    self.gate_up_proj.weight = torch.nn.Parameter(fused_weight)
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
     gate_up = self.gate_up_proj(x)
@@ -152,6 +149,17 @@ class FusedQwen3_5Attention(torch.nn.Module):
     self.qkv_only_size = self.q_only_size + self.k_size + self.v_size
 
     if self.fuse_qkv:
+      # The fused layout may reorder rows within each projection (see below),
+      # so only float projections are supported.
+      fused_linear.check_float_linears(
+          {
+              "q_proj": original_attn.q_proj,
+              "k_proj": original_attn.k_proj,
+              "v_proj": original_attn.v_proj,
+          },
+          fused_name="qkv_proj",
+          disable_flags=fused_linear.FUSE_QKV_FLAGS,
+      )
       has_bias = original_attn.q_proj.bias is not None
       total_out_dim = self.q_size + self.k_size + self.v_size
       perm: torch.Tensor | None = None

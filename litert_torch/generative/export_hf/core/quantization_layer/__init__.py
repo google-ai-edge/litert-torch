@@ -14,12 +14,72 @@
 # ==============================================================================
 """Quantization layer wrappers and checkpoint helpers for HuggingFace export."""
 
+from collections.abc import Callable, Mapping
+from typing import Any
+
 from litert_torch.generative.export_hf.core.quantization_layer import gemma_quant
 import torch
+
+WeightsLoader = gemma_quant.WeightsLoader
 
 _QUANT_PARAM_SUFFIXES: dict[str, tuple[str, ...]] = {
     "gemma": gemma_quant.QUANT_PARAM_SUFFIXES,
 }
+_EXPORT_QUANT_METHODS: dict[str, Callable[..., WeightsLoader]] = {}
+
+
+def register_export_quant_method(
+    quant_method: str,
+    prepare_for_export: Callable[..., WeightsLoader],
+    param_suffixes: tuple[str, ...] = (),
+) -> None:
+  """Registers a pre-quantized checkpoint `quant_method` for Converter V2 export."""
+  _EXPORT_QUANT_METHODS[quant_method] = prepare_for_export
+  if param_suffixes:
+    _QUANT_PARAM_SUFFIXES[quant_method] = tuple(param_suffixes)
+
+
+def _quant_config_to_dict(quantization_config: Any) -> dict[str, Any] | None:
+  """Converts a `PretrainedConfig.quantization_config` to a plain dict."""
+  if not quantization_config:
+    return None
+  if isinstance(quantization_config, Mapping):
+    return dict(quantization_config)
+  to_dict = getattr(quantization_config, "to_dict", None)
+  if callable(to_dict):
+    return dict(to_dict())
+  return None
+
+
+def is_supported_quantization_config(quantization_config: Any) -> bool:
+  """Returns whether `quantization_config` is supported by `export_hf`."""
+  cfg = _quant_config_to_dict(quantization_config)
+  if not cfg:
+    return False
+  quant_method = cfg.get("quant_method")
+  return isinstance(quant_method, str) and quant_method in _EXPORT_QUANT_METHODS
+
+
+def prepare_quantized_model_for_export(
+    model: torch.nn.Module,
+    quantization_config: Any,
+    weights_loader: WeightsLoader,
+) -> WeightsLoader:
+  """Prepares a meta-device model with `quantization_config` for V2 export."""
+  cfg = _quant_config_to_dict(quantization_config)
+  if not cfg:
+    raise ValueError("Missing quantization_config.")
+  quant_method = cfg.get("quant_method")
+  prepare_fn = (
+      _EXPORT_QUANT_METHODS.get(quant_method)
+      if isinstance(quant_method, str)
+      else None
+  )
+  if prepare_fn is None:
+    raise NotImplementedError(
+        f"Quantization method {quant_method!r} is not supported yet."
+    )
+  return prepare_fn(model, cfg, weights_loader)
 
 
 def get_quant_param_suffixes(
@@ -33,7 +93,7 @@ def get_quant_param_suffixes(
 
 def load_quant_scales_(
     model: torch.nn.Module,
-    weights_loader: gemma_quant.WeightsLoader,
+    weights_loader: WeightsLoader,
     quant_method: str | None = "gemma",
 ) -> torch.nn.Module:
   """Loads quantization scale/metadata parameters for `quant_method` onto CPU."""
