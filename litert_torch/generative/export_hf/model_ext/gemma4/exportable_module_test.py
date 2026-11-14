@@ -14,6 +14,7 @@
 # ==============================================================================
 """Tests for Gemma 4 exportable modules, extension hooks, and attention fixes."""
 
+import copy
 import os
 from unittest import mock
 
@@ -21,6 +22,7 @@ from absl.testing import parameterized
 from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module_config
 from litert_torch.generative.export_hf.core import weights_loader
+from litert_torch.generative.export_hf.core.external_rope import exportable_module as external_rope_exportable
 from litert_torch.generative.export_hf.core.external_rope import preprocess_model as external_rope_preprocess_model
 from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope
 import litert_torch.generative.export_hf.model_ext as _
@@ -100,6 +102,41 @@ def _make_small_multimodal_config(
   )
   cfg._attn_implementation = text_cfg._attn_implementation
   return cfg
+
+
+def _make_reference_and_patched_models(
+    final_logit_softcapping: float | None,
+) -> tuple[
+    modeling_gemma4.Gemma4ForConditionalGeneration,
+    modeling_gemma4.Gemma4ForConditionalGeneration,
+]:
+  """Returns an HF reference model and a patched model with equal weights."""
+  cfg = _make_small_multimodal_config(
+      final_logit_softcapping=final_logit_softcapping,
+      attn_implementation="eager",
+  )
+  torch.manual_seed(0)
+  reference_model = modeling_gemma4.Gemma4ForConditionalGeneration(cfg).eval()
+  with torch.no_grad():
+    # Amplify lm_head so raw pre-cap logits exceed the cap.
+    reference_model.lm_head.weight.mul_(200.0)
+  with gemma4_patch.gemma4_litert_patch():
+    model = modeling_gemma4.Gemma4ForConditionalGeneration(
+        copy.deepcopy(cfg)
+    ).eval()
+  model.load_state_dict(reference_model.state_dict())
+  return reference_model, model
+
+
+def _get_external_embeddings(
+    model: modeling_gemma4.Gemma4ForConditionalGeneration,
+    tokens: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+  language_model = gemma4_exportable.get_language_model(model)
+  return {
+      "embeddings": language_model.embed_tokens(tokens),
+      "per_layer_embeddings": language_model.get_per_layer_inputs(tokens, None),
+  }
 
 
 class Gemma4ExportableModuleTest(parameterized.TestCase):
@@ -255,6 +292,99 @@ class Gemma4ExportableModuleTest(parameterized.TestCase):
     # Without softcapping, amplified lm_head weights produce > 40 magnitude.
     self.assertLessEqual(logits.abs().max().item(), 30.0 + 1e-4)
     self.assertGreater(logits.abs().max().item(), 25.0)
+
+  # A cap other than the 30.0 of Gemma 4 checkpoints checks that the cap is read
+  # from the config.
+  @parameterized.named_parameters(
+      ("without_softcap", None),
+      ("with_softcap", 20.0),
+  )
+  def test_generate_logits_match_hf(
+      self, final_logit_softcapping: float | None
+  ):
+    reference_model, model = _make_reference_and_patched_models(
+        final_logit_softcapping
+    )
+    model.set_attn_implementation("lrt_transposed_attention")
+    export_cfg = exportable_module_config.ExportableModuleConfig(
+        model="dummy",
+        externalize_embedder=True,
+        cache_length=32,
+    )
+    gen_mod = (
+        gemma4_exportable.LiteRTExportableModuleForDecoderOnlyLMGenerateExternalEmbedder(
+            model, export_cfg
+        ).eval()
+    )
+    decode_inputs, _ = gen_mod.get_sample_inputs(
+        model.config.get_text_config()
+    )["decode"]
+
+    tokens = torch.tensor([[5]])
+    # The first token is decoded into an empty cache, so only cache position 0
+    # is visible.
+    mask = torch.full((1, 1, 1, 32), float("-inf"))
+    mask[..., 0] = 0
+    with torch.no_grad():
+      decode_inputs |= _get_external_embeddings(model, tokens)
+      decode_inputs["input_pos"] = torch.tensor([0], dtype=torch.int32)
+      decode_inputs["mask"] = mask
+      with gemma4_patch.patch_gemma4_model(model, export_cfg):
+        logits = gen_mod(**decode_inputs)["logits"]
+      expected_logits = reference_model(input_ids=tokens).logits
+
+    torch.testing.assert_close(logits, expected_logits)
+
+  @parameterized.named_parameters(
+      ("without_softcap", None),
+      ("with_softcap", 20.0),
+  )
+  def test_split_cache_generate_logits_match_hf(
+      self, final_logit_softcapping: float | None
+  ):
+    reference_model, model = _make_reference_and_patched_models(
+        final_logit_softcapping
+    )
+    model = external_rope_preprocess_model.inject_rotary_position_embedding(
+        model
+    )
+    model.set_attn_implementation("lrt_split_cache_attention")
+    export_cfg = exportable_module_config.ExportableModuleConfig(
+        model="dummy",
+        split_cache=True,
+        cache_length=32,
+    )
+    gen_mod = (
+        gemma4_split_cache.LiteRTSplitCacheExportableModuleForDecoderOnlyLMGenerate(
+            model, export_cfg
+        ).eval()
+    )
+    decode_inputs, _ = gen_mod.get_sample_inputs(
+        model.config.get_text_config()
+    )["decode"]
+
+    tokens = torch.tensor([[5]])
+    # The split-cache mask covers the cache followed by the current slice. The
+    # cache is empty, so only the slice is visible.
+    mask = torch.full((1, 1, 1, 32 + 1), float("-inf"))
+    mask[..., -1] = 0
+    with torch.no_grad():
+      pos_emb = external_rope_exportable.RoPEEmbedder(model)(
+          torch.tensor([0], dtype=torch.int32)
+      )
+      decode_inputs |= _get_external_embeddings(model, tokens)
+      decode_inputs["pos_emb"] = {
+          "cos": pos_emb["pos_emb_cos"],
+          "sin": pos_emb["pos_emb_sin"],
+          "local_cos": pos_emb["pos_emb_local_cos"],
+          "local_sin": pos_emb["pos_emb_local_sin"],
+      }
+      decode_inputs["mask"] = {"global": mask, "local": mask}
+      with gemma4_patch.patch_gemma4_model(model, export_cfg):
+        logits = gen_mod(**decode_inputs)["logits"]
+      expected_logits = reference_model(input_ids=tokens).logits
+
+    torch.testing.assert_close(logits, expected_logits)
 
   @parameterized.named_parameters(
       ("experimental_fp16", True, None, torch.float16),

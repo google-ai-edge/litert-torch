@@ -17,6 +17,7 @@
 from typing import Any
 
 from litert_torch.generative.export_hf.core import exportable_module as base_exportable_module
+from litert_torch.generative.export_hf.model_ext.gemma4 import exportable_module as gemma4_exportable_module
 import torch
 
 
@@ -177,7 +178,12 @@ class LiteRTExportableModuleForDecoderOnlyLMGenerateExternalEmbedder(
     inputs |= self.attention_kwargs()
     output = get_language_model(self.model)(**inputs)
     hidden_states = output.last_hidden_state
-    logits = self.model.lm_head(hidden_states).to(torch.float32)
+    logits = self.model.lm_head(hidden_states)
+    logits = gemma4_exportable_module.apply_final_logit_softcapping(
+        logits, text_config
+    )
+    # Logits are always emitted in fp32: the runtime samplers expect fp32.
+    logits = logits.to(torch.float32)
     kv_cache = output.past_key_values
     kv_cache = kv_cache.remove_dummy_cache_layers(text_config)
     return {"kv_cache": kv_cache, "logits": logits}
