@@ -819,6 +819,21 @@ class ExportPlanAndPresetResolutionTest(parameterized.TestCase):
           "image_text_to_text",
           {
               "export_vision_encoder": True,
+              "export_audio_encoder": False,
+              "use_jinja_template": True,
+              "litert_lm_llm_metadata_override": "gemma4_12b",
+          },
+      ),
+      (
+          "gemma4_unified_audio",
+          {
+              "model_type": "gemma4_unified",
+              "audio_config": {"model_type": "gemma4_unified_audio"},
+          },
+          "multimodal_lm",
+          {
+              "export_vision_encoder": True,
+              "export_audio_encoder": True,
               "use_jinja_template": True,
               "litert_lm_llm_metadata_override": "gemma4_12b",
           },
