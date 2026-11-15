@@ -473,6 +473,55 @@ class Qwen3_5PatchTest(parameterized.TestCase):
           actual_logits, expected_logits, rtol=1e-4, atol=1e-4
       )
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="extra_kwargs_overrides_config",
+          config_kwargs=dict(
+              use_short_conv_composite=True,
+              extra_kwargs={"use_short_conv_composite": False},
+          ),
+          expected=False,
+      ),
+      dict(
+          testcase_name="config_false",
+          config_kwargs=dict(use_short_conv_composite=False),
+          expected=False,
+      ),
+      dict(
+          testcase_name="config_true",
+          config_kwargs=dict(use_short_conv_composite=True),
+          expected=True,
+      ),
+      dict(
+          testcase_name="unset_without_gpu_composites",
+          config_kwargs=dict(),
+          expected=False,
+      ),
+      dict(
+          testcase_name="unset_with_gpu_composites",
+          config_kwargs=dict(apply_gpu_composites=True),
+          expected=True,
+      ),
+  )
+  def test_patch_qwen3_5_model_short_conv_composite_flag(
+      self, config_kwargs: dict[str, Any], expected: bool
+  ):
+    cfg = self._make_config()
+    model = modeling_qwen3_5_static.Qwen3_5StaticForCausalLM(cfg).eval()
+    export_config = exportable_module_config.ExportableModuleConfig(
+        model="dummy", **config_kwargs
+    )
+
+    with patches_lib.patch_model(model, "qwen3_5", export_config):
+      linear_attn_layers = [
+          layer.linear_attn
+          for layer in model.model.layers
+          if hasattr(layer, "linear_attn")
+      ]
+      self.assertNotEmpty(linear_attn_layers)
+      for linear_attn in linear_attn_layers:
+        self.assertEqual(linear_attn.use_short_conv_composite, expected)
+
   def test_qkv_norm_rope_composite_lowering(self):
     torch.manual_seed(0)
     cfg = self._make_config(partial_rotary_factor=0.25)
