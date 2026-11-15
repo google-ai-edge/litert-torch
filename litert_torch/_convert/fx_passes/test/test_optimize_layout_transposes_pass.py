@@ -184,6 +184,45 @@ class TestOptimizeLayoutTransposesPass(googletest.TestCase):
         model, exported_program.module(), forward_args()
     )
 
+  def _conv_then(self, func):
+
+    class ConvThen(torch.nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(3, 4, 1)
+
+      def forward(self, x):
+        return func(self.conv(x))
+
+    return ConvThen().eval()
+
+  def test_sort_default_dim(self):
+    """sort without a dim sorts the last NCHW dim (W) on an NHWC input."""
+    model = self._conv_then(torch.sort)
+    forward_args = lambda: (torch.rand(1, 3, 9, 11),)
+    exported_program = export_with_pass(model, forward_args())
+    self.assert_outputs_allclose(
+        model, exported_program.module(), forward_args()
+    )
+
+  def test_topk_default_dim(self):
+    """topk without a dim selects along the last NCHW dim (W)."""
+    model = self._conv_then(lambda x: torch.topk(x, 3))
+    forward_args = lambda: (torch.rand(1, 3, 9, 11),)
+    exported_program = export_with_pass(model, forward_args())
+    self.assert_outputs_allclose(
+        model, exported_program.module(), forward_args()
+    )
+
+  def test_topk_explicit_dim(self):
+    model = self._conv_then(lambda x: torch.topk(x, 2, dim=1))
+    forward_args = lambda: (torch.rand(1, 3, 9, 11),)
+    exported_program = export_with_pass(model, forward_args())
+    self.assert_outputs_allclose(
+        model, exported_program.module(), forward_args()
+    )
+
 
 if __name__ == "__main__":
   googletest.main()
