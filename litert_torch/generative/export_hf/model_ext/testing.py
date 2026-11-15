@@ -45,6 +45,11 @@ Provides:
      `use_v2=True`) resolves every patched parameter with the extension's
      `checkpoint_key_prefixes`, `fused_weight_specs`, and
      `resolve_checkpoint_tensor`.
+   - `assert_tiny_v2_export`: Runs full `export.export(..., use_v2=True,
+     delete_in_memory_params=True)` on a tiny synthetic checkpoint, validates
+     generated `.tflite` flatbuffer signatures and static/rank constraints via
+     `schema_fb`, and executes standard-op `.tflite` submodels via the LiteRT
+     interpreter.
 
 See `model_ext/extension_test.py` and `experimental/users/weiyiw/kanana2_ext`
 for concrete usage examples.
@@ -55,11 +60,14 @@ import contextlib
 import copy
 import dataclasses
 import gc
+import json
 import os
 import tempfile
 import types
 from typing import Any, cast
 
+from litert_torch._convert import converter_v2
+from litert_torch.generative.export_hf import export as export_pkg
 from litert_torch.generative.export_hf.core import attention as _
 from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.core import exportable_module_config
@@ -73,12 +81,15 @@ from litert_torch.generative.export_hf.core.split_cache import exportable_module
 from litert_torch.generative.export_hf.model_ext import exportables as model_ext_exportables
 from litert_torch.generative.export_hf.model_ext import extension
 from litert_torch.generative.export_hf.model_ext import patches as model_ext_patches
+import numpy as np
 import safetensors.torch
 import torch
 import torch.utils._pytree as pytree
 import transformers
 
 from litert_lm_builder.runtime.proto import llm_metadata_pb2
+from ai_edge_litert import interpreter  # pylint: disable=g-direct-tensorflow-import
+from ai_edge_litert import schema_py_generated as schema_fb
 
 
 @contextlib.contextmanager
@@ -399,11 +410,26 @@ def assert_v2_weights_resolvable(
         model_ext_patches.patch_model(model, model_type, export_config)
     )
 
-    resolved, failures = [], []
-    for name, param in model.named_parameters(remove_duplicate=False):
+    custom_exportables = (
+        resolved_ext.get_prefill_decode_exportables(model_config, export_config)
+        if resolved_ext is not None and model_config is not None
+        else None
+    )
+    if custom_exportables is not None:
+      exportable_mod = custom_exportables[0](model, export_config)
+      named_params = list(
+          exportable_mod.named_parameters(remove_duplicate=False)
+      )
+    else:
       # Converter V2 names parameters relative to the exportable wrapper, which
       # holds the model under `model`.
-      v2_name = f'model.{name}'
+      named_params = [
+          (f'model.{name}', param)
+          for name, param in model.named_parameters(remove_duplicate=False)
+      ]
+
+    resolved, failures = [], []
+    for v2_name, param in named_params:
       try:
         tensor = loader(v2_name)
       except KeyError as e:
@@ -639,6 +665,263 @@ def assert_tiny_prefill_decode_torch_export(
   return exported_programs
 
 
+def _write_minimal_tokenizer(checkpoint_dir: str, vocab_size: int = 64) -> None:
+  """Writes a minimal offline `PreTrainedTokenizerFast` into `checkpoint_dir`."""
+  clamped_vocab_size = max(int(vocab_size), 4)
+  vocab = {'<pad>': 0, '<bos>': 1, '<eos>': 2, '<unk>': 3}
+  for idx in range(4, clamped_vocab_size):
+    vocab[f'tok_{idx}'] = idx
+  tokenizer_json = {
+      'version': '1.0',
+      'truncation': None,
+      'padding': None,
+      'added_tokens': [],
+      'normalizer': None,
+      'pre_tokenizer': {'type': 'Whitespace'},
+      'post_processor': None,
+      'decoder': None,
+      'model': {
+          'type': 'WordLevel',
+          'vocab': vocab,
+          'unk_token': '<unk>',
+      },
+  }
+  tokenizer_cfg = {
+      'tokenizer_class': 'PreTrainedTokenizerFast',
+      'pad_token': '<pad>',
+      'bos_token': '<bos>',
+      'eos_token': '<eos>',
+      'unk_token': '<unk>',
+  }
+  with open(os.path.join(checkpoint_dir, 'tokenizer.json'), 'w') as f:
+    json.dump(tokenizer_json, f)
+  with open(os.path.join(checkpoint_dir, 'tokenizer_config.json'), 'w') as f:
+    json.dump(tokenizer_cfg, f)
+
+
+def _decode_fb_str(value: bytes | str | None) -> str:
+  """Normalizes a FlatBuffer string or bytes attribute to `str`."""
+  if value is None:
+    return ''
+  if isinstance(value, bytes):
+    return value.decode('utf-8')
+  return str(value)
+
+
+def _model_has_custom_ops(model_t: Any) -> bool:
+  """Returns True if `model_t` declares any `CUSTOM` operator code."""
+  op_codes = (
+      [] if model_t.operatorCodes is None else list(model_t.operatorCodes)
+  )
+  for op_code in op_codes:
+    builtin = max(
+        int(getattr(op_code, 'builtinCode', 0) or 0),
+        int(getattr(op_code, 'deprecatedBuiltinCode', 0) or 0),
+    )
+    if builtin == schema_fb.BuiltinOperator.CUSTOM or getattr(
+        op_code, 'customCode', None
+    ):
+      return True
+  return False
+
+
+def _validate_tflite_signatures(
+    filename: str,
+    model_t: Any,
+    *,
+    check_static_shapes: bool,
+    max_tensor_rank: int | None,
+) -> list[str]:
+  """Validates signature presence, static shapes, and tensor rank limits."""
+  sig_defs = (
+      [] if model_t.signatureDefs is None else list(model_t.signatureDefs)
+  )
+  if not sig_defs:
+    raise AssertionError(f'{filename} contains no SignatureDefs.')
+  sig_keys: list[str] = []
+  for sig_def in sig_defs:
+    sig_key = _decode_fb_str(sig_def.signatureKey)
+    sig_keys.append(sig_key)
+    subgraph = model_t.subgraphs[sig_def.subgraphIndex]
+    inputs = [] if sig_def.inputs is None else list(sig_def.inputs)
+    outputs = [] if sig_def.outputs is None else list(sig_def.outputs)
+    tensor_maps = inputs + outputs
+    for tensor_map in tensor_maps:
+      tensor_name = _decode_fb_str(tensor_map.name)
+      tensor = subgraph.tensors[tensor_map.tensorIndex]
+      shape = (
+          [] if tensor.shape is None else [int(dim) for dim in tensor.shape]
+      )
+      shape_sig = (
+          []
+          if tensor.shapeSignature is None
+          else [int(dim) for dim in tensor.shapeSignature]
+      )
+      if check_static_shapes:
+        if any(dim <= 0 for dim in shape) or any(dim < 0 for dim in shape_sig):
+          raise AssertionError(
+              f'{filename} signature {sig_key!r} tensor {tensor_name!r} has'
+              f' dynamic/non-positive shape={shape},'
+              f' shapeSignature={shape_sig}.'
+          )
+      if max_tensor_rank is not None and len(shape) > max_tensor_rank:
+        raise AssertionError(
+            f'{filename} signature {sig_key!r} tensor {tensor_name!r} has rank'
+            f' {len(shape)} > max_tensor_rank={max_tensor_rank}'
+            f' (shape={shape}).'
+        )
+  return sorted(sig_keys)
+
+
+def _execute_tflite_all_signatures(tflite_path: str) -> None:
+  """Runs dummy zero-input inference on every signature of `tflite_path`."""
+  interp = interpreter.Interpreter(
+      model_path=tflite_path,
+      experimental_op_resolver_type=(
+          interpreter.OpResolverType.BUILTIN_WITHOUT_DEFAULT_DELEGATES
+      ),
+  )
+  interp.allocate_tensors()
+  for sig_key in interp.get_signature_list():
+    runner = interp.get_signature_runner(sig_key)
+    input_details = runner.get_input_details()
+    feed: dict[str, np.ndarray] = {}
+    for input_name, detail in input_details.items():
+      raw_shape = detail.get('shape_signature', detail['shape'])
+      concrete_shape = [max(int(dim), 1) for dim in raw_shape]
+      feed[input_name] = np.zeros(concrete_shape, dtype=detail['dtype'])
+    outputs = runner(**feed)
+    if not outputs:
+      raise AssertionError(
+          f'{os.path.basename(tflite_path)} signature {sig_key!r} returned no'
+          ' outputs.'
+      )
+
+
+def assert_tiny_v2_export(
+    ext: extension.ModelExtension,
+    model: torch.nn.Module,
+    *,
+    task: str = 'auto',
+    target: str = 'cpu_gpu',
+    prefill_lengths: Sequence[int] = (8,),
+    cache_length: int = 16,
+    export_kwargs: Mapping[str, Any] | None = None,
+    output_dir: str | None = None,
+    check_static_shapes: bool | None = None,
+    max_tensor_rank: int | None = None,
+    execute_standard_tflites: bool = True,
+) -> dict[str, list[str]]:
+  """Runs end-to-end Converter V2 `export.export` on a tiny synthetic model.
+
+  Saves `model` and a minimal fast tokenizer into a temporary directory, runs
+  `export.export(..., use_v2=True, delete_in_memory_params=True)` through the
+  full MLIR -> TFLite flatbuffer conversion pipeline, inspects every emitted
+  `.tflite` flatbuffer for valid signatures / shapes, and executes all
+  standard-op `.tflite` submodels (such as `embedder.tflite`,
+  `per_layer_embedder.tflite`, and `auxiliary.tflite`) via the LiteRT Python
+  interpreter.
+
+  Args:
+    ext: `ModelExtension` instance under test.
+    model: Tiny unpatched `PreTrainedModel` (e.g. 2-3 layers, `hidden_size=32`).
+    task: Task string forwarded to `export.export` (defaults to `'auto'`).
+    target: Target string forwarded to `export.export` (e.g. `'cpu_gpu'`,
+      `'npu'`, or `'npu:qualcomm'`).
+    prefill_lengths: Sequence of prefill bucket lengths for fast export.
+    cache_length: KV-cache length for fast export.
+    export_kwargs: Optional extra keyword arguments merged into `export.export`.
+    output_dir: Optional caller-managed output directory; if `None`, uses a
+      cleaned-up temporary directory.
+    check_static_shapes: Whether to assert all signature input/output tensors
+      have strictly positive static dimensions. When `None`, defaults to `True`
+      for `'npu*'` targets or when `split_cache=True` in `export_kwargs`.
+    max_tensor_rank: If provided, asserts every signature input/output tensor
+      has rank `<= max_tensor_rank`.
+    execute_standard_tflites: When `True`, executes every signature of any
+      emitted `.tflite` without `CUSTOM` ops in the LiteRT interpreter.
+
+  Returns:
+    Dictionary mapping each generated `.tflite` filename (e.g. `'model.tflite'`,
+    `'embedder.tflite'`) to its sorted list of signature keys.
+
+  Raises:
+    RuntimeError: If Converter V2 is not supported in the current environment.
+    AssertionError: If expected `.tflite` outputs are missing, flatbuffer
+      signature/shape checks fail, or interpreter execution fails.
+  """
+  if not converter_v2.is_supported():
+    raise RuntimeError(
+        'Converter V2 is not supported in the current TensorFlow environment.'
+    )
+
+  model_cfg = getattr(model, 'config', None)
+  text_cfg = getattr(model_cfg, 'text_config', model_cfg)
+  vocab_size = int(getattr(text_cfg, 'vocab_size', 64) or 64)
+  extra_opts = dict(export_kwargs or {})
+  effective_check_static = (
+      str(target).startswith('npu') or bool(extra_opts.get('split_cache'))
+      if check_static_shapes is None
+      else check_static_shapes
+  )
+
+  with contextlib.ExitStack() as stack:
+    ckpt_dir = stack.enter_context(tempfile.TemporaryDirectory())
+    resolved_out_dir = (
+        output_dir
+        if output_dir is not None
+        else stack.enter_context(tempfile.TemporaryDirectory())
+    )
+    _save_checkpoint(model, ckpt_dir)
+    _write_minimal_tokenizer(ckpt_dir, vocab_size=vocab_size)
+
+    call_kwargs: dict[str, Any] = {
+        'model': ckpt_dir,
+        'output_dir': resolved_out_dir,
+        'task': task,
+        'target': target,
+        'keep_temporary_files': True,
+        'bundle_litert_lm': False,
+        'use_v2': True,
+        'delete_in_memory_params': True,
+        'prefill_lengths': list(prefill_lengths),
+        'cache_length': cache_length,
+        'litert_lm_llm_metadata_override': 'none',
+        'jinja_chat_template_override': None,
+        'model_extension': ext,
+    }
+    call_kwargs.update(extra_opts)
+    export_pkg.export(**call_kwargs)
+
+    tflite_files = sorted(
+        f for f in os.listdir(resolved_out_dir) if f.endswith('.tflite')
+    )
+    if 'model.tflite' not in tflite_files:
+      raise AssertionError(
+          f"Expected 'model.tflite' in {resolved_out_dir}, found:"
+          f' {os.listdir(resolved_out_dir)}'
+      )
+
+    signatures_by_file: dict[str, list[str]] = {}
+    for filename in tflite_files:
+      tflite_path = os.path.join(resolved_out_dir, filename)
+      if os.path.getsize(tflite_path) <= 0:
+        raise AssertionError(f'Generated {filename} is empty.')
+      with open(tflite_path, 'rb') as f:
+        raw_buf = f.read()
+      model_t = schema_fb.ModelT.InitFromPackedBuf(raw_buf, 0)
+      signatures_by_file[filename] = _validate_tflite_signatures(
+          filename,
+          model_t,
+          check_static_shapes=effective_check_static,
+          max_tensor_rank=max_tensor_rank,
+      )
+      if execute_standard_tflites and not _model_has_custom_ops(model_t):
+        _execute_tflite_all_signatures(tflite_path)
+
+    return signatures_by_file
+
+
 class ModelExtensionTestMixin:
   """Mixin that runs standard contract tests against a `ModelExtension`.
 
@@ -779,6 +1062,35 @@ class ModelExtensionTestMixin:
         export_config=export_config,
         checkpoint_dir=checkpoint_dir,
         check_values=check_values,
+    )
+
+  def assert_tiny_v2_export(
+      self,
+      model: torch.nn.Module | None = None,
+      *,
+      task: str = 'auto',
+      target: str = 'cpu_gpu',
+      prefill_lengths: Sequence[int] = (8,),
+      cache_length: int = 16,
+      export_kwargs: Mapping[str, Any] | None = None,
+      output_dir: str | None = None,
+      check_static_shapes: bool | None = None,
+      max_tensor_rank: int | None = None,
+      execute_standard_tflites: bool = True,
+  ) -> dict[str, list[str]]:
+    """Verifies end-to-end Converter V2 `.tflite` export on a tiny model."""
+    return assert_tiny_v2_export(
+        ext=self.get_extension(),
+        model=model if model is not None else self.get_sample_model(),
+        task=task,
+        target=target,
+        prefill_lengths=prefill_lengths,
+        cache_length=cache_length,
+        export_kwargs=export_kwargs,
+        output_dir=output_dir,
+        check_static_shapes=check_static_shapes,
+        max_tensor_rank=max_tensor_rank,
+        execute_standard_tflites=execute_standard_tflites,
     )
 
   def test_extension_instance_and_model_types_contract(self):

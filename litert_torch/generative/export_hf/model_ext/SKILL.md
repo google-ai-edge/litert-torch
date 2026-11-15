@@ -49,13 +49,37 @@ python -m litert_torch.generative.export_hf.model_ext.inspector \
 
 Subclass `extension.ModelExtension` (either in an out-of-tree `.py` file passed
 via `--extension_modules=/path/to/my_ext.py` or built-in under
-`model_ext/<arch>/extension.py`) and set `model_types = ('<model_type>',)`.
+`model_ext/<arch>/extension.py`) and set `model_types = ('<model_type>',)`:
+
+1. **Declare `get_export_defaults(self, config_dict, task=None,
+   target='cpu_gpu')`**:
+   - Enables one-call export via `export.export()` (and
+     `litert convert <hf_id> --target=<target>`).
+   - Branch on `is_npu = str(target or '').startswith('npu')` when setting
+     `quantization_recipe` (e.g. `'dynamic_wi8_afp32'` on NPU vs
+     `'dynamic_wi4b32_afp32'` on `cpu_gpu`) so extension defaults do not clobber
+     NPU target presets.
+   - Optionally attach model-specific metadata/template overrides in
+     `export_kwargs` (`'litert_lm_llm_metadata_override'`,
+     `'jinja_chat_template_override'`). Note that `litert_lm_builder`
+     automatically syncs `max_num_tokens` in `.pbtext` / `.pbtxt` / `.pb`
+     overrides with `export_config.llm_metadata_max_num_tokens_override or
+     export_config.cache_length`.
+2. **Configure `LlmMetadata` and `ExecutorMetadata` hooks if needed**:
+   - `metadata_builder.build_executor_metadata` automatically builds KV cache
+     and state buffer descriptors from `config.layer_types`
+     (`'full_attention'`, `'sliding_attention'`, `'linear_attention'`,
+     `'conv'`).
+   - If the model sets `config.sliding_window` without `config.layer_types`, set
+     `sliding_window_layers = 'all'` on your `ModelExtension`.
+   - If the model requires custom executor metadata, override
+     `get_executor_metadata_builder(self, model_config)`.
 
 ### Step 3: Fast Inner-Loop Verification (`<2s` on CPU)
 
 Before running a multi-minute full checkpoint export, verify your extension on a
 tiny model (2–3 layers, `vocab_size=256`, `dtype=torch.float32`) using
-`model_ext/testing.py`:
+`model_ext/testing.py` and `export.export(..., dry_run=True)`:
 
 1. **`testing.assert_patch_numerical_parity(ext, tiny_model, ...)`**: Verifies
    eager numerical parity before vs. during `patch_model` and asserts that all
@@ -68,9 +92,22 @@ tiny model (2–3 layers, `vocab_size=256`, `dtype=torch.float32`) using
    composite flags on, and verifies Converter V2's `HFCheckpointWeightsLoader`
    resolves every patched parameter (shape and value). Run this whenever your
    patches fuse, rename, or add parameters (see gotcha F).
+4. **`export.export(model, target='cpu_gpu', dry_run=True)`** (and
+   `target='npu:qualcomm'`): Verifies task detection and target-specific export
+   kwargs without loading model weights.
 
 ### Step 4: Full Export & `litert_lm` Verification
 
+* **Via `litert convert` (`export_hf.export`)**:
+  ```bash
+  litert convert /path/to/checkpoint \
+    --target=cpu_gpu \
+    --extension-modules=/path/to/my_extension.py \
+    --trust-remote-code \
+    -o "$HOME/export_hf_test_models/outputs/my_model"
+  ```
+  (Pass `--dry-run` first to inspect the resolved `ExportPlan`, or
+  `--target=npu:qualcomm` / `--target=npu:mediatek` for NPU split-cache export.)
 * **From source (`bazel run`)**:
   ```bash
   bazel run \
@@ -85,6 +122,26 @@ tiny model (2–3 layers, `vocab_size=256`, `dtype=torch.float32`) using
   `python -m litert_torch.generative.export_hf.export_main ...` (do **not** run
   `python -m litert_torch.generative.export_hf.export`, which has no `__main__`
   block).
+* **Run the exported file in LiteRT-LM, on CPU and on GPU.** The tiny tests and
+  a successful export do not catch the three errors below.
+  ```bash
+  litert-lm run "$HOME/export_hf_test_models/outputs/my_model/model.litertlm" \
+    --backend cpu --prompt "What is the capital of France?"
+  ```
+  Then run it again with `--backend gpu`.
+  * `Failed to create engine: INVALID_ARGUMENT: Pad token should only contain a
+    single token ID`: the packed SentencePiece `tokenizer.model` splits the
+    model's added special tokens. In `update_export_config`, set
+    `tokenizer_path_override` to the checkpoint's `tokenizer.json`, and pin the
+    pad and stop token ids in `build_llm_metadata`.
+  * `Failed to apply template: ... tried to use + operator on unsupported types
+    string and sequence`: LiteRT-LM passes `message["content"]` as a list of
+    parts. Point `jinja_chat_template_override` at a copy of the template that
+    accepts a string or a list of parts.
+  * `Failed to modify graph with delegate` with `Tensor dimensions must be less
+    than 5` (GPU only): the graph has a tensor of rank 5 or more, for example
+    from interleaved RoPE (`torch.stack((-x2, x1), dim=-1).flatten(-2)`). In
+    `patch_model`, swap it for a rank-4 form.
 
 ---
 

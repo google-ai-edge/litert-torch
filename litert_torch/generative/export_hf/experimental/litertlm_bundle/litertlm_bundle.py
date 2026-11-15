@@ -220,6 +220,7 @@ class LitertLmBundle:
       transformers_model_path: str | None = None,
       metadata: dict[str, Any] | None = None,
       llm_metadata_path: str | None = None,
+      executor_metadata_path: str | None = None,
   ) -> None:
     """Builds and packages model components into a .litertlm bundle file."""
     pack_litertlm(
@@ -232,6 +233,7 @@ class LitertLmBundle:
         transformers_model_path=transformers_model_path,
         metadata=metadata,
         llm_metadata_path=llm_metadata_path,
+        executor_metadata_path=executor_metadata_path,
     )
 
   @property
@@ -311,6 +313,7 @@ def pack_litertlm(
     transformers_model_path: str | None = None,
     metadata: dict[str, Any] | None = None,
     llm_metadata_path: str | None = None,
+    executor_metadata_path: str | None = None,
 ) -> None:
   """Builds and packages model components into a .litertlm bundle file."""
   builder = litertlm_builder.LitertLmFileBuilder()
@@ -368,6 +371,9 @@ def pack_litertlm(
 
   if llm_metadata_path and os.path.exists(llm_metadata_path):
     builder.add_llm_metadata(llm_metadata_path=llm_metadata_path)
+
+  if executor_metadata_path and os.path.exists(executor_metadata_path):
+    builder.add_executor_metadata(executor_metadata_path=executor_metadata_path)
 
   out_dir = os.path.dirname(output_litertlm)
   if out_dir:

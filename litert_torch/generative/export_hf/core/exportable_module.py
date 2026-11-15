@@ -15,6 +15,7 @@
 """Exportable modules."""
 
 import abc
+import itertools
 
 from litert_torch.generative.export_hf.core import attention as _
 from litert_torch.generative.export_hf.core import cache as cache_lib
@@ -62,6 +63,17 @@ class ExportableModuleBase(torch.nn.Module, abc.ABC):
   @property
   def export_config(self) -> ExportableModuleConfig:
     return self._export_config
+
+  @property
+  def device(self) -> torch.device:
+    """Device of the module's parameters/buffers (`meta` for V2 export)."""
+    first_device = None
+    for t in itertools.chain(self.parameters(), self.buffers()):
+      if t.device.type == "meta":
+        return t.device
+      if first_device is None:
+        first_device = t.device
+    return first_device if first_device is not None else torch.empty(0).device
 
   def attention_kwargs(self):
     k_ts_idx = self.export_config.k_ts_idx
@@ -148,11 +160,6 @@ class LiteRTExportableModuleForDecoderOnlyLM(ExportableModuleBase):
     else:
       self.mtp_verifier_step = 0
     self.source_model_artifacts = source_model_artifacts
-
-  @property
-  def device(self) -> torch.device:
-    """Device of the wrapped model's parameters (`meta` for V2 export)."""
-    return next(self.model.parameters(), torch.empty(0)).device
 
   def _has_sliding_window(self, model_config) -> bool:
     """Returns whether `model_config` uses a sliding-window attention mask."""

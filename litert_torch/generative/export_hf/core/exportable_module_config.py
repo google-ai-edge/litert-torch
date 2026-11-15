@@ -108,6 +108,7 @@ _GPU_OPTIMIZATION_FLAGS = (
     "use_qkv_norm_rope_composite",
     "use_short_conv_composite",
     "use_sdpa_composite",
+    "use_sdpa_composite_for_vision",
     "use_bool_mask",
     "enable_gpu_dynamic_cache",
 )
@@ -136,6 +137,10 @@ class ExportableModuleConfig:
   """Config for exportable modules."""
 
   model: str
+  # Directory holding the `*.safetensors` shards when they live apart from the
+  # config / tokenizer files in `model` (e.g. remote storage streamed by
+  # `HFCheckpointWeightsLoader`). Defaults to `model`.
+  weights_dir: str | None = None
   output_dir: str | None = None
   task: ExportTask | str = ExportTask.TEXT_GENERATION
   keep_temporary_files: bool = False
@@ -174,7 +179,7 @@ class ExportableModuleConfig:
   # float16, and tells the runtime to compute activations in float16.
   experimental_use_fp16: bool = False
   export_vision_encoder: bool = True
-  export_audio_encoder: bool = True
+  export_audio_encoder: bool | None = None
   fuse_gate_up: bool | None = None
   fuse_qkv: bool | None = None
   use_rope_composite: bool | None = None
@@ -184,6 +189,12 @@ class ExportableModuleConfig:
   # Whether to emit the fused `odml.sdpa_transposed` composite in both prefill
   # and decode signatures.
   use_sdpa_composite: bool | None = None
+  # Whether the vision encoder emits the `odml.scaled_dot_product_attention`
+  # composite for its (non-autoregressive, bidirectional) attention, so GPU
+  # runtimes can use a fused (flash) attention kernel instead of materializing
+  # the [B, N, T, T] attention logits. Vision exportables opt in per model (see
+  # `core/attention.py:BIDIRECTIONAL_SDPA_ATTENTION`).
+  use_sdpa_composite_for_vision: bool | None = None
   # Master switch for GPU composite emission. Implied by use_sdpa_composite.
   apply_gpu_composites: bool = False
   # Use a boolean attention mask instead of materializing fp32 mask constants.
@@ -245,6 +256,12 @@ class ExportableModuleConfig:
   use_litert_lm_compiler: bool = False
   compile_configs: str | None = None
 
+  # NPU Executor configs
+  enable_neon_for_npu_greedy_sampling: bool | None = None
+  use_hw_masking_for_npu: bool | None = None
+  use_hw_cache_update_for_npu: bool | None = None
+  use_hw_ple_for_npu: bool | None = None
+
   # Calibration & Static Quantization settings
   calibration_dataset_dir: str | None = None
   calibration_dataset_format: str = "jsonl"
@@ -280,6 +297,9 @@ class ExportableModuleConfig:
   cache_length_dim: torch.export.Dim | None = None
   prefill_length_dim: torch.export.Dim | None = None
   externalize_rope: bool = False
+  _explicit_export_audio_encoder: bool | None = dataclasses.field(
+      default=None, repr=False
+  )
 
   def _normalize_sdpa_composite(self):
     """Normalizes `use_sdpa_composite` and resolves GPU optimization flags.
@@ -455,6 +475,8 @@ class ExportableModuleConfig:
           self.single_token_embedder = True
         self.export_audio_encoder = False
       case ExportTask.MULTIMODAL_LM:
+        if self.export_audio_encoder is None:
+          self.export_audio_encoder = True
         if self.export_vision_encoder:
           self.externalize_embedder = True
           self.single_token_embedder = True
@@ -463,11 +485,17 @@ class ExportableModuleConfig:
           self.single_token_embedder = True
       case ExportTask.AUTOMATIC_SPEECH_RECOGNITION:
         self.export_vision_encoder = False
+        if self.export_audio_encoder is None:
+          self.export_audio_encoder = False
+          if self._explicit_export_audio_encoder is None:
+            self._explicit_export_audio_encoder = False
+        elif self._explicit_export_audio_encoder is None:
+          self._explicit_export_audio_encoder = True
         self.split_cache = False
         self.externalize_rope = False
-        self.externalize_embedder = self.bundle_litert_lm
-        self.export_audio_encoder = self.bundle_litert_lm
-        self.single_token_embedder = self.bundle_litert_lm
+        if not self.export_audio_encoder:
+          self.externalize_embedder = False
+          self.single_token_embedder = False
       case ExportTask.TEXT_TO_SPEECH:
         self.export_vision_encoder = False
         self.export_audio_encoder = False
@@ -484,6 +512,8 @@ class ExportableModuleConfig:
         self.single_token_embedder = False
         self.externalize_rope = False
       case ExportTask.ANY_TO_ANY:
+        if self.export_audio_encoder is None:
+          self.export_audio_encoder = True
         self.split_cache = False
         self.externalize_embedder = True
         self.single_token_embedder = True

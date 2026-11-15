@@ -71,7 +71,11 @@ class FusedLfm2MLP(torch.nn.Module):
     fused_out_dim = fused_weight.shape[0]
 
     self.gate_up_proj = torch.nn.Linear(
-        hidden_size, fused_out_dim, bias=False
+        hidden_size,
+        fused_out_dim,
+        bias=False,
+        device=fused_weight.device,
+        dtype=fused_weight.dtype,
     )
     self.gate_up_proj.weight = torch.nn.Parameter(fused_weight)
 
@@ -143,7 +147,11 @@ class FusedLfm2Attention(torch.nn.Module):
 
       total_out_dim = self.q_size + self.k_size + self.v_size
       self.qkv_proj = torch.nn.Linear(
-          self.config.hidden_size, total_out_dim, bias=False
+          self.config.hidden_size,
+          total_out_dim,
+          bias=False,
+          device=fused_weight.device,
+          dtype=fused_weight.dtype,
       )
       self.qkv_proj.weight = torch.nn.Parameter(fused_weight)
     else:

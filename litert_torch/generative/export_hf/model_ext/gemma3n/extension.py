@@ -37,6 +37,32 @@ class Gemma3nExtension(extension_lib.ModelExtension):
 
   model_types = ('gemma3n',)
 
+  def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
+    """See base class."""
+    del config_dict
+    is_npu = str(target or '').startswith('npu')
+    # Gemma 3n always needs the external (per-layer) embedder.
+    if task == extension_lib.ExportTask.TEXT_GENERATION:
+      return extension_lib.ExportDefaults(
+          task=extension_lib.ExportTask.TEXT_GENERATION,
+          export_kwargs={
+              'externalize_embedder': True,
+              'single_token_embedder': not is_npu,
+              'export_vision_encoder': False,
+              'use_jinja_template': False,
+          },
+      )
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT,
+        export_kwargs={
+            'export_vision_encoder': True,
+            'externalize_embedder': True,
+            'single_token_embedder': not is_npu,
+            'vision_encoder_quantization_recipe': 'weight_only_wi8_afp32',
+            'use_jinja_template': False,
+        },
+    )
+
   def get_prefill_decode_exportables(self, model_config, export_config):
     """See base class."""
     del model_config

@@ -35,6 +35,16 @@ class ParakeetCtcExtension(extension_lib.ModelExtension):
 
   model_types = ('parakeet_ctc',)
 
+  def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
+    """See base class."""
+    del config_dict, task, target
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.AUTOMATIC_SPEECH_RECOGNITION,
+        export_kwargs={
+            'input_sec': 5.0,
+        },
+    )
+
   def get_speech_exportables(self, model_config, export_config=None):
     """See base class."""
     del model_config, export_config
@@ -51,6 +61,16 @@ class ParakeetTdtExtension(extension_lib.ModelExtension):
   """Built-in extension for Parakeet Token-and-Duration Transducer (TDT) ASR."""
 
   model_types = ('parakeet_tdt',)
+
+  def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
+    """See base class."""
+    del config_dict, task, target
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.AUTOMATIC_SPEECH_RECOGNITION,
+        export_kwargs={
+            'input_sec': 5.0,
+        },
+    )
 
   def get_speech_model_cls(self, model_type):
     """See base class."""

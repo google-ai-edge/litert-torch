@@ -14,82 +14,90 @@
 # ==============================================================================
 """Tests for the short convolution helpers and composite."""
 
+from typing import Optional
+
 from absl.testing import parameterized
 from litert_torch.generative.export_hf.experimental.composites import short_conv
 import torch
+import torch.nn.functional as F
 
 from absl.testing import absltest as googletest
 
 
+def _reference_short_conv(
+    in_proj_out: torch.Tensor,
+    conv_state: torch.Tensor,
+    conv_weight: torch.Tensor,
+    conv_bias: Optional[torch.Tensor] = None,
+    num_valid: Optional[int] = None,
+    is_gated: bool = True,
+    use_silu: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+  """Reference short conv via `F.conv1d` on a channels-first copy.
+
+  Args:
+    in_proj_out: [batch, seq_len, 3 * channels] or [batch, seq_len, channels].
+    conv_state: Channels-last state [batch, L - 1, channels].
+    conv_weight: Depthwise weight [channels, 1, L].
+    conv_bias: Optional bias [channels].
+    num_valid: Number of valid tokens; None means all.
+    is_gated: Whether to compute `c * conv(b * x)`.
+    use_silu: Whether to apply SiLU to the conv output.
+
+  Returns:
+    y [batch, seq_len, channels] and the channels-last next state.
+  """
+  if is_gated:
+    b, c, x = in_proj_out.chunk(3, dim=-1)
+    conv_input = b * x
+  else:
+    c = None
+    conv_input = in_proj_out
+  seq_len = conv_input.shape[1]
+  padded = torch.cat([conv_state, conv_input], dim=1)  # [B, L - 1 + S, C]
+  out = F.conv1d(
+      padded.transpose(1, 2),
+      conv_weight,
+      conv_bias,
+      groups=conv_weight.shape[0],
+  ).transpose(1, 2)
+  if use_silu:
+    out = F.silu(out)
+  y = c * out if c is not None else out
+  n = seq_len if num_valid is None else num_valid
+  state_len = conv_state.shape[1]
+  return y, padded[:, n : n + state_len, :]
+
+
 class ShortConvTest(parameterized.TestCase):
 
-  def test_short_conv_step_accuracy(self):
+  @parameterized.named_parameters(
+      ("weight_c1l_bias", 3, True),
+      ("weight_cl_no_bias", 2, False),
+  )
+  def test_short_conv_step_accuracy(self, weight_rank, use_bias):
     batch_size = 1
     hidden_size = 64
     conv_L_cache = 3
 
     in_proj_out = torch.randn(batch_size, 1, 3 * hidden_size)
-    conv_state = torch.randn(batch_size, hidden_size, conv_L_cache - 1)
+    conv_state = torch.randn(batch_size, conv_L_cache - 1, hidden_size)
     conv_weight = torch.randn(hidden_size, 1, conv_L_cache)
-    conv_bias = torch.randn(hidden_size)
-
-    # Reference computation:
-    b, c, x_proj = in_proj_out.chunk(3, dim=-1)
-    p = b * x_proj
-    p_s = p.squeeze(1).unsqueeze(-1)
-    padded = torch.cat([conv_state, p_s], dim=-1)
-    expected_next_state = padded[:, :, -(conv_L_cache - 1) :]
-    w = conv_weight.squeeze(1).unsqueeze(0)
-    expected_out = (padded * w).sum(dim=-1) + conv_bias.unsqueeze(0)
-    expected_y = c * expected_out.unsqueeze(1)
+    conv_bias = torch.randn(hidden_size) if use_bias else None
+    expected_y, expected_next_state = _reference_short_conv(
+        in_proj_out, conv_state, conv_weight, conv_bias
+    )
 
     actual_y, actual_next_state = short_conv.apply_short_conv_step(
         in_proj_out=in_proj_out,
         conv_state=conv_state,
-        conv_weight=conv_weight,
+        conv_weight=conv_weight if weight_rank == 3 else conv_weight.squeeze(1),
         conv_bias=conv_bias,
         conv_L_cache=conv_L_cache,
     )
 
-    self.assertTrue(torch.allclose(expected_y, actual_y, rtol=1e-5, atol=1e-5))
-    self.assertTrue(
-        torch.allclose(
-            expected_next_state, actual_next_state, rtol=1e-5, atol=1e-5
-        )
-    )
-
-  def test_short_conv_step_no_bias(self):
-    batch_size = 1
-    hidden_size = 64
-    conv_L_cache = 3
-
-    in_proj_out = torch.randn(batch_size, 1, 3 * hidden_size)
-    conv_state = torch.randn(batch_size, hidden_size, conv_L_cache - 1)
-    conv_weight = torch.randn(hidden_size, conv_L_cache)
-
-    b, c, x_proj = in_proj_out.chunk(3, dim=-1)
-    p = b * x_proj
-    p_s = p.squeeze(1).unsqueeze(-1)
-    padded = torch.cat([conv_state, p_s], dim=-1)
-    expected_next_state = padded[:, :, -(conv_L_cache - 1) :]
-    w = conv_weight.unsqueeze(0)
-    expected_out = (padded * w).sum(dim=-1)
-    expected_y = c * expected_out.unsqueeze(1)
-
-    actual_y, actual_next_state = short_conv.apply_short_conv_step(
-        in_proj_out=in_proj_out,
-        conv_state=conv_state,
-        conv_weight=conv_weight,
-        conv_bias=None,
-        conv_L_cache=conv_L_cache,
-    )
-
-    self.assertTrue(torch.allclose(expected_y, actual_y, rtol=1e-5, atol=1e-5))
-    self.assertTrue(
-        torch.allclose(
-            expected_next_state, actual_next_state, rtol=1e-5, atol=1e-5
-        )
-    )
+    torch.testing.assert_close(actual_y, expected_y, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(actual_next_state, expected_next_state)
 
   @parameterized.named_parameters(
       ("full", 6, True, 3),
@@ -106,27 +114,17 @@ class ShortConvTest(parameterized.TestCase):
     conv_L_cache = 3
 
     in_proj_out = torch.randn(batch_size, seq_len, 3 * hidden_size)
-    conv_state = torch.randn(batch_size, hidden_size, conv_L_cache - 1)
+    conv_state = torch.randn(batch_size, conv_L_cache - 1, hidden_size)
     conv_weight = torch.randn(hidden_size, 1, conv_L_cache)
     conv_bias = torch.randn(hidden_size) if use_bias else None
-
-    # Reference computation, one causal tap at a time:
-    b, c, x_proj = in_proj_out.chunk(3, dim=-1)
-    p = (b * x_proj).transpose(1, 2)
-    padded = torch.cat([conv_state, p], dim=-1)
-    w = conv_weight.squeeze(1)
-    expected_out = torch.zeros(batch_size, hidden_size, seq_len)
-    for t in range(seq_len):
-      expected_out[:, :, t] = (padded[:, :, t : t + conv_L_cache] * w).sum(-1)
-    if conv_bias is not None:
-      expected_out = expected_out + conv_bias.view(1, -1, 1)
-    expected_y = c * expected_out.transpose(1, 2)
-    expected_next_state = padded[:, :, num_valid : num_valid + conv_L_cache - 1]
+    expected_y, expected_next_state = _reference_short_conv(
+        in_proj_out, conv_state, conv_weight, conv_bias, num_valid
+    )
 
     actual_y, actual_next_state = short_conv.apply_short_conv_step(
         in_proj_out=in_proj_out,
         conv_state=conv_state,
-        conv_weight=conv_weight if weight_rank == 3 else w,
+        conv_weight=conv_weight if weight_rank == 3 else conv_weight.squeeze(1),
         conv_bias=conv_bias,
         num_valid_tokens=torch.tensor([num_valid], dtype=torch.int32),
         conv_L_cache=conv_L_cache,
@@ -142,7 +140,7 @@ class ShortConvTest(parameterized.TestCase):
     conv_L_cache = 3
 
     in_proj_out = torch.randn(batch_size, seq_len, 3 * hidden_size)
-    conv_state = torch.randn(batch_size, hidden_size, conv_L_cache - 1)
+    conv_state = torch.randn(batch_size, conv_L_cache - 1, hidden_size)
     conv_weight = torch.randn(hidden_size, 1, conv_L_cache)
     conv_bias = torch.randn(hidden_size)
 
@@ -198,7 +196,7 @@ class ShortConvTest(parameterized.TestCase):
 
     args: tuple[torch.Tensor, ...] = (
         torch.randn(1, 8, 3 * hidden_size),
-        torch.randn(1, hidden_size, conv_L_cache - 1),
+        torch.randn(1, conv_L_cache - 1, hidden_size),
         torch.randn(hidden_size, 1, conv_L_cache),
         torch.tensor([5], dtype=torch.int32),
     )
@@ -229,24 +227,13 @@ class ShortConvTest(parameterized.TestCase):
     seq_len = 6
     kernel_size = 4
 
-    x = torch.randn(1, channels, seq_len)
-    conv_state = torch.randn(1, channels, kernel_size - 1)
+    x = torch.randn(1, seq_len, channels)
+    conv_state = torch.randn(1, kernel_size - 1, channels)
     conv_weight = torch.randn(channels, 1, kernel_size)
     conv_bias = torch.randn(channels) if use_bias else None
-
-    # Reference computation, one causal window at a time:
-    padded = torch.cat([conv_state, x], dim=-1)
-    expected_out = torch.stack(
-        [
-            (padded[:, :, t : t + kernel_size] * conv_weight.squeeze(1)).sum(-1)
-            for t in range(seq_len)
-        ],
-        dim=-1,
+    expected_out, expected_next_state = _reference_short_conv(
+        x, conv_state, conv_weight, conv_bias, num_valid, is_gated=False
     )
-    if conv_bias is not None:
-      expected_out = expected_out + conv_bias.view(1, -1, 1)
-    n = seq_len if num_valid is None else num_valid
-    expected_next_state = padded[:, :, n : n + kernel_size - 1]
 
     num_valid_tokens = None
     if num_valid is not None:
@@ -272,8 +259,8 @@ class ShortConvTest(parameterized.TestCase):
         )
 
     args = (
-        torch.randn(1, channels, 8),
-        torch.randn(1, channels, kernel_size - 1),
+        torch.randn(1, 8, channels),
+        torch.randn(1, kernel_size - 1, channels),
         torch.randn(channels, 1, kernel_size),
         torch.tensor([5], dtype=torch.int32),
     )
@@ -291,6 +278,145 @@ class ShortConvTest(parameterized.TestCase):
             for t in targets
         ),
         targets,
+    )
+
+  @parameterized.named_parameters(
+      ("decode_l2_gated", 1, None, 2, True, False, True),
+      ("decode_l4_ungated_silu", 1, None, 4, False, True, False),
+      ("prefill_full_l4", 6, 6, 4, False, True, True),
+      ("prefill_padded_l4", 6, 4, 4, False, True, False),
+      ("prefill_shorter_than_state_l3", 6, 1, 3, True, True, True),
+  )
+  def test_short_conv_matches_reference(
+      self,
+      seq_len,
+      num_valid,
+      conv_L_cache,
+      is_gated,
+      use_silu,
+      use_bias,
+  ):
+    torch.manual_seed(0)
+    hidden_size = 32
+    in_channels = 3 * hidden_size if is_gated else hidden_size
+    in_proj_out = torch.randn(1, seq_len, in_channels)
+    conv_state = torch.randn(1, conv_L_cache - 1, hidden_size)
+    conv_weight = torch.randn(hidden_size, 1, conv_L_cache)
+    conv_bias = torch.randn(hidden_size) if use_bias else None
+    num_valid_t = (
+        torch.tensor([num_valid], dtype=torch.int32)
+        if num_valid is not None
+        else None
+    )
+    ref_y, ref_state = _reference_short_conv(
+        in_proj_out,
+        conv_state,
+        conv_weight,
+        conv_bias,
+        num_valid,
+        is_gated=is_gated,
+        use_silu=use_silu,
+    )
+
+    for name, fn, kwargs in (
+        (
+            "composite",
+            short_conv.apply_short_conv_step,
+            {"conv_L_cache": conv_L_cache},
+        ),
+        ("decomposed", short_conv.short_conv, {}),
+    ):
+      with self.subTest(name):
+        act_y, act_state = fn(
+            in_proj_out=in_proj_out,
+            conv_state=conv_state,
+            conv_weight=conv_weight,
+            conv_bias=conv_bias,
+            num_valid_tokens=num_valid_t,
+            is_gated=is_gated,
+            use_silu=use_silu,
+            **kwargs,
+        )
+        torch.testing.assert_close(act_y, ref_y, rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(act_state, ref_state, rtol=1e-5, atol=1e-5)
+
+  def test_short_conv_rejects_non_channels_last_state(self):
+    hidden_size = 32
+    conv_L_cache = 4
+    in_proj_out = torch.randn(1, 1, hidden_size)
+    conv_weight = torch.randn(hidden_size, 1, conv_L_cache)
+    channels_first_state = torch.randn(1, hidden_size, conv_L_cache - 1)
+
+    with self.assertRaisesRegex(ValueError, "channels-last"):
+      short_conv.apply_short_conv_step(
+          in_proj_out=in_proj_out,
+          conv_state=channels_first_state,
+          conv_weight=conv_weight,
+          conv_L_cache=conv_L_cache,
+          is_gated=False,
+      )
+    with self.assertRaisesRegex(ValueError, "channels-last"):
+      short_conv.short_conv(
+          in_proj_out=in_proj_out,
+          conv_state=channels_first_state,
+          conv_weight=conv_weight,
+          is_gated=False,
+      )
+    with self.assertRaisesRegex(ValueError, "conv_L_cache"):
+      short_conv.apply_short_conv_step(
+          in_proj_out=in_proj_out,
+          conv_state=torch.randn(1, conv_L_cache - 1, hidden_size),
+          conv_weight=conv_weight,
+          conv_L_cache=conv_L_cache + 1,
+          is_gated=False,
+      )
+
+  def test_short_conv_export_folds_weight_to_channels_last(self):
+    hidden_size = 64
+    conv_L_cache = 4
+
+    class Module(torch.nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(
+            torch.randn(hidden_size, 1, conv_L_cache)
+        )
+
+      def forward(self, in_proj_out, conv_state):
+        return short_conv.apply_short_conv_step(
+            in_proj_out=in_proj_out,
+            conv_state=conv_state,
+            conv_weight=self.weight,
+            conv_L_cache=conv_L_cache,
+            is_gated=False,
+            use_silu=True,
+        )
+
+    mod = Module().eval()
+    args = (
+        torch.randn(1, 1, hidden_size),
+        torch.randn(1, conv_L_cache - 1, hidden_size),
+    )
+    exported = torch.export.export(mod, args)
+    marks = [
+        n
+        for n in exported.graph.nodes
+        if n.op == "call_function"
+        and "mark_tensor" in str(n.target)
+        and "odml.short_conv_step" in (str(n.args) + str(n.kwargs))
+    ]
+    self.assertLen(marks, 5)  # 3 inputs + 2 outputs
+    # The layout is implied by the shapes; no `channels_last` attribute.
+    self.assertFalse(any("channels_last" in str(n.args) for n in marks), marks)
+    # Marked conv_weight (3rd marked input, pos=2) has channels-last [1, L, C].
+    weight_marks = [
+        n for n in marks if len(n.args) >= 4 and n.args[2] == 2 and n.args[3]
+    ]
+    self.assertLen(weight_marks, 1)
+    self.assertEqual(
+        tuple(weight_marks[0].meta["val"].shape),
+        (1, conv_L_cache, hidden_size),
     )
 
 

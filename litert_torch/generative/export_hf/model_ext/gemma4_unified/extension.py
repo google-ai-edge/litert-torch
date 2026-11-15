@@ -22,6 +22,7 @@ feature projection (`adapter_cls=None`) while exporting a dedicated end-of-image
 
 from litert_torch.generative.export_hf.model_ext import extension as extension_lib
 from litert_torch.generative.export_hf.model_ext.gemma4 import metadata_builder as gemma4_metadata_builder
+from litert_torch.generative.export_hf.model_ext.gemma4 import vision_budgets as gemma4_vision_budgets
 # Registers gemma4_unified patches.
 from litert_torch.generative.export_hf.model_ext.gemma4_unified import patch as _
 from litert_torch.generative.export_hf.model_ext.gemma4_unified import vision_exportable as gemma4_unified_vision_exportable
@@ -32,7 +33,22 @@ class Gemma4UnifiedExtension(extension_lib.ModelExtension):
   """Built-in extension for Gemma 4 Unified vision-language models."""
 
   model_types = ('gemma4_unified',)
-  extra_kwargs_keys = ('gemma4_vision_max_soft_tokens',)
+  extra_kwargs_keys = gemma4_vision_budgets.EXTRA_KWARGS_KEYS
+
+  def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
+    """See base class."""
+    del target
+    vlm = task in (None, extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT)
+    return extension_lib.ExportDefaults(
+        task=task or extension_lib.ExportTask.IMAGE_TEXT_TO_TEXT,
+        export_kwargs={
+            'export_vision_encoder': vlm,
+            'use_jinja_template': True,
+            'litert_lm_llm_metadata_override': (
+                gemma4_metadata_builder.GEMMA4_12B_CANONICAL_METADATA
+            ),
+        },
+    )
 
   def get_vision_exportables(self, model_config, export_config=None):
     """See base class."""

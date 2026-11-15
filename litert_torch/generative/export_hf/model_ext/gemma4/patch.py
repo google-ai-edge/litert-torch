@@ -15,9 +15,9 @@
 """Patches for Gemma4 model for on-device deployment."""
 
 import contextlib
-import weakref
 from litert_torch.backend import optimization_barrier as optimization_barrier_lib
 from litert_torch.backend.torch_tfl import _ops as _  # Registers torch.ops.tfl.*
+from litert_torch.generative.export_hf.experimental.composites import bidirectional_sdpa as bidirectional_sdpa_lib
 from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope
 from litert_torch.generative.export_hf.experimental.composites import rope as rope_composite
 from litert_torch.generative.export_hf.experimental.composites import swiglu as swiglu_composite
@@ -746,46 +746,8 @@ except ImportError:
     yield
 
 
-# TODO(b/576081319): Clean up once Converter V2 folds SliceOp and elementwise
-# ops on DenseResourceElementsAttr constants.
-_PATCHED_MODULES: list[weakref.ReferenceType[torch.nn.Module]] = []
-
-
 class LiteRTGemma4VisionPatchEmbedder(Gemma4VisionPatchEmbedder):
   """LiteRT Gemma4 Vision Patch Embedder."""
-
-  def __init__(self, config):
-    super().__init__(config)
-    # TODO(b/576081319): Clean up once Converter V2 folds SliceOp on
-    # DenseResourceElementsAttr constants.
-    table = self.position_embedding_table
-    del self._parameters["position_embedding_table"]
-    self.register_buffer(
-        "position_embedding_table",
-        torch.ones(table.shape, dtype=table.dtype, device="cpu"),
-        persistent=True,
-    )
-    self.precompute_buffers()
-    _PATCHED_MODULES.append(weakref.ref(self))
-
-  def precompute_buffers(self):
-    if self.position_embedding_table.is_meta:
-      return
-    with torch.no_grad():
-      self.register_buffer(
-          "table_x",
-          self.position_embedding_table[0].detach().cpu().clone(),
-          persistent=False,
-      )
-      self.register_buffer(
-          "table_y",
-          self.position_embedding_table[1].detach().cpu().clone(),
-          persistent=False,
-      )
-
-  def _load_from_state_dict(self, *args, **kwargs):
-    super()._load_from_state_dict(*args, **kwargs)
-    self.precompute_buffers()
 
   def _position_embeddings(
       self, pixel_position_ids: torch.Tensor, padding_positions: torch.Tensor
@@ -803,13 +765,8 @@ class LiteRTGemma4VisionPatchEmbedder(Gemma4VisionPatchEmbedder):
     one_hot_y = clamped_positions_y.unsqueeze(-1) == classes
 
     # AI Edge Quantizer crashes on BMM weight quant.
-    # TODO(b/576081319): Clean up once Converter V2 folds SliceOp on
-    # DenseResourceElementsAttr constants.
-    table_x = getattr(self, "table_x", None)
-    table_y = getattr(self, "table_y", None)
-    if table_x is None or table_y is None:
-      table_x = self.position_embedding_table[0]
-      table_y = self.position_embedding_table[1]
+    table_x = self.position_embedding_table[0]
+    table_y = self.position_embedding_table[1]
     one_hot_x = one_hot_x.to(table_x.dtype)
     one_hot_y = one_hot_y.to(table_y.dtype)
     x_embeddings = one_hot_x @ table_x
@@ -905,7 +862,12 @@ class LiteRTGemma4VisionPooler(Gemma4VisionPooler):
 
 
 class LiteRTGemma4VisionEncoder(Gemma4VisionEncoder):
-  """LiteRT Gemma4 Vision Encoder."""
+  """LiteRT Gemma4 Vision Encoder.
+
+  Masks padded patches (position (-1, -1), which LiteRT-LM writes into the patch
+  slots an image does not fill) out of the attention with an additive float key
+  mask, as `transformers` and the gemax ViT do.
+  """
 
   def forward(
       self,
@@ -914,12 +876,14 @@ class LiteRTGemma4VisionEncoder(Gemma4VisionEncoder):
       pixel_position_ids: torch.LongTensor | None = None,
       **kwargs,
   ) -> transformers.modeling_outputs.BaseModelOutputWithPast:
-    num_seq = attention_mask.shape[1]
-    attention_mask = torch.zeros(
-        (1, 1, num_seq, num_seq),
-        dtype=torch.float32,
-        device=inputs_embeds.device,
-    )
+    # `attention_mask` is the bool `[B, L]` mask of real (non-padded) patches.
+    # Build one additive float key mask `[B, 1, 1, L]` (finite in float16; also
+    # the bidirectional SDPA composite's mask input) for every layer.
+    attention_mask = torch.where(
+        attention_mask[:, None, None, :],
+        0.0,
+        bidirectional_sdpa_lib.PADDING_MASK_VALUE,
+    ).to(torch.float32)
 
     # embed positions
     hidden_states = inputs_embeds
@@ -1284,11 +1248,6 @@ def gemma4_litert_patch():
         setattr(gemma4_pkg, name, cls)
       if name in transformers.__dict__:
         setattr(transformers, name, cls)
-    for ref in list(_PATCHED_MODULES):
-      m = ref()
-      if m is not None:
-        m.precompute_buffers()
-    _PATCHED_MODULES.clear()
 
 
 # pytype: enable=import-error

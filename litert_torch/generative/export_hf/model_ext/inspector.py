@@ -208,6 +208,23 @@ class ArchitectureInspectionReport:
     return '\n'.join(lines)
 
 
+def _forward_takes_only_hidden_states(cls: type[torch.nn.Module]) -> bool:
+  """Returns whether `cls.forward` takes `hidden_states` and nothing else.
+
+  The skeleton's `_rms_norm_with_hlfb_forward(self, hidden_states)` can only
+  replace such a `.forward`; a gated RMSNorm's `.forward(hidden_states, gate)`
+  would raise a `TypeError` once patched.
+  """
+  try:
+    params = list(inspect.signature(cls.forward).parameters.values())[1:]
+  except (ValueError, TypeError):
+    return True
+  return len(params) == 1 and params[0].kind in (
+      inspect.Parameter.POSITIONAL_ONLY,
+      inspect.Parameter.POSITIONAL_OR_KEYWORD,
+  )
+
+
 def _inspect_safetensors_keys(model_path: str) -> tuple[list[str], list[str]]:
   """Returns `(top_prefixes, unrecognized_prefixes)` from a local checkpoint."""
   if not os.path.isdir(model_path):
@@ -432,6 +449,24 @@ def _generate_extension_skeleton(
         "      extension.FusedWeightSpec('gate_up_proj', ('w1', 'w3'), dim=0),",
         '  )',
     ])
+  lines.extend([
+      '',
+      '  def get_export_defaults(',
+      '      self, config_dict, task=None, target="cpu_gpu"',
+      '  ):',
+      '    del config_dict, task',
+      '    is_npu = str(target or "").startswith("npu")',
+      '    return extension.ExportDefaults(',
+      '        task=extension.ExportTask.TEXT_GENERATION,',
+      '        export_kwargs={',
+      '            "quantization_recipe": (',
+      '                "dynamic_wi8_afp32"',
+      '                if is_npu',
+      '                else "dynamic_wi4b32_afp32"',
+      '            ),',
+      '        },',
+      '    )',
+  ])
   if has_auto_map:
     lines.extend([
         '',
@@ -643,6 +678,7 @@ def inspect_model_architecture(
 
   rmsnorm_classes: set[str] = set()
   unpatched_rmsnorm_classes: set[str] = set()
+  multi_input_rmsnorm_classes: set[str] = set()
   mlp_classes: set[str] = set()
   mlp_proj_names: set[str] = set()
   attention_classes: set[str] = set()
@@ -742,6 +778,8 @@ def inspect_model_architecture(
             src = ''
           if 'rms_norm_with_hlfb' not in src:
             unpatched_rmsnorm_classes.add(cls_name)
+            if not _forward_takes_only_hidden_states(cls):
+              multi_input_rmsnorm_classes.add(cls_name)
 
         if cls_name.endswith('MLP') or cls_name.endswith('FeedForward'):
           mlp_classes.add(cls_name)
@@ -842,6 +880,13 @@ def inspect_model_architecture(
         ' `odml.rms_norm` composite.'
     )
 
+  if multi_input_rmsnorm_classes:
+    recommendations.append(
+        'The skeleton does not patch'
+        f' `{sorted(multi_input_rmsnorm_classes)}`: their `.forward` takes more'
+        ' inputs than `hidden_states` (e.g. a `gate`), so patch them by hand.'
+    )
+
   if has_dual_rope_parameters and not rotary_accepts_layer_type:
     recommendations.append(
         '`config.rope_parameters` defines `sliding_attention` (dual RoPE), but'
@@ -889,7 +934,9 @@ def inspect_model_architecture(
   skeleton_code = _generate_extension_skeleton(
       model_type=model_type or 'custom_arch',
       unrecognized_prefixes=unrecognized_st_prefixes,
-      unpatched_rmsnorm_classes=sorted(unpatched_rmsnorm_classes),
+      unpatched_rmsnorm_classes=sorted(
+          unpatched_rmsnorm_classes - multi_input_rmsnorm_classes
+      ),
       has_dual_rope_attrs='rotary_emb_full' in rotary_attributes,
       rotary_accepts_layer_type=rotary_accepts_layer_type,
       has_dual_rope_parameters=has_dual_rope_parameters,

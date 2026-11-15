@@ -113,6 +113,9 @@ class Moonshine(asr_model.AsrModel):
     self._decoder = MoonshineDecoder(self._model).eval()
     self._processor = asr_model.TransformersProcessor(model_id)
 
+  def get_speech2text_metadata(self, export_config):
+    return self.build_speech2text_metadata('moonshine', export_config)
+
   def get_encoder(self) -> torch.nn.Module:
     return self._encoder
 

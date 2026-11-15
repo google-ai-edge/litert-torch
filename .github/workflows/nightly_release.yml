@@ -23,11 +23,11 @@ jobs:
       # TODO(cnchan): Re-enable once the tf-nightly pywrap issue is fixed.
       run-on-macos: false
 
-  build-and-release-nightly:
+  build-nightly:
     needs: run-unittests-python
     runs-on: ubuntu-latest
 
-    name: Build and Release litert-torch-nightly
+    name: Build litert-torch-nightly Wheel
     steps:
       - uses: actions/checkout@v4
 
@@ -59,16 +59,135 @@ jobs:
       - name: List the contents of litert_torch wheel
         run: python -m zipfile --list dist/*.whl
 
-      - name: Upload to PyPI
-        run: twine upload dist/* --non-interactive -p ${{ secrets.PYPI_UPLOAD_TOKEN }}
+      - name: Upload Nightly Wheel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: litert-torch-nightly-wheel
+          path: dist/*.whl
 
-  run-pip-install-and-import-test:
-    needs: build-and-release-nightly
+  test-before-publish:
+    needs: build-nightly
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
-    name: Test Install and Import litert-torch
+    name: Test Install and Import Nightly Wheel (No TF)
+    runs-on:
+      labels: linux-x86-n4-16
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+    steps:
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - run: |
+          python -m pip cache purge
+          python -m pip install --upgrade pip
+
+      - name: Download Nightly Wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: litert-torch-nightly-wheel
+          path: /tmp/dist
+
+      - name: Install Nightly Wheel
+        run: |
+          python -m pip install --pre /tmp/dist/*.whl
+
+      - name: Import litert-torch and export_hf from /tmp
+        working-directory: /tmp
+        run: |
+          python -c "import litert_torch; from litert_torch.generative.export_hf import export"
+
+  test-export-hf-v2-wheel:
+    needs: build-nightly
+    name: Test export_hf Converter V2 on Built Nightly Wheel
+    runs-on:
+      labels: linux-x86-n4-16
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+    steps:
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - run: |
+          python -m pip cache purge
+          python -m pip install --upgrade pip
+
+      - name: Download Nightly Wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: litert-torch-nightly-wheel
+          path: /tmp/dist
+
+      - name: Install Nightly Wheel and tf-nightly
+        run: |
+          python -m pip install --pre /tmp/dist/*.whl tf-nightly
+
+      - name: Run Tiny Qwen3 Converter V2 Export and LiteRT Inference
+        working-directory: /tmp
+        run: |
+          python - << 'EOF'
+          import torch
+          import transformers
+          from litert_torch.generative.export_hf.model_ext import builtin_extensions
+          from litert_torch.generative.export_hf.model_ext import testing as ext_testing
+
+          torch.manual_seed(0)
+          ext = builtin_extensions.Qwen3Extension()
+          cfg = transformers.Qwen3Config(
+              vocab_size=64,
+              hidden_size=32,
+              intermediate_size=64,
+              num_hidden_layers=2,
+              num_attention_heads=2,
+              num_key_value_heads=2,
+              head_dim=16,
+              max_position_embeddings=64,
+          )
+          with ext.patch_context():
+            model = transformers.Qwen3ForCausalLM(cfg).eval()
+          sigs = ext_testing.assert_tiny_v2_export(
+              ext=ext,
+              model=model,
+              target="cpu_gpu",
+              export_kwargs={"externalize_embedder": True},
+              max_tensor_rank=4,
+          )
+          assert "model.tflite" in sigs and "embedder.tflite" in sigs, sigs
+          EOF
+
+  publish-nightly:
+    needs: [test-before-publish, test-export-hf-v2-wheel]
+    runs-on: ubuntu-latest
+    name: Publish litert-torch-nightly to PyPI
+    steps:
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install twine
+        run: |
+          python -m pip install --upgrade pip twine
+
+      - name: Download Nightly Wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: litert-torch-nightly-wheel
+          path: ./dist
+
+      - name: Upload to PyPI
+        run: twine upload dist/* --non-interactive -p ${{ secrets.PYPI_UPLOAD_TOKEN }}
+
+  run-pip-install-and-import-test:
+    needs: publish-nightly
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    name: Test Install and Import litert-torch-nightly from PyPI
     runs-on:
       labels: linux-x86-n4-16
     container:
@@ -86,6 +205,7 @@ jobs:
         run: |
           python -m pip install --pre litert-torch-nightly
 
-      - name: Import litert-torch
+      - name: Import litert-torch from /tmp
+        working-directory: /tmp
         run: |
-          python -c "import litert_torch"
+          python -c "import litert_torch; from litert_torch.generative.export_hf import export"

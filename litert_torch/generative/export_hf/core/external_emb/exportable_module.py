@@ -14,6 +14,8 @@
 # ==============================================================================
 """Exportable module for externalized embedding."""
 
+import itertools
+
 from litert_torch.generative.export_hf.core import exportable_module as base_exportable_module
 import torch
 
@@ -138,8 +140,14 @@ class LiteRTExportableModuleForEmbedder(torch.nn.Module):
 
   @property
   def device(self) -> torch.device:
-    """Device of the wrapped embedding's parameters (`meta` for V2 export)."""
-    return next(self.model.parameters(), torch.empty(0)).device
+    """Device of the wrapped embedding's parameters/buffers (`meta` for V2)."""
+    first_device = None
+    for t in itertools.chain(self.model.parameters(), self.model.buffers()):
+      if t.device.type == "meta":
+        return t.device
+      if first_device is None:
+        first_device = t.device
+    return first_device if first_device is not None else torch.empty(0).device
 
   def forward(
       self,

@@ -40,6 +40,7 @@ import torch
 import transformers
 
 from absl.testing import absltest as googletest
+from absl.testing import parameterized
 from litert_lm_builder.runtime.proto import llm_metadata_pb2
 from litert_lm_builder.runtime.proto import llm_model_type_pb2
 
@@ -160,7 +161,7 @@ class _W13FusingExtensionWithSpec(_W13FusingExtension):
   )
 
 
-class ModelExtensionTest(googletest.TestCase):
+class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -500,6 +501,7 @@ class ModelExtensionTest(googletest.TestCase):
         'gemma3',
         'gemma3n',
         'gemma4',
+        'qwen2',
         'qwen3',
         'qwen3_5',
         'lfm2',
@@ -511,9 +513,208 @@ class ModelExtensionTest(googletest.TestCase):
         'kokoro',
         'bonsai_flux2',
         'flux2_klein',
+        'minicpm5',
         'minicpmo',
     ):
       self.assertIn(expected, registered)
+
+  @parameterized.named_parameters(
+      (
+          'qwen2_cpu_gpu',
+          'qwen2',
+          {'model_type': 'qwen2'},
+          None,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_GENERATION,
+          {
+              'use_jinja_template': True,
+              'litert_lm_llm_metadata_override': 'qwen2_5',
+          },
+      ),
+      (
+          'qwen3_0_6b_cpu_gpu',
+          'qwen3',
+          {'text_config': {'hidden_size': 1024}},
+          None,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_GENERATION,
+          {
+              'quantization_recipe': 'dynamic_wi4b32_afp32',
+              'use_jinja_template': True,
+              'litert_lm_llm_metadata_override': 'qwen3',
+          },
+      ),
+      (
+          'qwen3_1_7b_cpu_gpu',
+          'qwen3',
+          {'hidden_size': 2048},
+          None,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_GENERATION,
+          {
+              'quantization_recipe': 'dynamic_wi8_afp32',
+              'use_jinja_template': True,
+              'litert_lm_llm_metadata_override': 'qwen3',
+          },
+      ),
+      (
+          'qwen3_4b_npu',
+          'qwen3',
+          {'hidden_size': 2560},
+          None,
+          'npu:qualcomm',
+          extension.ExportTask.TEXT_GENERATION,
+          {
+              'quantization_recipe': 'dynamic_wi8_afp32',
+              'use_jinja_template': True,
+              'litert_lm_llm_metadata_override': 'qwen3',
+          },
+      ),
+      (
+          'qwen3_tts_task',
+          'qwen3',
+          {'hidden_size': 1024},
+          extension.ExportTask.TEXT_TO_SPEECH,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_TO_SPEECH,
+          {},
+      ),
+      (
+          'gemma3n_text_override',
+          'gemma3n',
+          {'model_type': 'gemma3n'},
+          extension.ExportTask.TEXT_GENERATION,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_GENERATION,
+          {
+              'externalize_embedder': True,
+              'single_token_embedder': True,
+              'export_vision_encoder': False,
+              'use_jinja_template': False,
+          },
+      ),
+      (
+          'lfm2_vl_text_override',
+          'lfm2_vl',
+          {'model_type': 'lfm2_vl'},
+          extension.ExportTask.TEXT_GENERATION,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_GENERATION,
+          {
+              'quantization_recipe': 'dynamic_wi4b32_afp32',
+              'export_vision_encoder': False,
+              'auto_model_override': 'AutoModelForImageTextToText',
+              'use_jinja_template': True,
+              'litert_lm_llm_metadata_override': 'lfm2',
+          },
+      ),
+      (
+          'gemma4_text_only',
+          'gemma4',
+          {'model_type': 'gemma4', 'vision_config': None},
+          None,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_GENERATION,
+          {
+              'quantization_recipe': 'dynamic_wi4b32_afp32',
+              'externalize_embedder': True,
+              'single_token_embedder': True,
+              'export_vision_encoder': False,
+              'export_audio_encoder': False,
+              'use_jinja_template': True,
+              'jinja_chat_template_override': (
+                  'litert-community/gemma-4-E2B-it-litert-lm'
+              ),
+          },
+      ),
+      (
+          'gemma4_vision',
+          'gemma4',
+          {'model_type': 'gemma4', 'vision_config': {'hidden_size': 768}},
+          None,
+          'cpu_gpu',
+          extension.ExportTask.IMAGE_TEXT_TO_TEXT,
+          {
+              'quantization_recipe': 'dynamic_wi4b32_afp32',
+              'externalize_embedder': True,
+              'single_token_embedder': True,
+              'export_vision_encoder': True,
+              'export_audio_encoder': False,
+              'use_jinja_template': True,
+              'jinja_chat_template_override': (
+                  'litert-community/gemma-4-E2B-it-litert-lm'
+              ),
+          },
+      ),
+      (
+          'gemma4_vision_text_override',
+          'gemma4',
+          {'model_type': 'gemma4', 'vision_config': {'hidden_size': 768}},
+          extension.ExportTask.TEXT_GENERATION,
+          'cpu_gpu',
+          extension.ExportTask.TEXT_GENERATION,
+          {
+              'quantization_recipe': 'dynamic_wi4b32_afp32',
+              'externalize_embedder': True,
+              'single_token_embedder': True,
+              'export_vision_encoder': False,
+              'export_audio_encoder': False,
+              'use_jinja_template': True,
+              'jinja_chat_template_override': (
+                  'litert-community/gemma-4-E2B-it-litert-lm'
+              ),
+          },
+      ),
+      (
+          'gemma4_multimodal_audio_vision',
+          'gemma4',
+          {
+              'model_type': 'gemma4',
+              'vision_config': {'hidden_size': 768},
+              'audio_config': {'hidden_size': 512},
+          },
+          None,
+          'cpu_gpu',
+          extension.ExportTask.MULTIMODAL_LM,
+          {
+              'quantization_recipe': 'dynamic_wi4b32_afp32',
+              'externalize_embedder': True,
+              'single_token_embedder': True,
+              'export_vision_encoder': True,
+              'export_audio_encoder': True,
+              'use_jinja_template': True,
+              'jinja_chat_template_override': (
+                  'litert-community/gemma-4-E2B-it-litert-lm'
+              ),
+          },
+      ),
+      (
+          'whisper_small_and_medium_asr',
+          'whisper',
+          {'model_type': 'whisper', 'd_model': 768, 'num_mel_bins': 80},
+          None,
+          'cpu_gpu',
+          extension.ExportTask.AUTOMATIC_SPEECH_RECOGNITION,
+          {
+              'input_sec': 30.0,
+          },
+      ),
+  )
+  def test_builtin_get_export_defaults(
+      self,
+      model_type,
+      config_dict,
+      task,
+      target,
+      expected_task,
+      expected_kwargs,
+  ):
+    ext = extension.get_model_extension(model_type)
+    self.assertIsNotNone(ext)
+    defaults = ext.get_export_defaults(config_dict, task=task, target=target)
+    self.assertIsNotNone(defaults)
+    self.assertEqual(defaults.task, expected_task)
+    self.assertEqual(dict(defaults.export_kwargs), expected_kwargs)
 
   def test_non_text_generation_checkpoint_matching_and_section_types(self):
 
@@ -1124,6 +1325,25 @@ class ModelExtensionTest(googletest.TestCase):
     self.assertIn('def _find_qwen2_vl_modeling_module():', skeleton)
     self.assertIn('mod = _find_qwen2_vl_modeling_module()', skeleton)
 
+  def test_skeleton_rmsnorm_patch_needs_a_single_input_forward(self):
+    class _RMSNorm(torch.nn.Module):
+
+      def forward(self, hidden_states):
+        return hidden_states
+
+    class _RMSNormGated(torch.nn.Module):
+
+      def forward(self, hidden_states, gate=None):
+        del gate
+        return hidden_states
+
+    self.assertTrue(
+        inspector._forward_takes_only_hidden_states(_RMSNorm)  # pylint: disable=protected-access
+    )
+    self.assertFalse(
+        inspector._forward_takes_only_hidden_states(_RMSNormGated)  # pylint: disable=protected-access
+    )
+
   def test_tiny_prefill_decode_export_auto_enables_gpu_composites_after_update_export_config(
       self,
   ):
@@ -1158,6 +1378,165 @@ class ModelExtensionTest(googletest.TestCase):
         model=tiny_model,
     )
     self.assertIn('decode', exported)
+
+  def test_whisper_metadata_supports_small_medium_and_language_override(self):
+    ext = extension.get_model_extension('whisper')
+    self.assertIsNotNone(ext)
+    speech_cls = ext.get_speech_model_cls('whisper')
+
+    class _FakeHfWhisperModel(torch.nn.Module):
+
+      def __init__(self, num_mel_bins: int = 80):
+        super().__init__()
+        self.config = types.SimpleNamespace(num_mel_bins=num_mel_bins)
+
+    class _FakeWhisperTokenizer:
+
+      def __init__(self, include_yue: bool = False):
+        self._include_yue = include_yue
+
+      def convert_tokens_to_ids(self, token: str) -> int:
+        shift = 1 if self._include_yue else 0
+        vocab = {
+            '<|endoftext|>': 50257,
+            '<|startoftranscript|>': 50258,
+            '<|en|>': 50259,
+            '<|zh|>': 50260,
+            '<|ko|>': 50264,
+            '<|ja|>': 50266,
+            '<|id|>': 50275,
+            '<|hi|>': 50276,
+            '<|he|>': 50279,
+            '<|no|>': 50288,
+            '<|yi|>': 50335,
+            '<|tl|>': 50348,
+            '<|jw|>': 50356,
+            '<|translate|>': 50358 + shift,
+            '<|transcribe|>': 50359 + shift,
+            '<|notimestamps|>': 50363 + shift,
+        }
+        if self._include_yue:
+          vocab['<|yue|>'] = 50358
+        return vocab.get(token, -1)
+
+    # Class-level call (`speech_cls.get_speech2text_metadata(speech_cls, cfg)`)
+    # without `_model` or `_processor` succeeds and leaves start tokens unset.
+    meta_cls = speech_cls.get_speech2text_metadata(
+        speech_cls, ExportableModuleConfig(model='openai/whisper-small')
+    )
+    self.assertTrue(meta_cls.asr_model_type.HasField('whisper'))
+    self.assertEmpty(meta_cls.decode_start_token_ids)
+
+    with (
+        mock.patch.object(
+            transformers.WhisperForConditionalGeneration,
+            'from_pretrained',
+            return_value=_FakeHfWhisperModel(num_mel_bins=80),
+        ),
+        mock.patch.object(
+            transformers.AutoProcessor,
+            'from_pretrained',
+            return_value=types.SimpleNamespace(
+                tokenizer=_FakeWhisperTokenizer(include_yue=False)
+            ),
+        ),
+    ):
+      whisper_v2 = speech_cls('openai/whisper-small')
+
+    meta_default = whisper_v2.get_speech2text_metadata(
+        ExportableModuleConfig(model='openai/whisper-small')
+    )
+    self.assertTrue(meta_default.asr_model_type.HasField('whisper'))
+    self.assertFalse(meta_default.log_mel_spectrogram_config.HasField('n_mels'))
+    self.assertEqual(
+        list(meta_default.decode_start_token_ids), [50258, 50259, 50359, 50363]
+    )
+
+    meta_ja = whisper_v2.get_speech2text_metadata(
+        ExportableModuleConfig(
+            model='openai/whisper-medium',
+            extra_kwargs={'whisper_language': 'ja-JP'},
+        )
+    )
+    self.assertEqual(
+        list(meta_ja.decode_start_token_ids), [50258, 50266, 50359, 50363]
+    )
+
+    for alias, expected_lang_id in (
+        ('cmn_hans_cn', 50260),
+        ('cn', 50260),
+        ('jp', 50266),
+        ('kr', 50264),
+        ('iw', 50279),
+        ('in', 50275),
+        ('ji', 50335),
+        ('nb-NO', 50288),
+        ('jv', 50356),
+        ('fil', 50348),
+    ):
+      meta_alias = whisper_v2.get_speech2text_metadata(
+          ExportableModuleConfig(
+              model='openai/whisper-small',
+              extra_kwargs={'whisper_language': alias},
+          )
+      )
+      self.assertEqual(
+          list(meta_alias.decode_start_token_ids),
+          [50258, expected_lang_id, 50359, 50363],
+      )
+
+    with self.assertRaises(ValueError):
+      whisper_v2.get_speech2text_metadata(
+          ExportableModuleConfig(
+              model='openai/whisper-small',
+              extra_kwargs={'whisper_language': 'yue'},
+          )
+      )
+
+    with (
+        mock.patch.object(
+            transformers.WhisperForConditionalGeneration,
+            'from_pretrained',
+            return_value=_FakeHfWhisperModel(num_mel_bins=128),
+        ),
+        mock.patch.object(
+            transformers.AutoProcessor,
+            'from_pretrained',
+            return_value=types.SimpleNamespace(
+                tokenizer=_FakeWhisperTokenizer(include_yue=True)
+            ),
+        ),
+    ):
+      whisper_v3 = speech_cls('openai/whisper-large-v3')
+
+    meta_v3_default = whisper_v3.get_speech2text_metadata(
+        ExportableModuleConfig(model='openai/whisper-large-v3')
+    )
+    self.assertEqual(
+        list(meta_v3_default.decode_start_token_ids),
+        [50258, 50259, 50360, 50364],
+    )
+
+    meta_v3_hi = whisper_v3.get_speech2text_metadata(
+        ExportableModuleConfig(
+            model='openai/whisper-large-v3',
+            extra_kwargs={'whisper_language': 'hi'},
+        )
+    )
+    self.assertEqual(meta_v3_hi.log_mel_spectrogram_config.n_mels, 128)
+    self.assertEqual(
+        list(meta_v3_hi.decode_start_token_ids), [50258, 50276, 50360, 50364]
+    )
+
+    meta_v3_yue = whisper_v3.get_speech2text_metadata(
+        ExportableModuleConfig(
+            model='openai/whisper-large-v3',
+            extra_kwargs={'whisper_language': 'yue'},
+        )
+    )
+    self.assertEqual(
+        list(meta_v3_yue.decode_start_token_ids), [50258, 50358, 50360, 50364]
+    )
 
 
 class BuiltinQwen3ExtensionContractTest(
@@ -1194,6 +1573,73 @@ class BuiltinGemma3nExtensionContractTest(
     ext_testing.ModelExtensionTestMixin, googletest.TestCase
 ):
   extension_cls = builtin_extensions.Gemma3nExtension
+
+  def test_tiny_prefill_decode_and_per_layer_embedder_with_cpu_gpu_defaults(
+      self,
+  ):
+    ext = self.get_extension()
+    gemma3n_cfg = transformers.Gemma3nTextConfig(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=3,
+        num_kv_shared_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        hidden_size_per_layer_input=4,
+        vocab_size_per_layer_input=64,
+        altup_num_inputs=2,
+        sliding_window=8,
+        layer_types=[
+            'sliding_attention',
+            'full_attention',
+            'full_attention',
+        ],
+        max_position_embeddings=64,
+    )
+    with ext.patch_context():
+      tiny_model = transformers.Gemma3nForCausalLM(gemma3n_cfg).eval()
+
+    export_cfg = ExportableModuleConfig(
+        model='dummy',
+        prefill_lengths=[8, 16],
+        cache_length=32,
+        externalize_embedder=True,
+        single_token_embedder=True,
+        apply_gpu_composites=True,
+        model_extension=ext,
+    )
+    exported = self.assert_tiny_prefill_decode_torch_export(
+        model=tiny_model,
+        model_config=gemma3n_cfg,
+        export_config=export_cfg,
+    )
+    self.assertIn('prefill_8', exported)
+    self.assertIn('prefill_16', exported)
+    self.assertIn('decode', exported)
+
+    per_layer_cls = ext.get_additional_exportables(
+        gemma3n_cfg, export_cfg
+    )['per_layer_embedder']
+    per_layer_mod = per_layer_cls(tiny_model).eval()
+    single_inputs = per_layer_mod.get_sample_inputs(gemma3n_cfg, export_cfg)
+    self.assertEqual(list(single_inputs.keys()), ['per_layer_embedder'])
+
+    multi_prefill_cfg = dataclasses.replace(
+        export_cfg, single_token_embedder=False
+    )
+    multi_inputs = per_layer_mod.get_sample_inputs(
+        gemma3n_cfg, multi_prefill_cfg
+    )
+    self.assertEqual(
+        sorted(multi_inputs.keys()),
+        [
+            'decode_per_layer_embedder',
+            'prefill_per_layer_embedder_16',
+            'prefill_per_layer_embedder_8',
+        ],
+    )
 
 
 if __name__ == '__main__':

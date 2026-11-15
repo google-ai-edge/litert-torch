@@ -76,12 +76,13 @@ are registered via `model_ext/builtin_extensions.py` with `override=False` so
 explicit user registrations take precedence.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import contextlib
 import hashlib
 import importlib
 from importlib import metadata as importlib_metadata
 from importlib import util as importlib_util
+import inspect
 import os
 import sys
 import types
@@ -167,6 +168,34 @@ class AudioExportablesSpec(NamedTuple):
   encoder_cls: Any
   adapter_cls: Any = None
   eoa_cls: Any = None
+
+
+# Re-exported so extensions can name tasks without depending on `core`.
+ExportTask = exportable_module_config.ExportTask
+
+
+class ExportDefaults(NamedTuple):
+  """Recommended export settings for a checkpoint.
+
+  Returned by `ModelExtension.get_export_defaults` so per-architecture
+  knowledge lives with the extension rather than in every caller. Explicit
+  caller arguments always override these values.
+
+  Attributes:
+    task: Default `ExportTask` for the checkpoint, or `None` to let the caller
+      decide (`text_generation` when nothing else applies).
+    export_kwargs: Recommended `export.export` keyword arguments for the
+      resolved task and `target` (e.g. `quantization_recipe`, `input_sec`,
+      `externalize_embedder`).
+  """
+
+  task: str | None = None
+  export_kwargs: Mapping[str, Any] = types.MappingProxyType({})
+
+
+def text_config_dict(config_dict: Mapping[str, Any]) -> Mapping[str, Any]:
+  """Returns `config_dict['text_config']` if present, else `config_dict`."""
+  return config_dict.get('text_config') or config_dict
 
 
 class ModelExtension:
@@ -576,6 +605,42 @@ class ModelExtension:
     del model_type
     return None
 
+  def get_export_defaults(
+      self,
+      config_dict: Mapping[str, Any],
+      task: str | None = None,
+      target: str = 'cpu_gpu',
+  ) -> ExportDefaults | None:
+    """Returns recommended export settings for a checkpoint.
+
+    Invoked before export using only the raw `config.json` (or Diffusers
+    `model_index.json`) so no model is loaded. Override it to declare the
+    default task and the export arguments known to work for the architecture;
+    callers merge them over the hardware target base settings and under their
+    own explicit arguments.
+
+    Note: Built-in extensions key off `config.json` (`model_type` and shape
+    fields) and target the official base/instruct checkpoints for each family.
+    When exporting custom fine-tunes or derivative checkpoints that modify the
+    chat template, stop/BOS tokens, or multimodal token/patch settings, callers
+    should override `litert_lm_llm_metadata_override='none'` (or a custom
+    `.pbtext` path) and/or `jinja_chat_template_override`.
+
+    Args:
+      config_dict: Parsed `config.json` (or `model_index.json`) contents, or an
+        empty dict if the checkpoint has none.
+      task: Task requested by the caller, or `None` when the task is detected
+        automatically. Return arguments that suit this task (for example, drop
+        vision-encoder arguments when a VLM is exported as `text_generation`).
+      target: Canonical hardware target string (e.g. `'cpu_gpu'`, `'npu'`,
+        `'npu:qualcomm'`).
+
+    Returns:
+      An `ExportDefaults`, or `None` if the extension has no recommendation.
+    """
+    del config_dict, task, target
+    return None
+
   def get_litert_lm_section_types(self) -> dict[str, Any]:
     """Maps auxiliary submodel names to `.litertlm` container section types.
 
@@ -673,6 +738,8 @@ class ModelExtension:
       self,
       param_name: str,
       try_load: Callable[[str], Any],
+      model_config: Any = None,
+      export_config: Any = None,
   ) -> Any | None:
     """Resolves a custom parameter tensor during Converter V2 weight streaming.
 
@@ -681,18 +748,27 @@ class ModelExtension:
     `fused_weight_specs` lookups. Use this hook when a patched module splits,
     slices, transposes, or rescales checkpoint tensors in ways not expressible
     via `checkpoint_key_prefixes` or `fused_weight_specs` (compare
+    `Qwen3_5Extension` in `model_ext/qwen3_5/extension.py` or
     `_MiniCpmOLlmWeightsLoader` in `model_ext/minicpm_o/minicpm_o.py`).
+
+    Subclasses may define either the legacy 2-argument signature
+    `(self, param_name, try_load)` or the 4-argument signature
+    `(self, param_name, try_load, model_config=None, export_config=None)`.
 
     Args:
       param_name: Export module parameter name requested by the converter.
       try_load: Helper callable `(key_or_param_name) -> Tensor | None` that
         searches candidate checkpoint prefixes in safetensors shards.
+      model_config: Optional loaded `PretrainedConfig` for architecture-specific
+        layout parameters (e.g. head counts or partial rotary factors).
+      export_config: Optional `ExportableModuleConfig` controlling active
+        composite or fusion weight layouts.
 
     Returns:
       A materialized `torch.Tensor` if handled by this extension, or `None` to
       fall back to standard `HFCheckpointWeightsLoader` resolution.
     """
-    del param_name, try_load
+    del param_name, try_load, model_config, export_config
     return None
 
   def load_config(
@@ -754,6 +830,31 @@ class ModelExtension:
     """
     del task, model_config, export_config
     return None
+
+
+def invoke_tensor_resolver(
+    resolver: Callable[..., Any],
+    param_name: str,
+    try_load: Callable[[str], Any],
+    model_config: Any = None,
+    export_config: Any = None,
+) -> Any | None:
+  """Calls `resolver`, forwarding config args only when its signature allows."""
+  try:
+    params = tuple(inspect.signature(resolver).parameters.values())
+  except (TypeError, ValueError):
+    return resolver(param_name, try_load)
+  accepts_varargs = any(
+      p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in params
+  )
+  positional = [
+      p
+      for p in params
+      if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+  ]
+  if accepts_varargs or len(positional) >= 4:
+    return resolver(param_name, try_load, model_config, export_config)
+  return resolver(param_name, try_load)
 
 
 class CompositeModelExtension(ModelExtension):
@@ -960,6 +1061,19 @@ class CompositeModelExtension(ModelExtension):
         return res
     return None
 
+  def get_export_defaults(
+      self,
+      config_dict: Mapping[str, Any],
+      task: str | None = None,
+      target: str = 'cpu_gpu',
+  ) -> ExportDefaults | None:
+    """See base class."""
+    for ext in reversed(self._extensions):
+      res = ext.get_export_defaults(config_dict, task, target)
+      if res is not None:
+        return res
+    return None
+
   def matches_checkpoint(
       self,
       model_path: str,
@@ -1023,10 +1137,18 @@ class CompositeModelExtension(ModelExtension):
       self,
       param_name: str,
       try_load: Callable[[str], Any],
+      model_config: Any = None,
+      export_config: Any = None,
   ) -> Any | None:
     """See base class."""
     for ext in reversed(self._extensions):
-      res = ext.resolve_checkpoint_tensor(param_name, try_load)
+      res = invoke_tensor_resolver(
+          ext.resolve_checkpoint_tensor,
+          param_name,
+          try_load,
+          model_config=model_config,
+          export_config=export_config,
+      )
       if res is not None:
         return res
     return None

@@ -74,6 +74,55 @@ class LitertLmBundleTest(absltest.TestCase):
     with open(unpacked['SP_Tokenizer'], 'rb') as f:
       self.assertEqual(f.read(), b'SPM_TOKENIZER')
 
+  def test_pack_with_executor_metadata(self):
+    tmpdir = self.create_tempdir()
+    model_file = tmpdir.create_file('main.tflite', content=b'TFL3_main_data')
+    executor_metadata_file = tmpdir.create_file(
+        'executor_metadata.pbtext',
+        content='llm_executor_metadata { max_history_size: 5 }\n',
+    )
+    output_litertlm = os.path.join(tmpdir.full_path, 'bundle.litertlm')
+
+    litertlm_bundle.LitertLmBundle.pack(
+        output_litertlm=output_litertlm,
+        prefilldecode_model_path=model_file.full_path,
+        executor_metadata_path=executor_metadata_file.full_path,
+    )
+
+    peek_output = litertlm_bundle.LitertLmBundle.peek(output_litertlm)
+    self.assertIn('ExecutorMetadataProto', peek_output)
+    self.assertIn('max_history_size: 5', peek_output)
+
+  def test_unpack_and_repack_preserves_executor_metadata(self):
+    # Mirrors how calib/quantize.py carries executor metadata across a repack.
+    tmpdir = self.create_tempdir()
+    model_file = tmpdir.create_file('main.tflite', content=b'TFL3_main_data')
+    executor_metadata_file = tmpdir.create_file(
+        'executor_metadata.pbtext',
+        content='llm_executor_metadata { max_history_size: 5 }\n',
+    )
+    input_litertlm = os.path.join(tmpdir.full_path, 'input.litertlm')
+    litertlm_bundle.LitertLmBundle.pack(
+        output_litertlm=input_litertlm,
+        prefilldecode_model_path=model_file.full_path,
+        executor_metadata_path=executor_metadata_file.full_path,
+    )
+
+    unpacked = litertlm_bundle.unpack_litertlm(
+        input_litertlm, os.path.join(tmpdir.full_path, 'unpacked')
+    )
+    self.assertIn('ExecutorMetadata', unpacked)
+
+    output_litertlm = os.path.join(tmpdir.full_path, 'output.litertlm')
+    litertlm_bundle.LitertLmBundle.pack(
+        output_litertlm=output_litertlm,
+        prefilldecode_model_path=unpacked['tf_lite_prefill_decode'],
+        executor_metadata_path=unpacked['ExecutorMetadata'],
+    )
+    peek_output = litertlm_bundle.LitertLmBundle.peek(output_litertlm)
+    self.assertIn('ExecutorMetadataProto', peek_output)
+    self.assertIn('max_history_size: 5', peek_output)
+
   def test_gemma3_prompt_tokenization_if_available(self):
     bundle_path = '/tmp/gemma3_270m_exported/model.litertlm'
     if not os.path.exists(bundle_path):

@@ -92,8 +92,11 @@ setup(
         "numpy",
         "scipy",
         "safetensors",
+        "huggingface_hub",
         "multipledispatch",
         "transformers",
+        # TODO(b/583930422): Remove typer<0.29.0 pin once xdsl upgrades past 0.28.0.
+        "typer<0.29.0",
         "kagglehub",
         "tabulate",
         "torch>=2.4.0",
@@ -106,7 +109,7 @@ setup(
         "fire",
         "sentencepiece",
         "rich",
-        "litert-lm-builder>=0.19.0",
+        "litert-lm-builder-nightly",
         "pillow",
     ],
     entry_points={

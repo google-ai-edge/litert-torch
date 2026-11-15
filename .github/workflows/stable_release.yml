@@ -59,7 +59,7 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
-    name: Test Install and Import litert-torch
+    name: Test Install and Import litert-torch (No TF)
     runs-on:
       labels: linux-x86-n4-16
     container:
@@ -77,19 +77,80 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: litert-torch-wheel
-          path: ./dist
+          path: /tmp/dist
 
       - name: Install litert-torch
         run: |
-          python -m pip install dist/*.whl
+          python -m pip install /tmp/dist/*.whl
 
-      - name: Import litert-torch
+      - name: Import litert-torch and export_hf from /tmp
+        working-directory: /tmp
         run: |
-          python -c "import litert_torch"
+          python -c "import litert_torch; from litert_torch.generative.export_hf import export"
+
+  test-export-hf-v2-wheel:
+    needs: build-stable
+    name: Test export_hf Converter V2 on Built Stable Wheel
+    runs-on:
+      labels: linux-x86-n4-16
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+    steps:
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - run: |
+          python -m pip cache purge
+          python -m pip install --upgrade pip
+
+      - name: Download Stable Wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: litert-torch-wheel
+          path: /tmp/dist
+
+      - name: Install Stable Wheel and tf-nightly
+        run: |
+          python -m pip install /tmp/dist/*.whl
+          python -m pip install --pre tf-nightly
+
+      - name: Run Tiny Qwen3 Converter V2 Export and LiteRT Inference
+        working-directory: /tmp
+        run: |
+          python - << 'EOF'
+          import torch
+          import transformers
+          from litert_torch.generative.export_hf.model_ext import builtin_extensions
+          from litert_torch.generative.export_hf.model_ext import testing as ext_testing
+
+          torch.manual_seed(0)
+          ext = builtin_extensions.Qwen3Extension()
+          cfg = transformers.Qwen3Config(
+              vocab_size=64,
+              hidden_size=32,
+              intermediate_size=64,
+              num_hidden_layers=2,
+              num_attention_heads=2,
+              num_key_value_heads=2,
+              head_dim=16,
+              max_position_embeddings=64,
+          )
+          with ext.patch_context():
+            model = transformers.Qwen3ForCausalLM(cfg).eval()
+          sigs = ext_testing.assert_tiny_v2_export(
+              ext=ext,
+              model=model,
+              target="cpu_gpu",
+              export_kwargs={"externalize_embedder": True},
+              max_tensor_rank=4,
+          )
+          assert "model.tflite" in sigs and "embedder.tflite" in sigs, sigs
+          EOF
 
   publish-stable:
     name: Publish to PyPI
-    needs: test-before-publish
+    needs: [test-before-publish, test-export-hf-v2-wheel]
     if: success() && inputs.dry_run == false
     runs-on: ubuntu-latest
     steps:
@@ -129,6 +190,7 @@ jobs:
         run: |
           python -m pip install litert-torch
 
-      - name: Import litert-torch
+      - name: Import litert-torch from /tmp
+        working-directory: /tmp
         run: |
-          python -c "import litert_torch"
+          python -c "import litert_torch; from litert_torch.generative.export_hf import export"

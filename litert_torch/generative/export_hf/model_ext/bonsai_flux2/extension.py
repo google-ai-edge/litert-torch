@@ -42,6 +42,17 @@ class BonsaiFlux2Extension(extension_lib.ModelExtension):
 
   model_types = ('bonsai_flux2',)
 
+  def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
+    """See base class."""
+    del config_dict, task, target
+    return extension_lib.ExportDefaults(
+        task=extension_lib.ExportTask.TEXT_TO_IMAGE,
+        export_kwargs={
+            't2i_output_image_size': 512,
+            'quantization_recipe': 'dynamic_wi4b32_afp32',
+        },
+    )
+
   def get_image_gen_model_cls(self, model_type):
     """See base class."""
     del model_type

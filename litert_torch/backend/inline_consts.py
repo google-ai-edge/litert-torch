@@ -30,22 +30,39 @@ config = _config.config
 
 @dataclasses.dataclass(frozen=True)
 class _ConstantFingerprint:
-  """Unique fingerprint of a torch.Tensor constant for caching."""
+  """Fingerprint of a torch.Tensor constant for caching.
+
+  It must be taken from the constant itself, never from the temporary that
+  ``tensor.contiguous()`` returns for a non-contiguous tensor: the temporary is
+  freed when the lowering returns, and the allocator can hand its address to
+  the next constant, so two distinct constants would share one MLIR attribute.
+  See https://github.com/google-ai-edge/litert-torch/issues/1061.
+
+  ``is_neg`` and ``is_conj`` are part of it because a view can differ from
+  another in nothing else: ``z.imag`` and ``z.conj().imag`` share their storage,
+  shape and strides, and only the second one reads negated.
+  """
 
   device: str
+  dtype: str
   shape: tuple[int, ...]
   stride: tuple[int, ...]
   data_ptr: int
   storage_offset: int
+  is_neg: bool
+  is_conj: bool
 
   @classmethod
   def from_tensor(cls, tensor: torch.Tensor) -> '_ConstantFingerprint':
     return cls(
         device=str(tensor.device),
-        shape=tensor.shape,
-        stride=tensor.stride(),
+        dtype=str(tensor.dtype),
+        shape=tuple(tensor.shape),
+        stride=tuple(tensor.stride()),
         data_ptr=tensor.untyped_storage().data_ptr(),
         storage_offset=tensor.storage_offset(),
+        is_neg=tensor.is_neg(),
+        is_conj=tensor.is_conj(),
     )
 
 
@@ -55,6 +72,11 @@ class InlineConstsContext(lowerings.context.LoweringContextPlugin):
 
   enable_resource_constants: bool = False
   constant_cache: dict[_ConstantFingerprint, ir.Attribute] = dataclasses.field(
+      default_factory=dict
+  )
+  # Holds every cached constant for as long as the cache lives, so that no
+  # other tensor can be allocated at an address a fingerprint refers to.
+  cached_tensors: dict[_ConstantFingerprint, torch.Tensor] = dataclasses.field(
       default_factory=dict
   )
 
@@ -147,9 +169,9 @@ def tensor_lowering_placeholder_lowering(
 ):
   """Lower the placeholder function to a constant op."""
   const_ctx = InlineConstsContext.get(lctx)
-  x = x.contiguous().detach().cpu()
-
+  # Fingerprint before .contiguous(): see _ConstantFingerprint.
   x_fingerprint = _ConstantFingerprint.from_tensor(x)
+
   elty = lowering_utils.torch_dtype_to_ir_element_type(x.dtype)
   tensor_type = ir.RankedTensorType.get(x.shape, elty)
 
@@ -157,6 +179,10 @@ def tensor_lowering_placeholder_lowering(
   cached_attr = const_ctx.constant_cache.get(x_fingerprint)
   if cached_attr is not None:
     return _build_const(cached_attr, tensor_type)
+
+  const = x
+  # numpy() rejects a tensor that still has its conjugate or negative bit set.
+  x = x.resolve_conj().resolve_neg().contiguous().detach().cpu()
 
   use_resource_attr = const_ctx.enable_resource_constants
   if x.dtype not in [torch.float32, torch.int32]:
@@ -183,7 +209,7 @@ def tensor_lowering_placeholder_lowering(
     arr = _tensor_to_mlir_compatible_array(x)
     attr = ir.DenseResourceElementsAttr.get_from_buffer(
         memoryview(arr),
-        f'TENSOR_{x_fingerprint}',
+        f'TENSOR_{len(const_ctx.constant_cache)}',
         tensor_type,
     )
   else:
@@ -191,6 +217,7 @@ def tensor_lowering_placeholder_lowering(
     attr = ir.DenseElementsAttr.get(arr, type=tensor_type)
 
   const_ctx.constant_cache[x_fingerprint] = attr
+  const_ctx.cached_tensors[x_fingerprint] = const
   return _build_const(attr, tensor_type)
 
 

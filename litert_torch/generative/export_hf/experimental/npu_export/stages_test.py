@@ -16,6 +16,7 @@
 
 import os
 from typing import Any
+from unittest import mock
 from absl import flags
 from absl.testing import absltest
 from litert_torch.generative.export_hf.experimental.npu_export import config_manager
@@ -126,6 +127,36 @@ class StagesTest(absltest.TestCase):
     )
     self.assertEqual(bound_compile["backend"], "qualcomm")
     self.assertEqual(bound_compile["soc_model"], "SM8850")
+
+  def test_npu_export_forwards_npu_executor_overrides(self):
+    cfg = config_manager.build_pipeline_config(
+        model_id="google/gemma-3-270m-it",
+        target_vendor="qualcomm",
+        target_soc="SM8850",
+        use_hw_masking_for_npu=False,
+        use_hw_ple_for_npu=True,
+    )
+    with mock.patch.object(stages, "export_func", autospec=True) as mock_export:
+      stages.npu_export(cfg, output_dir="/tmp/exp")
+
+    kwargs = mock_export.call_args.kwargs
+    self.assertIs(kwargs["use_hw_masking_for_npu"], False)
+    self.assertIs(kwargs["use_hw_ple_for_npu"], True)
+    # Unset fields are not forwarded so the model-type defaults apply.
+    self.assertNotIn("enable_neon_for_npu_greedy_sampling", kwargs)
+    self.assertNotIn("use_hw_cache_update_for_npu", kwargs)
+
+  def test_npu_export_kwargs_override_npu_executor_config(self):
+    cfg = config_manager.build_pipeline_config(
+        model_id="google/gemma-3-270m-it",
+        target_vendor="qualcomm",
+        target_soc="SM8850",
+        use_hw_masking_for_npu=False,
+    )
+    with mock.patch.object(stages, "export_func", autospec=True) as mock_export:
+      stages.npu_export(cfg, output_dir="/tmp/exp", use_hw_masking_for_npu=True)
+
+    self.assertIs(mock_export.call_args.kwargs["use_hw_masking_for_npu"], True)
 
   def test_json_serialization_and_ad_hoc_attributes(self):
     cfg = config_manager.build_pipeline_config(

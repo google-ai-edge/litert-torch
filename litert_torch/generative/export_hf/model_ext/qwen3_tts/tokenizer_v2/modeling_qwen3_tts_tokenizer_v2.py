@@ -703,6 +703,12 @@ class Qwen3TTSTokenizerV2DecoderTransformerModel(
       cache_position=None,
       **kwargs,
   ) -> BaseModelOutputWithPast:
+    r"""Runs the decoder transformer forward pass.
+
+    Args:
+        cache_position (`torch.LongTensor`, *optional*):
+            Indices of input sequence tokens in the sequence.
+    """
     if input_ids is not None:
       raise ValueError("input_ids is not expected")
     if (input_ids is None) ^ (inputs_embeds is not None):

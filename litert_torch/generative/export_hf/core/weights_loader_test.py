@@ -93,11 +93,79 @@ class InitAndCastTest(absltest.TestCase):
     # Patch is removed on exit.
     self.assertFalse(nn.Linear(2, 2).weight.is_meta)
 
-  def test_cast_params_keeps_buffers_and_ties(self):
-    model = weights_loader_lib.cast_params_(_Tiny(), torch.bfloat16)
+  def test_cast_params_keeps_buffers_ties_and_skipped_suffixes(self):
+    tiny = _Tiny()
+    tiny.proj.weight_scale = nn.Parameter(
+        torch.ones(4, 1, dtype=torch.float32), requires_grad=False
+    )
+    model = weights_loader_lib.cast_params_(
+        tiny, torch.bfloat16, skip_suffixes=("weight_scale",)
+    )
     self.assertEqual(model.proj.weight.dtype, torch.bfloat16)
+    self.assertEqual(model.proj.weight_scale.dtype, torch.float32)
     self.assertEqual(model.rotary.inv_freq.dtype, torch.float32)
     self.assertIs(model.lm_head.weight, model.embed_tokens.weight)
+
+  def test_prepare_for_export_with_module_weights(self):
+    class _CustomQuant(nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.register_buffer(
+            "weight", torch.empty((4, 4), dtype=torch.int8, device="meta")
+        )
+        self.register_buffer("scale", torch.full((4,), 0.5))
+
+      def load_export_weight(self, wl, prefix, attr):
+        if attr == "weight":
+          return wl(f"{prefix}.raw_weight") * 2
+        return None
+
+    root = _Wrapper(_CustomQuant())
+    base_tensors = {
+        "model.raw_weight": torch.ones((4, 4), dtype=torch.int8),
+    }
+
+    def base_loader(name):
+      return base_tensors[name]
+
+    closed = []
+    base_loader.close = lambda: closed.append(True)
+
+    with weights_loader_lib.prepare_for_export(base_loader, root) as loader:
+      self.assertTrue(root.model.scale.is_meta)
+      torch.testing.assert_close(loader("model.scale"), torch.full((4,), 0.5))
+      torch.testing.assert_close(
+          loader("model.weight"), torch.full((4, 4), 2, dtype=torch.int8)
+      )
+      self.assertTrue(hasattr(loader, "close"))
+      loader.close()
+      self.assertEqual(closed, [True])
+    self.assertFalse(root.model.scale.is_meta)
+
+  def test_embed_tokens_on_cpu_delegates_to_custom_hook(self):
+    class _CustomEmb(nn.Module):
+
+      def embed_tokens_on_cpu(self, ids, wl, prefix):
+        return wl(f"{prefix}.packed")[ids.long()].float() * 3.0
+
+    class _ModelWithCustomEmb(nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.embed_tokens = _CustomEmb()
+
+      def get_input_embeddings(self):
+        return self.embed_tokens
+
+    model = _ModelWithCustomEmb()
+    tensors = {"embed_tokens.packed": torch.arange(8).reshape(4, 2)}
+    out = weights_loader_lib.embed_tokens_on_cpu(
+        model, [1, 3], weights_loader=tensors.__getitem__
+    )
+    torch.testing.assert_close(
+        out, tensors["embed_tokens.packed"][[1, 3]].unsqueeze(0).float() * 3.0
+    )
 
   def test_submodule_weights_loader(self):
     root = _Wrapper(_Tiny())
@@ -132,20 +200,6 @@ class InitAndCastTest(absltest.TestCase):
       with self.assertRaises(KeyError):
         loader("model.proj.weight")
     self.assertIs(tiny.rotary.inv_freq, real)
-
-  def test_materialize_params_on_cpu_restores_meta(self):
-    ref = _Tiny()
-    state = dict(ref.state_dict())
-    with weights_loader_lib.init_params_on_meta():
-      tiny = _Tiny()
-    self.assertTrue(all(p.is_meta for p in tiny.parameters()))
-    with weights_loader_lib.materialize_params_on_cpu(
-        tiny, weights_loader=state.__getitem__
-    ):
-      self.assertTrue(all(not p.is_meta for p in tiny.parameters()))
-      self.assertIs(tiny.lm_head.weight, tiny.embed_tokens.weight)
-      torch.testing.assert_close(tiny.proj.weight, ref.proj.weight)
-    self.assertTrue(all(p.is_meta for p in tiny.parameters()))
 
 
 class HFCheckpointWeightsLoaderTest(absltest.TestCase):
@@ -283,9 +337,9 @@ class HFCheckpointWeightsLoaderTest(absltest.TestCase):
   def test_load_persistent_buffers(self):
     with weights_loader_lib.init_params_on_meta():
       model = _Multimodal()
-    layer = model.model.language_model.layers[0]
     with self.assertLogs(level="WARNING") as logs:
       weights_loader_lib.load_persistent_buffers_(model, self.loader)
+    layer = model.model.language_model.layers[0]
     # Resolved by the same lookup as `model.language_model.layers.0.*` params.
     torch.testing.assert_close(
         layer.layer_scalar,
@@ -373,6 +427,17 @@ class HFCheckpointWeightsLoaderTest(absltest.TestCase):
         tensors["raw_packed.proj_t"].t(),
     )
 
+  def test_weights_dir_separate_from_checkpoint_dir(self):
+    # Config-only checkpoint dir; the shards live in `self.ckpt_dir`.
+    config_dir = self.create_tempdir().full_path
+    loader = weights_loader_lib.HFCheckpointWeightsLoader(
+        config_dir, weights_dir=self.ckpt_dir
+    )
+    torch.testing.assert_close(
+        loader("model.model.language_model.embed_tokens.weight"),
+        self.tensors["model.language_model.embed_tokens.weight"],
+    )
+
 
 class ResolveCheckpointDirTest(absltest.TestCase):
 
@@ -441,155 +506,74 @@ class ResolveCheckpointDirTest(absltest.TestCase):
     self.assertEqual(resolved, self.downloaded_dir)
 
 
-class Qwen35QkvNormRopeWeightsLoaderTest(absltest.TestCase):
-  """Tests Qwen3.5 qkv_norm_rope composite transforms in HFCheckpointWeightsLoader."""
+class TensorResolverPrecedenceAndSignatureTest(absltest.TestCase):
+  """Tests generic `tensor_resolver` precedence and 2-arg/4-arg signatures."""
 
   def setUp(self):
     super().setUp()
     self.ckpt_dir = self.create_tempdir().full_path
-    self.num_heads = 2
-    self.num_kv_heads = 1
-    self.head_dim = 8
-    self.hidden_size = 16
-    # rotary_dim = 8 * 0.25 = 2 -> half_rot = 1, half_dim = 4
-    # perm = [0, 2, 3, 4, 1, 5, 6, 7]
-    self.expected_perm = torch.tensor(
-        [0, 2, 3, 4, 1, 5, 6, 7], dtype=torch.long
-    )
-
-    self.q_only = torch.arange(
-        self.num_heads * self.head_dim * self.hidden_size, dtype=torch.float32
-    ).view(self.num_heads, self.head_dim, self.hidden_size)
-    self.gate = (
-        torch.arange(
-            self.num_heads * self.head_dim * self.hidden_size,
-            dtype=torch.float32,
-        ).view(self.num_heads, self.head_dim, self.hidden_size)
-        + 1000.0
-    )
-    q_proj_w = torch.stack([self.q_only, self.gate], dim=1).reshape(
-        self.num_heads * 2 * self.head_dim, self.hidden_size
-    )
-    self.k_proj_w = (
-        torch.arange(
-            self.num_kv_heads * self.head_dim * self.hidden_size,
-            dtype=torch.float32,
-        ).view(self.num_kv_heads * self.head_dim, self.hidden_size)
-        + 2000.0
-    )
-    self.v_proj_w = (
-        torch.arange(
-            self.num_kv_heads * self.head_dim * self.hidden_size,
-            dtype=torch.float32,
-        ).view(self.num_kv_heads * self.head_dim, self.hidden_size)
-        + 3000.0
-    )
-
-    self.q_only_b = torch.arange(
-        self.num_heads * self.head_dim, dtype=torch.float32
-    ).view(self.num_heads, self.head_dim)
-    self.gate_b = (
-        torch.arange(self.num_heads * self.head_dim, dtype=torch.float32).view(
-            self.num_heads, self.head_dim
-        )
-        + 100.0
-    )
-    q_proj_b = torch.stack([self.q_only_b, self.gate_b], dim=1).reshape(-1)
-    self.k_proj_b = (
-        torch.arange(self.num_kv_heads * self.head_dim, dtype=torch.float32)
-        + 200.0
-    )
-    self.v_proj_b = (
-        torch.arange(self.num_kv_heads * self.head_dim, dtype=torch.float32)
-        + 300.0
-    )
-
-    self.q_norm_w = torch.arange(self.head_dim, dtype=torch.float32) + 10.0
-    self.k_norm_w = torch.arange(self.head_dim, dtype=torch.float32) + 20.0
-
+    self.raw_norm = torch.tensor([0.25, 0.5, -0.25, 0.0], dtype=torch.float32)
+    self.raw_w1 = torch.ones((3, 4), dtype=torch.float32)
+    self.raw_w2 = torch.full((3, 4), 2.0, dtype=torch.float32)
     safetensors.torch.save_file(
         {
-            "model.layers.0.self_attn.q_proj.weight": q_proj_w,
-            "model.layers.0.self_attn.k_proj.weight": self.k_proj_w,
-            "model.layers.0.self_attn.v_proj.weight": self.v_proj_w,
-            "model.layers.0.self_attn.q_proj.bias": q_proj_b,
-            "model.layers.0.self_attn.k_proj.bias": self.k_proj_b,
-            "model.layers.0.self_attn.v_proj.bias": self.v_proj_b,
-            "model.layers.0.self_attn.q_norm.weight": self.q_norm_w,
-            "model.layers.0.self_attn.k_norm.weight": self.k_norm_w,
+            "model.norm.weight": self.raw_norm,
+            "model.layers.0.w1.weight": self.raw_w1,
+            "model.layers.0.w2.weight": self.raw_w2,
         },
         os.path.join(self.ckpt_dir, "model.safetensors"),
     )
-    self.config = types.SimpleNamespace(
-        model_type="qwen3_5_text",
-        num_attention_heads=self.num_heads,
-        num_key_value_heads=self.num_kv_heads,
-        head_dim=self.head_dim,
-        hidden_size=self.hidden_size,
-        rope_parameters={"partial_rotary_factor": 0.25},
-    )
 
-  def test_deinterleaves_q_gate_and_permutes_partial_rope(self):
-    """Verifies [Q, K, V, Gate] ordering and partial-rotary permutation."""
-    export_config = types.SimpleNamespace(use_qkv_norm_rope_composite=True)
+  def test_four_arg_resolver_runs_before_try_load_and_receives_configs(self):
+    """Verifies 4-arg resolvers can transform existing checkpoint keys."""
+    model_cfg = types.SimpleNamespace(scale_shift=1.0)
+    export_cfg = types.SimpleNamespace(double_w1=True)
+
+    def _four_arg_resolver(param_name, try_load, cfg, exp_cfg):
+      if param_name.endswith("norm.weight"):
+        raw = try_load(param_name)
+        return raw + cfg.scale_shift if raw is not None else None
+      if getattr(exp_cfg, "double_w1", False) and param_name.endswith(
+          "w1.weight"
+      ):
+        raw = try_load(param_name)
+        return raw * 2.0 if raw is not None else None
+      return None
+
     loader = weights_loader_lib.HFCheckpointWeightsLoader(
-        self.ckpt_dir, config=self.config, export_config=export_config
-    )
-
-    qkv_w = loader("static_model.model.layers.0.self_attn.qkv_proj.weight")
-    expected_q_w = self.q_only[:, self.expected_perm, :].reshape(
-        self.num_heads * self.head_dim, self.hidden_size
-    )
-    expected_k_w = self.k_proj_w.view(
-        self.num_kv_heads, self.head_dim, self.hidden_size
-    )[:, self.expected_perm, :].reshape(
-        self.num_kv_heads * self.head_dim, self.hidden_size
-    )
-    expected_gate_w = self.gate.reshape(
-        self.num_heads * self.head_dim, self.hidden_size
+        self.ckpt_dir,
+        extra_fused_specs=(("w12", ("w1", "w2"), 0),),
+        tensor_resolver=_four_arg_resolver,
+        config=model_cfg,
+        export_config=export_cfg,
     )
     torch.testing.assert_close(
-        qkv_w,
-        torch.cat(
-            [expected_q_w, expected_k_w, self.v_proj_w, expected_gate_w], dim=0
-        ),
-    )
-
-    qkv_b = loader("static_model.model.layers.0.self_attn.qkv_proj.bias")
-    expected_q_b = self.q_only_b[:, self.expected_perm].reshape(-1)
-    expected_k_b = self.k_proj_b.view(self.num_kv_heads, self.head_dim)[
-        :, self.expected_perm
-    ].reshape(-1)
-    expected_gate_b = self.gate_b.reshape(-1)
-    torch.testing.assert_close(
-        qkv_b,
-        torch.cat(
-            [expected_q_b, expected_k_b, self.v_proj_b, expected_gate_b], dim=0
-        ),
-    )
-
-    torch.testing.assert_close(
-        loader("static_model.model.layers.0.self_attn.q_norm.weight"),
-        self.q_norm_w[self.expected_perm],
+        loader("model.norm.weight"),
+        self.raw_norm + 1.0,
     )
     torch.testing.assert_close(
-        loader("static_model.model.layers.0.self_attn.k_norm.weight"),
-        self.k_norm_w[self.expected_perm],
+        loader("model.layers.0.w12.weight"),
+        torch.cat([self.raw_w1 * 2.0, self.raw_w2], dim=0),
     )
 
-  def test_keeps_raw_layout_when_composite_disabled(self):
-    """Verifies raw QKV concatenation when qkv_norm_rope composite is off."""
-    export_config = types.SimpleNamespace(use_qkv_norm_rope_composite=False)
+  def test_two_arg_legacy_resolver_remains_supported(self):
+    """Verifies legacy 2-arg `(param_name, try_load)` resolvers still work."""
+
+    def _two_arg_resolver(param_name, try_load):
+      if param_name.endswith("norm.weight"):
+        raw = try_load(param_name)
+        return raw + 3.0 if raw is not None else None
+      return None
+
     loader = weights_loader_lib.HFCheckpointWeightsLoader(
-        self.ckpt_dir, config=self.config, export_config=export_config
+        self.ckpt_dir,
+        tensor_resolver=_two_arg_resolver,
+        config=types.SimpleNamespace(),
+        export_config=types.SimpleNamespace(),
     )
     torch.testing.assert_close(
-        loader("model.layers.0.self_attn.q_norm.weight"), self.q_norm_w
-    )
-    qkv_w = loader("model.layers.0.self_attn.qkv_proj.weight")
-    raw_q_w = loader("model.layers.0.self_attn.q_proj.weight")
-    torch.testing.assert_close(
-        qkv_w, torch.cat([raw_q_w, self.k_proj_w, self.v_proj_w], dim=0)
+        loader("model.norm.weight"),
+        self.raw_norm + 3.0,
     )
 
 

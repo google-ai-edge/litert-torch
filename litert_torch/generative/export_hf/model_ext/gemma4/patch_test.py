@@ -16,16 +16,20 @@
 
 import copy
 import types
+from unittest import mock
 
 from absl.testing import parameterized
+from litert_torch.generative.export_hf.core import attention as attention_lib
 from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module_config
 from litert_torch.generative.export_hf.core import weights_loader
 import litert_torch.generative.export_hf.model_ext as _
 from litert_torch.generative.export_hf.model_ext.gemma4 import patch
+from litert_torch.generative.export_hf.model_ext.gemma4 import vision_exportable
 from litert_torch.generative.layers import moe
 import torch
 import transformers
+from transformers.models.gemma4 import image_processing_gemma4
 from transformers.models.gemma4 import modeling_gemma4
 
 from absl.testing import absltest as googletest
@@ -790,51 +794,215 @@ class PatchTest(parameterized.TestCase):
         f"Max diff: {(expected_output - actual_output).abs().max().item()}",
     )
 
-  def test_vision_patch_embedder_precomputes_tables(self):
+  def _vision_encoder_inputs(self, vision_config, seq_len=16):
+    torch.manual_seed(1)
+    inputs_embeds = torch.randn(1, seq_len, vision_config.hidden_size)
+    attention_mask = torch.ones((1, seq_len), dtype=torch.bool)
+    pixel_position_ids = torch.stack(
+        [torch.arange(seq_len) % 4, torch.arange(seq_len) // 4], dim=-1
+    ).unsqueeze(0)
+    return inputs_embeds, attention_mask, pixel_position_ids
+
+  def _vision_config(self):
     vision_config = modeling_gemma4.Gemma4VisionConfig(
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=1,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
         num_attention_heads=4,
         num_key_value_heads=4,
-        head_dim=8,
-        patch_size=14,
-        position_embedding_size=64,
-        pooling_kernel_size=2,
+        head_dim=16,
     )
+    vision_config._attn_implementation = "eager"
+    return vision_config
+
+  def test_vision_encoder_bidirectional_sdpa_composite(self):
+    vision_config = self._vision_config()
     torch.manual_seed(0)
-    ref_embedder = modeling_gemma4.Gemma4VisionPatchEmbedder(
-        vision_config
-    ).eval()
-    with torch.no_grad():
-      ref_embedder.position_embedding_table.normal_()
+    ref_encoder = modeling_gemma4.Gemma4VisionEncoder(vision_config).eval()
 
+    composite_config = copy.deepcopy(vision_config)
+    composite_config._attn_implementation = (
+        attention_lib.BIDIRECTIONAL_SDPA_ATTENTION
+    )
     with patch.gemma4_litert_patch():
-      patched_embedder = modeling_gemma4.Gemma4VisionPatchEmbedder(
-          vision_config
-      ).eval()
-    patched_embedder.load_state_dict(ref_embedder.state_dict())
+      encoder = modeling_gemma4.Gemma4VisionEncoder(composite_config).eval()
+    encoder.load_state_dict(ref_encoder.state_dict())
 
-    self.assertIn("table_x", patched_embedder._buffers)
-    self.assertIn("table_y", patched_embedder._buffers)
-    torch.testing.assert_close(
-        patched_embedder.table_x, ref_embedder.position_embedding_table[0]
-    )
-    torch.testing.assert_close(
-        patched_embedder.table_y, ref_embedder.position_embedding_table[1]
-    )
-
-    pixel_values = torch.randn(1, 16, 3 * 14 * 14)
-    pixel_position_ids = torch.randint(0, 8, (1, 16, 2))
-    padding_positions = torch.zeros((1, 16), dtype=torch.bool)
+    inputs = self._vision_encoder_inputs(vision_config)
     with torch.no_grad():
-      ref_out = ref_embedder(
-          pixel_values, pixel_position_ids, padding_positions
-      )
-      patched_out = patched_embedder(
-          pixel_values, pixel_position_ids, padding_positions
-      )
-    torch.testing.assert_close(patched_out, ref_out, rtol=1e-5, atol=1e-5)
+      expected = ref_encoder(
+          inputs_embeds=inputs[0],
+          attention_mask=inputs[1],
+          pixel_position_ids=inputs[2],
+      ).last_hidden_state
+      actual = encoder(
+          inputs_embeds=inputs[0],
+          attention_mask=inputs[1],
+          pixel_position_ids=inputs[2],
+      ).last_hidden_state
+    torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
+
+    class Wrapper(torch.nn.Module):
+
+      def __init__(self, enc):
+        super().__init__()
+        self.enc = enc
+
+      def forward(self, embeds, mask, pos_ids):
+        return self.enc(
+            inputs_embeds=embeds,
+            attention_mask=mask,
+            pixel_position_ids=pos_ids,
+        ).last_hidden_state
+
+    exported = torch.export.export(Wrapper(encoder), inputs)
+    marks = [
+        node
+        for node in exported.graph.nodes
+        if node.op == "call_function"
+        and "mark_tensor" in str(node.target)
+        and "odml.scaled_dot_product_attention" in (
+            str(node.args) + str(node.kwargs)
+        )
+    ]
+    # 2 layers * (Q, K, V, mask + output).
+    self.assertLen(marks, 10)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="eager", attn_implementation="eager"),
+      dict(
+          testcase_name="bidirectional_sdpa",
+          attn_implementation=attention_lib.BIDIRECTIONAL_SDPA_ATTENTION,
+      ),
+  )
+  def test_vision_encoder_mask_padding_matches_transformers(
+      self, attn_implementation
+  ):
+    # `transformers` masks the padded patches (position (-1, -1)) out of the
+    # attention, like the gemax ViT. The LiteRT encoder does too (an additive
+    # float key mask, the composite's 4th input), so the padded patches'
+    # contents do not change the real patches' outputs.
+    vision_config = self._vision_config()
+    torch.manual_seed(0)
+    ref_encoder = modeling_gemma4.Gemma4VisionEncoder(vision_config).eval()
+    litert_config = copy.deepcopy(vision_config)
+    litert_config._attn_implementation = attn_implementation
+    with patch.gemma4_litert_patch():
+      encoder = modeling_gemma4.Gemma4VisionEncoder(litert_config).eval()
+    encoder.load_state_dict(ref_encoder.state_dict())
+
+    inputs_embeds, attention_mask, pixel_position_ids = (
+        self._vision_encoder_inputs(vision_config)
+    )
+    num_real = 10
+    attention_mask[:, num_real:] = False
+    pixel_position_ids[:, num_real:] = -1
+
+    def run(enc):
+      with torch.no_grad():
+        return enc(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            pixel_position_ids=pixel_position_ids,
+        ).last_hidden_state[:, :num_real]
+
+    expected = run(ref_encoder)
+    actual = run(encoder)
+    torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
+    inputs_embeds[:, num_real:] = torch.randn_like(inputs_embeds[:, num_real:])
+    torch.testing.assert_close(run(encoder), actual, rtol=1e-5, atol=1e-5)
+
+  def test_vision_exportable_enables_sdpa_composite_for_vision(self):
+    for enabled in (True, False):
+      with self.subTest(enabled=enabled):
+        model = mock.MagicMock()
+        export_config = exportable_module_config.ExportableModuleConfig(
+            model="dummy", use_sdpa_composite_for_vision=enabled
+        )
+        vision_exportable.LiteRTExportableModuleForGemma4VisionEncoder(
+            model, export_config
+        )
+        set_attn = model.model.vision_tower.set_attn_implementation
+        if enabled:
+          set_attn.assert_called_once_with(
+              attention_lib.BIDIRECTIONAL_SDPA_ATTENTION
+          )
+        else:
+          set_attn.assert_not_called()
+
+  @parameterized.named_parameters(
+      ("default", {}, (140,)),
+      ("legacy_flag", {"gemma4_vision_max_soft_tokens": 70}, (70,)),
+      (
+          "all_budgets",
+          {"gemma4_vision_token_budgets": (1120, 560, 280, 140, 70)},
+          (70, 140, 280, 560, 1120),
+      ),
+  )
+  def test_vision_exportables_sample_inputs_per_budget(
+      self, extra_kwargs, expected_budgets
+  ):
+    image_processor = image_processing_gemma4.Gemma4ImageProcessor()
+    export_config = exportable_module_config.ExportableModuleConfig(
+        model="dummy", use_sdpa_composite_for_vision=False
+    )
+    model = mock.MagicMock()
+    encoder = vision_exportable.LiteRTExportableModuleForGemma4VisionEncoder(
+        model, export_config
+    )
+    adapter = vision_exportable.LiteRTExportableModuleForGemma4VisionAdapter(
+        model, export_config, tokenizer=None
+    )
+
+    encoder_inputs = encoder.get_sample_inputs(
+        None, image_processor=image_processor, **extra_kwargs
+    )
+    adapter_inputs = adapter.get_sample_inputs(
+        None, image_processor=image_processor, **extra_kwargs
+    )
+
+    self.assertEqual(
+        list(encoder_inputs), [f"vision_{n}" for n in expected_budgets]
+    )
+    self.assertEqual(
+        list(adapter_inputs),
+        [f"vision_adapter_{n}" for n in expected_budgets],
+    )
+    pooling = image_processor.pooling_kernel_size
+    for n in expected_budgets:
+      inputs, dynamic_shapes = encoder_inputs[f"vision_{n}"]
+      self.assertEqual(dynamic_shapes, {})
+      self.assertEqual(inputs["images"].shape[1], n * pooling * pooling)
+      self.assertEqual(inputs["positions_xy"].shape[1], n * pooling * pooling)
+      self.assertEqual(inputs["positions_xy"].dtype, torch.int32)
+      adapter_sig_inputs, _ = adapter_inputs[f"vision_adapter_{n}"]
+      self.assertEqual(adapter_sig_inputs["soft_tokens"].shape[1], n)
+
+  def test_vision_adapter_sample_inputs_uses_vision_hidden_size(self):
+    # Gemma 4 26B-A4B / 31B have vision_config.hidden_size=1152 while
+    # patchified pixel_values have last dim 3 * 16 * 16 = 768.
+    model = mock.MagicMock()
+    model_config = mock.MagicMock()
+    model_config.vision_config.hidden_size = 1152
+    image_processor = mock.MagicMock()
+    image_processor.return_value.pixel_values = torch.zeros((1, 2520, 768))
+    export_config = exportable_module_config.ExportableModuleConfig(
+        model="dummy"
+    )
+    adapter = vision_exportable.LiteRTExportableModuleForGemma4VisionAdapter(
+        model, export_config, tokenizer=mock.MagicMock()
+    )
+    sample_inputs = adapter.get_sample_inputs(
+        model_config,
+        image_processor=image_processor,
+        gemma4_vision_token_budgets=(70, 280),
+    )
+    self.assertEqual(
+        list(sample_inputs), ["vision_adapter_70", "vision_adapter_280"]
+    )
+    for n in (70, 280):
+      inputs_dict, _ = sample_inputs[f"vision_adapter_{n}"]
+      self.assertEqual(tuple(inputs_dict["soft_tokens"].shape), (1, n, 1152))
 
 
 if __name__ == "__main__":

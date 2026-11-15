@@ -79,8 +79,127 @@ def get_metadata_builder(
   return _combined_builder
 
 
+# Names of the `LlmNpuExecutorMetadata` fields that can be set at export time.
+NPU_EXECUTOR_SETTING_FIELDS = (
+    'enable_neon_for_npu_greedy_sampling',
+    'use_hw_masking_for_npu',
+    'use_hw_cache_update_for_npu',
+    'use_hw_ple_for_npu',
+)
+
+# Maps HF / LiteRT-LM model type strings to the canonical `LlmModelType` oneof
+# name used to look up NPU executor defaults. Multimodal checkpoints report
+# `<type>_text` on their text config, so both spellings are listed.
+_CANONICAL_LITERT_LM_MODEL_TYPES = {
+    'gemma3': 'gemma3',
+    'gemma3_text': 'gemma3',
+    'gemma3n': 'gemma3n',
+    'gemma3n_text': 'gemma3n',
+    'gemma4': 'gemma4',
+    'gemma4_text': 'gemma4',
+    'gemma4_unified': 'gemma4',
+    'qwen3': 'qwen3',
+    'qwen3_asr': 'qwen3',
+    'minicpm5': 'minicpm5',
+}
+
+# All handwritten NPU components enabled.
+_NPU_ALL_HW_COMPONENTS = {
+    'enable_neon_for_npu_greedy_sampling': True,
+    'use_hw_masking_for_npu': True,
+    'use_hw_cache_update_for_npu': True,
+    'use_hw_ple_for_npu': True,
+}
+
+# Default NPU executor settings keyed by canonical LiteRT-LM model type. These
+# models are known to work on NPU with all handwritten components enabled.
+_NPU_EXECUTOR_DEFAULTS = {
+    'gemma3': _NPU_ALL_HW_COMPONENTS,
+    'gemma3n': _NPU_ALL_HW_COMPONENTS,
+    'gemma4': _NPU_ALL_HW_COMPONENTS,
+    'qwen3': _NPU_ALL_HW_COMPONENTS,
+    'minicpm5': _NPU_ALL_HW_COMPONENTS,
+}
+
+
+def _canonicalize_litert_lm_model_type(model_type: str | None) -> str | None:
+  """Returns the canonical LiteRT-LM model type, or None if unsupported.
+
+  Matching is exact, like the `LlmModelType` match in `litert_lm_builder`.
+
+  Args:
+    model_type: A HF or LiteRT-LM model type string.
+  """
+  if not model_type:
+    return None
+  return _CANONICAL_LITERT_LM_MODEL_TYPES.get(model_type)
+
+
+def resolve_litert_lm_model_type(
+    source_model_artifacts: export_lib.SourceModelArtifacts,
+    export_config: exportable_module.ExportableModuleConfig,
+) -> str | None:
+  """Resolves the canonical LiteRT-LM model type of the exported model.
+
+  `litert_lm_model_type_override` is authoritative when set: it replaces the HF
+  model type (as in `litert_lm_builder`), so an unsupported override yields
+  None rather than falling back to the HF config. Otherwise the top-level HF
+  config is checked first (e.g. `gemma3n` for a multimodal checkpoint), then
+  the text config (e.g. `gemma3_text` for text-only Gemma3).
+
+  Args:
+    source_model_artifacts: The loaded source model artifacts.
+    export_config: The export config.
+
+  Returns:
+    The canonical model type (e.g. 'gemma3', 'qwen3'), or None if the model
+    type is not supported.
+  """
+  if export_config.litert_lm_model_type_override:
+    return _canonicalize_litert_lm_model_type(
+        export_config.litert_lm_model_type_override
+    )
+  for config in (
+      source_model_artifacts.model_config,
+      source_model_artifacts.text_model_config,
+  ):
+    model_type = _canonicalize_litert_lm_model_type(
+        getattr(config, 'model_type', None)
+    )
+    if model_type:
+      return model_type
+  return None
+
+
+def get_npu_executor_settings_for_model_type(
+    model_type: str | None,
+) -> dict[str, bool]:
+  """Returns default NPU executor settings for a given model type.
+
+  Args:
+    model_type: A HF or LiteRT-LM model type string (e.g. 'gemma3',
+      'gemma3n_text', 'qwen3'). Matching is exact.
+
+  Returns:
+    A dictionary mapping NPU executor settings attribute names to bool values,
+    or an empty dict if the model type is not recognized.
+  """
+  canonical_type = _canonicalize_litert_lm_model_type(model_type)
+  if canonical_type is None:
+    return {}
+  return dict(_NPU_EXECUTOR_DEFAULTS.get(canonical_type, {}))
+
+
 try:
   from litert_lm_builder.runtime.proto import executor_metadata_pb2
+
+  # TODO(b/542876170): Remove once litert-torch requires a litert-lm-builder
+  # release that includes `LlmNpuExecutorMetadata`. Until then, OSS installs
+  # may ship an older executor_metadata proto without the field.
+  HAS_NPU_EXECUTOR_METADATA = (
+      'llm_npu_executor_metadata'
+      in executor_metadata_pb2.ExecutorMetadata.DESCRIPTOR.fields_by_name
+  )
 
   def _add_state_buffer(
       llm_metadata: executor_metadata_pb2.LlmExecutorMetadata,
@@ -267,11 +386,77 @@ try:
           sliding_window_size
       )
 
+    # A ringbuffer only exists when sliding_attention layers get local caches,
+    # i.e. exactly when TYPE_LOCAL_*_CACHE buffers are emitted above. The
+    # runtime uses the same signal to detect ringbuffer models.
+    uses_ring_buffer = enable_ring_buffer and any(
+        layer_type == 'sliding_attention'
+        for layer_type in layer_types[:num_layers]
+    )
+    _populate_npu_executor_metadata(
+        source_model_artifacts,
+        export_config,
+        executor_metadata,
+        uses_ring_buffer=uses_ring_buffer,
+    )
     return executor_metadata
+
+  def _populate_npu_executor_metadata(
+      source_model_artifacts: export_lib.SourceModelArtifacts,
+      export_config: exportable_module.ExportableModuleConfig,
+      executor_metadata: executor_metadata_pb2.ExecutorMetadata,
+      uses_ring_buffer: bool,
+  ) -> None:
+    """Populates `llm_npu_executor_metadata` for split-cache exports.
+
+    NPU exports always use split cache (`aot_backend` and the NPU export
+    pipeline force it), so nothing is written for other exports. Precedence,
+    highest first:
+      1. Explicit user setting (config field).
+      2. Ringbuffer requirement (`use_hw_cache_update_for_npu=True`).
+      3. Defaults derived from the LiteRT-LM model type.
+    Fields left unset defer to the runtime defaults.
+
+    Args:
+      source_model_artifacts: The loaded source model artifacts.
+      export_config: The export config.
+      executor_metadata: The executor metadata to populate.
+      uses_ring_buffer: Whether any exported layer uses a sliding window
+        ringbuffer KV cache.
+    """
+    # TODO(b/542876170): Remove with HAS_NPU_EXECUTOR_METADATA.
+    if not HAS_NPU_EXECUTOR_METADATA:
+      return
+    if not export_config.split_cache:
+      return
+
+    model_type = resolve_litert_lm_model_type(
+        source_model_artifacts, export_config
+    )
+    npu_fields = get_npu_executor_settings_for_model_type(model_type)
+
+    # Models with a ringbuffer must use the handwritten KV cache update path
+    # because they do not use dynamic_update_slice and reuse the same KV cache
+    # buffers on model input and output.
+    if uses_ring_buffer:
+      npu_fields['use_hw_cache_update_for_npu'] = True
+
+    for attr in NPU_EXECUTOR_SETTING_FIELDS:
+      val = getattr(export_config, attr)
+      if val is not None:
+        npu_fields[attr] = val
+
+    if not npu_fields:
+      return
+    npu_metadata = executor_metadata.llm_npu_executor_metadata
+    for attr, val in npu_fields.items():
+      setattr(npu_metadata, attr, val)
+
 
 except ImportError:
   # LiteRT executor metadata is not available.
   build_executor_metadata = None
+  HAS_NPU_EXECUTOR_METADATA = False
 
 
 def get_executor_metadata_builder(

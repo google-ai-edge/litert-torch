@@ -14,7 +14,9 @@
 # ==============================================================================
 """Exportable modules for Gemma4 vision encoder and adapter."""
 
+from litert_torch.generative.export_hf.core import attention as attention_lib
 from litert_torch.generative.export_hf.core import exportable_module as exportable_module_base
+from litert_torch.generative.export_hf.model_ext.gemma4 import vision_budgets
 import torch
 
 
@@ -26,6 +28,14 @@ class LiteRTExportableModuleForGemma4VisionEncoder(
   def __init__(self, model: torch.nn.Module, export_config):
     super().__init__(export_config)
     self.model = model
+    if export_config.use_sdpa_composite_for_vision:
+      # The vision encoder attention is bidirectional over all patches and has
+      # no KV cache, so it can use the fused SDPA composite. Only the vision
+      # tower is switched; `LiteRTGemma4VisionEncoder` passes its padding mask
+      # as the composite's mask input.
+      model.model.vision_tower.set_attn_implementation(
+          attention_lib.BIDIRECTIONAL_SDPA_ATTENTION
+      )
 
   def forward(
       self,
@@ -75,17 +85,21 @@ class LiteRTExportableModuleForGemma4VisionEncoder(
       raise ValueError(
           'Image processor is required for Exporting Gemma4 vision encoder.'
       )
-    num_soft_tokens = kwargs.get('gemma4_vision_max_soft_tokens', 140)
-    dummy_image = image_processor(
-        images=[torch.zeros((1, 3, 224, 224))],
-        max_soft_tokens=num_soft_tokens,
-        return_tensors='pt',
-    )
-    inputs = {
-        'images': dummy_image.pixel_values,
-        'positions_xy': dummy_image.image_position_ids.int(),
-    }
-    return {f'vision_{num_soft_tokens}': (inputs, {})}
+    # One `vision_{N}` signature per soft-token budget `N`; the runtime picks
+    # the smallest signature that fits the preprocessed image.
+    sample_inputs = {}
+    for num_soft_tokens in vision_budgets.get_vision_token_budgets(kwargs):
+      dummy_image = image_processor(
+          images=[torch.zeros((1, 3, 224, 224))],
+          max_soft_tokens=num_soft_tokens,
+          return_tensors='pt',
+      )
+      inputs = {
+          'images': dummy_image.pixel_values,
+          'positions_xy': dummy_image.image_position_ids.int(),
+      }
+      sample_inputs[f'vision_{num_soft_tokens}'] = (inputs, {})
+    return sample_inputs
 
 
 class LiteRTExportableModuleForGemma4VisionAdapter(
@@ -115,18 +129,32 @@ class LiteRTExportableModuleForGemma4VisionAdapter(
       raise ValueError(
           'Image processor is required for Exporting Gemma4 vision adapter.'
       )
-    vision_output_length = kwargs.get('gemma4_vision_max_soft_tokens', 140)
-    dummy_image = image_processor(
-        images=[torch.zeros((1, 3, 224, 224))],
-        max_soft_tokens=vision_output_length,
-        return_tensors='pt',
-    ).pixel_values
-    hidden_size = dummy_image.shape[-1]
-    features = torch.zeros(
-        (1, vision_output_length, hidden_size), dtype=torch.float32
-    )
-    inputs = {'soft_tokens': features}
-    return {f'vision_adapter_{vision_output_length}': (inputs, {})}
+    vision_config = getattr(model_config, 'vision_config', None)
+    if vision_config is None:
+      vision_tower = getattr(
+          getattr(self.model, 'model', None), 'vision_tower', None
+      )
+      vision_config = getattr(vision_tower, 'config', None)
+    config_hidden_size = getattr(vision_config, 'hidden_size', None)
+    sample_inputs = {}
+    for vision_output_length in vision_budgets.get_vision_token_budgets(kwargs):
+      if isinstance(config_hidden_size, int) and not isinstance(
+          config_hidden_size, bool
+      ):
+        hidden_size = config_hidden_size
+      else:
+        dummy_image = image_processor(
+            images=[torch.zeros((1, 3, 224, 224))],
+            max_soft_tokens=vision_output_length,
+            return_tensors='pt',
+        ).pixel_values
+        hidden_size = dummy_image.shape[-1]
+      features = torch.zeros(
+          (1, vision_output_length, hidden_size), dtype=torch.float32
+      )
+      inputs = {'soft_tokens': features}
+      sample_inputs[f'vision_adapter_{vision_output_length}'] = (inputs, {})
+    return sample_inputs
 
 
 class LiteRTExportableModuleForGemma4EndOfImage(

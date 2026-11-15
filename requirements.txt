@@ -12,12 +12,15 @@ scipy
 numpy
 tabulate
 safetensors
+huggingface_hub
 kagglehub
 transformers
+# TODO(b/583930422): Remove typer<0.29.0 pin once xdsl upgrades past 0.28.0.
+typer<0.29.0
 multipledispatch
 jaxtyping
 fire
 rich
 sentencepiece
-litert-lm
-litert-lm-builder>=0.19.0
+litert-lm-nightly
+litert-lm-builder-nightly

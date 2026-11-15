@@ -18,6 +18,9 @@ Shared by the LFM2 short convolution blocks and the Qwen3.5 Gated DeltaNet
 layers. `apply_short_conv_step` wraps the LFM2 gated short convolution in the
 `odml.short_conv_step` composite, which MLDrift runs as one GPU kernel in both
 prefill and decode.
+
+The conv state is always channels-last, `[batch, L - 1, channels]`, where `L`
+is the kernel size, so every tap reads one contiguous row of channels.
 """
 
 from typing import Optional
@@ -25,6 +28,41 @@ from litert_torch.backend import composite
 from litert_torch.backend.torch_tfl import _ops as _  # Registers torch.ops.tfl.*
 import torch
 import torch.nn.functional as F
+
+
+def _to_channels_last_weight(
+    conv_weight: torch.Tensor, hidden_size: int
+) -> torch.Tensor:
+  """Normalizes depthwise conv weight to channels-last `[1, L, hidden_size]`."""
+  if conv_weight.dim() == 2:
+    return conv_weight.transpose(0, 1).unsqueeze(0).contiguous()
+  if (
+      conv_weight.shape[0] == 1
+      and conv_weight.shape[2] == hidden_size
+      and (hidden_size != 1 or conv_weight.shape[1] != 1)
+  ):
+    return conv_weight
+  return conv_weight.squeeze(1).transpose(0, 1).unsqueeze(0).contiguous()
+
+
+def _check_conv_state(conv_state: torch.Tensor, weight: torch.Tensor) -> None:
+  """Raises if `conv_state` is not channels-last `[batch, L - 1, channels]`.
+
+  Args:
+    conv_state: The conv state.
+    weight: Channels-last depthwise weight `[1, L, channels]`.
+  """
+  num_taps, channels = weight.shape[1], weight.shape[2]
+  if (
+      conv_state.dim() != 3
+      or conv_state.shape[1] != num_taps - 1
+      or conv_state.shape[2] != channels
+  ):
+    raise ValueError(
+        "conv_state must be channels-last [batch, L - 1, channels] ="
+        f" [batch, {num_taps - 1}, {channels}], got"
+        f" {tuple(conv_state.shape)}"
+    )
 
 
 def causal_conv1d_with_state(
@@ -37,47 +75,47 @@ def causal_conv1d_with_state(
   """Computes a causal depthwise conv1d over `concat(conv_state, x)`.
 
   Args:
-    x: Conv input [batch, channels, seq_len]. When `num_valid_tokens` is set,
+    x: Conv input [batch, seq_len, channels]. When `num_valid_tokens` is set,
       the valid tokens must form a prefix of the sequence.
-    conv_state: [batch, channels, L - 1], the last `L - 1` inputs of the
+    conv_state: [batch, L - 1, channels], the last `L - 1` inputs of the
       previous call, where `L` is the kernel size.
-    conv_weight: Depthwise weight [channels, 1, L] or [channels, L].
+    conv_weight: Depthwise weight [channels, 1, L], [channels, L] or
+      channels-last [1, L, channels].
     conv_bias: Optional bias [channels].
     num_valid_tokens: Optional int32 tensor with one element (shape [] or [1]):
       the number of valid tokens at the start of `x`, in [0, seq_len]. When
       omitted, all tokens are valid.
 
   Returns:
-    conv_out: [batch, channels, seq_len].
+    conv_out: [batch, seq_len, channels].
     next_state: The last `L - 1` inputs up to and including the last valid
-      token, [batch, channels, L - 1].
+      token, [batch, L - 1, channels].
   """
-  state_len = conv_state.shape[-1]
-  seq_len = x.shape[-1]
-  padded = torch.cat([conv_state, x], dim=-1)
-  weight = conv_weight.squeeze(1) if conv_weight.dim() == 3 else conv_weight
+  w = _to_channels_last_weight(conv_weight, conv_state.shape[-1])
+  _check_conv_state(conv_state, w)
+  state_len = conv_state.shape[1]
+  seq_len = x.shape[1]
+  padded = torch.cat([conv_state, x], dim=1)
   # Tap-wise multiply-add instead of `F.conv1d`: inside the
   # `odml.short_conv_step` decomposition `conv_weight` is a subgraph argument
   # rather than a constant, so a lowered `tfl.depthwise_conv_2d` would get a
   # non-static filter, which the quantizer skips and XNNPACK rejects, leaving
   # the slow builtin float kernel. Slices, muls and adds stay on XNNPACK.
-  num_taps = weight.shape[-1]
-  conv_out = padded[:, :, 0:seq_len] * weight[:, 0].unsqueeze(0).unsqueeze(-1)
+  num_taps = w.shape[1]
+  conv_out = padded[:, 0:seq_len, :] * w[:, 0:1, :]
   for k in range(1, num_taps):
-    conv_out = conv_out + padded[:, :, k : k + seq_len] * weight[
-        :, k
-    ].unsqueeze(0).unsqueeze(-1)
+    conv_out = conv_out + padded[:, k : k + seq_len, :] * w[:, k : k + 1, :]
   if conv_bias is not None:
-    conv_out = conv_out + conv_bias.unsqueeze(0).unsqueeze(-1)
+    conv_out = conv_out + conv_bias.view(1, 1, -1)
   if num_valid_tokens is None:
-    next_state = padded[:, :, -state_len:]
+    next_state = padded[:, -state_len:, :]
   else:
-    # padded[:, :, n : n + L - 1] for a runtime n. tfl.gather keeps the
+    # padded[:, n : n + L - 1, :] for a runtime n. tfl.gather keeps the
     # dynamic offset lowerable to the GPU delegates.
     indices = num_valid_tokens + torch.arange(
         state_len, device=padded.device, dtype=torch.int32
     )
-    next_state = torch.ops.tfl.gather(padded, indices, 2)
+    next_state = torch.ops.tfl.gather(padded, indices, 1)
   return conv_out, next_state
 
 
@@ -99,9 +137,9 @@ def short_conv(
   Args:
     in_proj_out: Input projection tensor [batch, seq_len, 3 * hidden_size] if
       is_gated=True, or [batch, seq_len, hidden_size] if is_gated=False.
-    conv_state: Convolution state tensor [batch, hidden_size, L - 1].
-    conv_weight: Depthwise convolution weight [hidden_size, 1, L] or
-      [hidden_size, L].
+    conv_state: Channels-last convolution state [batch, L - 1, hidden_size].
+    conv_weight: Depthwise convolution weight [hidden_size, 1, L], [hidden_size,
+      L], or channels-last [1, L, hidden_size].
     conv_bias: Optional bias tensor [hidden_size].
     num_valid_tokens: Optional int32 tensor [1] with the number of valid
       (non-padding) tokens at the start of the sequence, in [0, seq_len]. When
@@ -114,7 +152,10 @@ def short_conv(
   Returns:
     y: Output activation tensor [batch, seq_len, hidden_size] ready for
       out_proj.
-    next_state: Updated state tensor [batch, hidden_size, L - 1].
+    next_state: Updated channels-last state [batch, L - 1, hidden_size].
+
+  Raises:
+    ValueError: If `conv_state` is not channels-last.
   """
   if is_gated:
     b, c, x_proj = in_proj_out.chunk(3, dim=-1)
@@ -123,33 +164,27 @@ def short_conv(
     c = None
     conv_input = in_proj_out
 
+  w = _to_channels_last_weight(conv_weight, conv_state.shape[-1])
+  _check_conv_state(conv_state, w)
+  state_len = conv_state.shape[1]
   if in_proj_out.shape[1] == 1 and num_valid_tokens is None:
-    # Single-token decode: the depthwise conv is a multiply-add over the L
-    # taps. Reshapes instead of transposes keep it a direct dot product.
-    padded_input = torch.cat(
-        [conv_state, conv_input.squeeze(1).unsqueeze(-1)], dim=-1
-    )
-    next_state = padded_input[:, :, -conv_state.shape[-1] :]
-    w = conv_weight.squeeze(1) if conv_weight.dim() == 3 else conv_weight
-    conv_out = (padded_input * w.unsqueeze(0)).sum(dim=-1)
+    conv_out = conv_input * w[:, state_len : state_len + 1, :]
+    for k in range(state_len):
+      conv_out = conv_out + conv_state[:, k : k + 1, :] * w[:, k : k + 1, :]
     if conv_bias is not None:
-      conv_out = conv_out + conv_bias.unsqueeze(0)
-    if use_silu:
-      conv_out = F.silu(conv_out)
-    y = c * conv_out.unsqueeze(1) if c is not None else conv_out.unsqueeze(1)
-    return y, next_state
-
-  conv_out, next_state = causal_conv1d_with_state(
-      conv_input.transpose(1, 2),
-      conv_state,
-      conv_weight,
-      conv_bias,
-      num_valid_tokens,
-  )
+      conv_out = conv_out + conv_bias.view(1, 1, -1)
+    next_state = (
+        torch.cat([conv_state[:, 1:, :], conv_input], dim=1)
+        if state_len > 1
+        else conv_input
+    )
+  else:
+    conv_out, next_state = causal_conv1d_with_state(
+        conv_input, conv_state, w, conv_bias, num_valid_tokens
+    )
   if use_silu:
     conv_out = F.silu(conv_out)
-  conv_out_t = conv_out.transpose(1, 2)
-  return (c * conv_out_t if c is not None else conv_out_t), next_state
+  return (c * conv_out if c is not None else conv_out), next_state
 
 
 def apply_short_conv_step(
@@ -170,12 +205,18 @@ def apply_short_conv_step(
   position, while `next_state` covers inputs up to and including the last
   valid token. The composite decomposes to `short_conv`.
 
+  `conv_weight` is folded to channels-last `[1, conv_L_cache, hidden_size]`
+  before it is marked as a composite input, so the transpose is constant-folded
+  at export time. Channels-last is the only supported layout; the runtime
+  identifies it from the tensor shapes.
+
   Args:
     in_proj_out: Input projection tensor [batch, seq_len, 3 * hidden_size] if
       is_gated=True, or [batch, seq_len, hidden_size] if is_gated=False.
-    conv_state: Convolution state tensor [batch, hidden_size, conv_L_cache - 1].
-    conv_weight: Depthwise convolution weight [hidden_size, 1, conv_L_cache] or
-      [hidden_size, conv_L_cache].
+    conv_state: Channels-last convolution state [batch, conv_L_cache - 1,
+      hidden_size].
+    conv_weight: Depthwise convolution weight [hidden_size, 1, conv_L_cache],
+      [hidden_size, conv_L_cache], or [1, conv_L_cache, hidden_size].
     conv_bias: Optional bias tensor [hidden_size].
     num_valid_tokens: Optional int32 tensor [1] with the number of valid
       (non-padding) tokens at the start of the sequence, in [0, seq_len]. When
@@ -189,8 +230,19 @@ def apply_short_conv_step(
   Returns:
     y: Output activation tensor [batch, seq_len, hidden_size] ready for
       out_proj.
-    next_state: Updated state tensor [batch, hidden_size, conv_L_cache - 1].
+    next_state: Updated channels-last state [batch, conv_L_cache - 1,
+      hidden_size].
+
+  Raises:
+    ValueError: If `conv_state` is not channels-last.
   """
+  conv_weight = _to_channels_last_weight(conv_weight, conv_state.shape[-1])
+  _check_conv_state(conv_state, conv_weight)
+  if conv_weight.shape[1] != conv_L_cache:
+    raise ValueError(
+        f"conv_weight has {conv_weight.shape[1]} taps, expected conv_L_cache ="
+        f" {conv_L_cache}"
+    )
   attrs: dict[str, int | bool] = {
       "conv_L_cache": int(conv_L_cache),
   }

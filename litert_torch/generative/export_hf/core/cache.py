@@ -28,6 +28,7 @@ import copy
 from typing import Any, List, Tuple
 
 import jaxtyping as jt
+from litert_torch.backend.torch_tfl import _ops as _  # Registers torch.ops.tfl.*
 import litert_torch.generative.custom_ops.dynamic_update_slice as tfl_dus
 from litert_torch.generative.export_hf.core import exportable_module_config
 import litert_torch.generative.export_hf.core.cache_base as cache_base_lib
@@ -482,7 +483,11 @@ class LiteRTLMConvCacheLayer(
     cache_base_lib.LiteRTLMCacheLayerMixin,
     cache_utils.LinearAttentionCacheLayerMixin,
 ):
-  """Optimized Conv Cache layer class for HuggingFace integration."""
+  """Optimized Conv Cache layer class for HuggingFace integration.
+
+  `conv_states` is always channels-last, [batch, L - 1, channels], where `L` is
+  the conv kernel size.
+  """
 
   is_compileable = True
   is_sliding = False
@@ -496,13 +501,18 @@ class LiteRTLMConvCacheLayer(
       **kwargs,
   ):
     cache_utils.LinearAttentionCacheLayerMixin.__init__(self)
+    if conv_states.dim() != 3:
+      raise ValueError(
+          "conv_states must be channels-last [batch, L - 1, channels], got"
+          f" {tuple(conv_states.shape)}"
+      )
     self.conv_states: Any = conv_states
     self.recurrent_states: Any = recurrent_states
     self.is_conv_states_initialized: Any = True
     self.is_recurrent_states_initialized: Any = recurrent_states is not None
     self.batch_size = batch_size
     self.is_initialized = True
-    self.conv_kernel_size: int = conv_states.shape[-1]
+    self.conv_kernel_size: int = conv_states.shape[1]
     self.keys = torch.zeros((1, 1, 1, 1))
     self.values = torch.zeros((1, 1, 1, 1))
     self.layer_type = layer_type
@@ -530,7 +540,16 @@ class LiteRTLMConvCacheLayer(
       conv_states: torch.Tensor,
       state_idx: int = 0,
       **kwargs) -> torch.Tensor:
-    seq_len = conv_states.shape[-1]
+    """Appends channels-last inputs [batch, seq_len, channels] to the state."""
+    if (
+        conv_states.dim() != 3
+        or conv_states.shape[-1] != self.conv_states.shape[-1]
+    ):
+      raise ValueError(
+          "conv_states must be channels-last [batch, seq_len,"
+          f" {self.conv_states.shape[-1]}], got {tuple(conv_states.shape)}"
+      )
+    seq_len = conv_states.shape[1]
     cache_kwargs = self.get_cache_runtime_args()
     cache_position = cache_kwargs.get("cache_position", None)
     valid_mask = kwargs.get("valid_mask", None)
@@ -541,34 +560,24 @@ class LiteRTLMConvCacheLayer(
         valid_mask[1:] = cache_position[1:] > cache_position[:-1]
 
     if valid_mask is not None:
-      if valid_mask.dim() == 1:
-        mask = valid_mask.unsqueeze(0).unsqueeze(0)
-      else:
-        mask = valid_mask.unsqueeze(1)
+      mask = (
+          valid_mask.view(1, -1, 1)
+          if valid_mask.dim() == 1
+          else valid_mask.unsqueeze(-1)
+      )
       conv_states = conv_states * mask
 
-    padded_input = torch.cat([self.conv_states, conv_states], dim=-1)
-
-    if seq_len > 1:
-      if valid_mask is not None:
-        l_state = self.conv_kernel_size
-        total_len = l_state + seq_len
-        # Index math stays in float32: 16-bit floats cannot represent all
-        # integer positions exactly (bf16 only up to 256).
-        index_dtype = torch.float32
-        num_real = valid_mask.to(index_dtype).sum()
-        row_idx = torch.arange(
-            total_len, device=padded_input.device, dtype=index_dtype
-        ).unsqueeze(1)
-        col_target = num_real + torch.arange(
-            l_state, device=padded_input.device, dtype=index_dtype
-        ).unsqueeze(0)
-        selector = (row_idx == col_target).to(padded_input.dtype)
-        next_state = padded_input @ selector
-      else:
-        next_state = padded_input[:, :, -self.conv_kernel_size:]
+    padded_input = torch.cat([self.conv_states, conv_states], dim=1)
+    if seq_len > 1 and valid_mask is not None:
+      l_state = self.conv_kernel_size
+      mask_1d = valid_mask if valid_mask.dim() == 1 else valid_mask[0]
+      num_real = mask_1d.to(torch.float32).sum().to(torch.int32)
+      indices = num_real + torch.arange(
+          l_state, device=padded_input.device, dtype=torch.int32
+      )
+      next_state = torch.ops.tfl.gather(padded_input, indices, 1)
     else:
-      next_state = padded_input[:, :, -self.conv_kernel_size:]
+      next_state = padded_input[:, -self.conv_kernel_size :, :]
 
     self.conv_states.copy_(next_state)
     return self.conv_states
@@ -607,6 +616,7 @@ class LiteRTLMConvCacheLayer(
         "model_config must have layer_types attribute for ConvCacheLayer."
     )
     layer_type = model_config.layer_types[layer_index]
+    kwargs.pop("layer_type", None)
     assert layer_type in (
         "conv",
         "linear_attention",
@@ -618,8 +628,8 @@ class LiteRTLMConvCacheLayer(
     if layer_type == "conv":
       c_state_shape = (
           batch_size,
-          model_config.hidden_size,
           model_config.conv_L_cache - 1,
+          model_config.hidden_size,
       )
       c_state = torch.zeros(c_state_shape, dtype=cache_dtype)
       return cls(
@@ -638,7 +648,7 @@ class LiteRTLMConvCacheLayer(
       )
       conv_dim = key_dim * 2 + value_dim
       conv_cache_len = model_config.linear_conv_kernel_dim - 1
-      c_state_shape = (batch_size, conv_dim, conv_cache_len)
+      c_state_shape = (batch_size, conv_cache_len, conv_dim)
       r_state_shape = (
           batch_size,
           model_config.linear_num_value_heads,

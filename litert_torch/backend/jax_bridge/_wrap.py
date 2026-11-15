@@ -168,9 +168,16 @@ def _lower_to_ir_text(
 
     return jaxfn(*jaxfn_args, **jaxfn_kwargs)
 
-  ir_text_getter = (
-      lambda: jax.jit(lower_wrapper).lower(*jax_lower_args).as_text()
-  )
+  if jax.__version_info__ >= (0, 12):
+    ir_text_getter = (
+        lambda: jax.export.export(jax.jit(lower_wrapper))(
+            *jax_lower_args
+        ).mlir_module()
+    )
+  else:
+    ir_text_getter = (
+        lambda: jax.jit(lower_wrapper).lower(*jax_lower_args).as_text()
+    )
   return ir_text_getter, ir_inputs
 
 

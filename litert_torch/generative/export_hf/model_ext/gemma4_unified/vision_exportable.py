@@ -15,6 +15,7 @@
 """Exportable modules for Gemma4 Unified vision encoder and adapter."""
 
 from litert_torch.generative.export_hf.core import exportable_module as exportable_module_base
+from litert_torch.generative.export_hf.model_ext.gemma4 import vision_budgets
 import torch
 
 
@@ -52,17 +53,19 @@ class LiteRTExportableModuleForGemma4UnifiedVisionEncoder(
       raise ValueError(
           'Image processor is required for Exporting Gemma4 vision encoder.'
       )
-    num_soft_tokens = kwargs.get('gemma4_vision_max_soft_tokens', 140)
-    dummy_image = image_processor(
-        images=[torch.zeros((1, 3, 224, 224))],
-        max_soft_tokens=num_soft_tokens,
-        return_tensors='pt',
-    )
-    inputs = {
-        'images': dummy_image.pixel_values,
-        'positions_xy': dummy_image.image_position_ids.int(),
-    }
-    return {f'vision_{num_soft_tokens}': (inputs, {})}
+    sample_inputs = {}
+    for num_soft_tokens in vision_budgets.get_vision_token_budgets(kwargs):
+      dummy_image = image_processor(
+          images=[torch.zeros((1, 3, 224, 224))],
+          max_soft_tokens=num_soft_tokens,
+          return_tensors='pt',
+      )
+      inputs = {
+          'images': dummy_image.pixel_values,
+          'positions_xy': dummy_image.image_position_ids.int(),
+      }
+      sample_inputs[f'vision_{num_soft_tokens}'] = (inputs, {})
+    return sample_inputs
 
 
 class LiteRTExportableModuleForGemma4UnifiedEndOfImage(
