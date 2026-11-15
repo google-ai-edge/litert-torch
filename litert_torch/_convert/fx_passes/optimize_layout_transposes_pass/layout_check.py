@@ -250,11 +250,29 @@ def _aten_index_layout_sensitive_inputs_getter(node):
   return [node.args[0]]
 
 
+def _index_dims_keep_nhwc_layout(node):
+  """Whether indexing an NHWC input gives the NHWC form of the NCHW result.
+
+  With several indices, PyTorch places the broadcast index dims where the
+  indexed dims were only if those dims are adjacent, and in front otherwise.
+  The NHWC rewrite moves C from dim 1 to dim 3, which changes the adjacency or
+  the order of the indexed dims unless there is a single index or the indices
+  are on H and W only.
+  """
+  indices = node.args[1] if len(node.args) > 1 else []
+  indexed_dims = [i for i, index in enumerate(indices) if index is not None]
+  return len(indexed_dims) <= 1 or indexed_dims == [2, 3]
+
+
 @nhwcable_node_checkers.register(aten.index)
 @nhwcable_node_checkers.register(aten._unsafe_index)
 def _aten_index_checker(node):
   layout_sensitive_inputs = get_layout_sensitive_inputs(node)
-  can_be = is_4d(node) and all_layout_sensitive_inputs_are_4d(node)
+  can_be = (
+      is_4d(node)
+      and all_layout_sensitive_inputs_are_4d(node)
+      and _index_dims_keep_nhwc_layout(node)
+  )
   return NHWCable(can_be, must_be=False)
 
 

@@ -184,6 +184,59 @@ class TestOptimizeLayoutTransposesPass(googletest.TestCase):
         model, exported_program.module(), forward_args()
     )
 
+  def _conv_then(self, func):
+
+    class ConvThen(torch.nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(3, 4, 1)
+
+      def forward(self, x):
+        return func(self.conv(x))
+
+    return ConvThen().eval()
+
+  def test_index_channel_and_height(self):
+    """Indices on adjacent NCHW dims C and H, which are apart in NHWC."""
+    c = torch.tensor([[0], [2]])
+    h = torch.tensor([[1, 3, 5]])
+    model = self._conv_then(lambda x: x[:, c, h])
+    forward_args = lambda: (torch.rand(1, 3, 9, 11),)
+    exported_program = export_with_pass(model, forward_args())
+    self.assert_outputs_allclose(
+        model, exported_program.module(), forward_args()
+    )
+
+  def test_index_batch_and_channel(self):
+    n = torch.tensor([[0], [1]])
+    c = torch.tensor([[1, 3]])
+    model = self._conv_then(lambda x: x[n, c])
+    forward_args = lambda: (torch.rand(2, 3, 9, 11),)
+    exported_program = export_with_pass(model, forward_args())
+    self.assert_outputs_allclose(
+        model, exported_program.module(), forward_args()
+    )
+
+  def test_index_height_and_width(self):
+    """Indices on H and W, as in a nearest resize, can stay NHWC."""
+    h = torch.tensor([0, 2, 4, 6, 8])[:, None]
+    w = torch.tensor([1, 1, 3, 10])
+    model = self._conv_then(lambda x: x[:, :, h, w])
+    forward_args = lambda: (torch.rand(1, 3, 9, 11),)
+    exported_program = export_with_pass(model, forward_args())
+    self.assert_outputs_allclose(
+        model, exported_program.module(), forward_args()
+    )
+
+  def test_index_single_channel_index(self):
+    model = self._conv_then(lambda x: x[:, [3, 0, 0]])
+    forward_args = lambda: (torch.rand(1, 3, 9, 11),)
+    exported_program = export_with_pass(model, forward_args())
+    self.assert_outputs_allclose(
+        model, exported_program.module(), forward_args()
+    )
+
 
 if __name__ == "__main__":
   googletest.main()
