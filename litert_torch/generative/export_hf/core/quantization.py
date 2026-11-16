@@ -75,6 +75,23 @@ def _gemma4_mixed48_b32_octav():
   )
 
 
+def _qwen3_5_mixed48_b32():
+  """Local Qwen3.5 recipe with int4 weights and int8 output projections.
+
+  Weights are int4 blockwise-32, except the projections that write back to the
+  residual stream in every decoder layer (MLP `down_proj`, GatedDeltaNet
+  `out_proj` and attention `o_proj`), which are int8 channelwise. On
+  Qwen3.5-0.8B that recovers part of the accuracy lost with all-int4 weights.
+  The tied embedding / LM head stays int4: it is the largest weight, and int8
+  there costs the most decode speed. The regex matches the op output names that
+  `export_hf` emits for Qwen3.5.
+  """
+  return recipe_lib.dynamic_wi4b32_afp32() + recipe_lib.dynamic_wi8c_afp32(
+      regex=r'Linear_(down|out|o)_proj',
+      operation_name=recipe_lib.TFLOperationName.FULLY_CONNECTED,
+  )
+
+
 _LOCAL_QUANTIZATION_RECIPES = {
     'dynamic_wi8_emb4_afp32': _dynamic_wi8_emb4_afp32,
     'dynamic_fc_weight_only_conv_wi8_afp32': (
@@ -82,6 +99,7 @@ _LOCAL_QUANTIZATION_RECIPES = {
     ),
     'dynamic_wi4b32_octav_afp32': _dynamic_wi4b32_octav_afp32,
     'gemma4_mixed48_b32_octav': _gemma4_mixed48_b32_octav,
+    'qwen3_5_mixed48_b32': _qwen3_5_mixed48_b32,
 }
 
 
