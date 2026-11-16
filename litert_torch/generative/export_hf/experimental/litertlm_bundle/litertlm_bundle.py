@@ -380,4 +380,7 @@ def pack_litertlm(
     os.makedirs(out_dir, exist_ok=True)
 
   with _open(output_litertlm, 'wb') as f:
-    builder.build(cast(BinaryIO, f))
+    # Keep the TFLite models byte-identical so that unpacking returns the packed
+    # files. By default, `build` may move weights out of the models, depending
+    # on the litert-lm-builder version.
+    builder.build(cast(BinaryIO, f), weights_in_model_graph=True)

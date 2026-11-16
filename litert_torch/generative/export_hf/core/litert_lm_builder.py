@@ -611,7 +611,20 @@ def _build_litert_lm_file(
   """Writes `model.litertlm` into `output_dir` and returns updated artifacts."""
   model_path = os.path.join(output_dir, 'model.litertlm')  # pyrefly: ignore[no-matching-overload]
   with open(model_path, 'wb') as f:
-      builder.build(f)
+    if export_config.externalize_weights:
+      builder.build(
+          f,
+          weights_in_model_graph=False,
+          externalization_work_dir=(
+              os.path.join(work_dir, 'externalize_weights')
+              if work_dir
+              else None
+          ),
+      )
+    else:
+      # Set the weight placement explicitly instead of relying on the default
+      # of `build`, which depends on the litert-lm-builder version.
+      builder.build(f, weights_in_model_graph=True)
   return dataclasses.replace(
       exported_model_artifacts,
       litert_lm_model_path=model_path,
