@@ -325,6 +325,40 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
     self.assertTrue(llm_meta.llm_model_type.HasField('qwen3'))
     self.assertEqual(llm_meta.max_num_tokens, 777)
 
+  def test_prefill_decode_prefer_activation_type_hook(self):
+
+    class Fp16ActivationExtension(ModelExtension):
+
+      def get_prefill_decode_prefer_activation_type(
+          self, model_config, export_config
+      ):
+        return 'float16' if export_config.experimental_use_fp16 else None
+
+    model_cfg = transformers.PretrainedConfig(model_type='prefer_act_arch')
+    for use_fp16, ext, expected in (
+        (True, None, 'fp32_fp16'),
+        (False, None, None),
+        (True, Fp16ActivationExtension(), 'float16'),
+        (False, Fp16ActivationExtension(), None),
+        (
+            True,
+            [Fp16ActivationExtension(), ModelExtension()],
+            'float16',
+        ),
+    ):
+      with self.subTest(use_fp16=use_fp16, ext=ext):
+        exp_cfg = ExportableModuleConfig(
+            model='dummy',
+            experimental_use_fp16=use_fp16,
+            model_extension=ext,
+        )
+        self.assertEqual(
+            litert_lm_builder.get_prefill_decode_prefer_activation_type(
+                model_cfg, exp_cfg
+            ),
+            expected,
+        )
+
   def test_composite_extension_and_registered_override_priority(self):
     order: list[str] = []
 

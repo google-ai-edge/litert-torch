@@ -531,6 +531,10 @@ specialized prefill/decode signatures) and package them into `.litertlm`:
 * **`get_llm_model_type_proto(self, model_config, export_config)`** — Returns a
   custom `llm_model_type_pb2.LlmModelType` protobuf message (or `None` to fall
   back to `GenericModel`).
+* **`get_prefill_decode_prefer_activation_type(self, model_config,
+  export_config)`** — Returns the LiteRT-LM `prefer_activation_type` of the
+  `TF_LITE_PREFILL_DECODE` section (or `None` for core's default, `'fp32_fp16'`
+  when `experimental_use_fp16` is set).
 * **`build_llm_metadata(self, ...)`** — Populates stop tokens, prompt templates,
   or modality tokens on `LlmMetadata` given `(source_model_artifacts,
   export_config, exported_model_artifacts, llm_metadata)`.
