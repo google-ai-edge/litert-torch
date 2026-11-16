@@ -17,6 +17,7 @@
 import contextlib
 from litert_torch.backend import optimization_barrier as optimization_barrier_lib
 from litert_torch.backend.torch_tfl import _ops as _  # Registers torch.ops.tfl.*
+from litert_torch.generative.export_hf.core import fused_linear
 from litert_torch.generative.export_hf.experimental.composites import bidirectional_sdpa as bidirectional_sdpa_lib
 from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope
 from litert_torch.generative.export_hf.experimental.composites import rope as rope_composite
@@ -190,30 +191,12 @@ try:
       )
 
       # Fuse gate and up projections
-      gate_out_features = self.gate_proj.out_features
-      up_out_features = self.up_proj.out_features
-
-      self.gate_up_proj = torch.nn.Linear(
-          self.gate_proj.in_features,
-          gate_out_features + up_out_features,
-          bias=self.gate_proj.bias is not None,
-          device=self.gate_proj.weight.device,
-          dtype=self.gate_proj.weight.dtype,
+      self.gate_up_proj = fused_linear.fuse_linear_modules(
+          {"gate_proj": self.gate_proj, "up_proj": self.up_proj},
+          fused_name="gate_up_proj",
+          disable_flags=fused_linear.FUSE_GATE_UP_FLAGS,
       )
-
-      # Copy weights and biases when not on the meta device (Converter V2
-      # reconstructs `gate_up_proj` from checkpoint weights during export).
-      if not self.gate_proj.weight.is_meta:
-        with torch.no_grad():
-          self.gate_up_proj.weight.copy_(
-              torch.cat([self.gate_proj.weight, self.up_proj.weight], dim=0)
-          )
-          if self.gate_up_proj.bias is not None:
-            self.gate_up_proj.bias.copy_(
-                torch.cat([self.gate_proj.bias, self.up_proj.bias], dim=0)
-            )
-
-      self.gate_size = gate_out_features
+      self.gate_size = self.gate_proj.out_features
 
     def forward(self, x):
       gate_up = self.gate_up_proj(x)
@@ -282,38 +265,20 @@ try:
         self.v_proj = original_attn.v_proj
 
         if self.fuse_qkv:
-          q_out_features = self.q_proj.out_features
-          k_out_features = self.k_proj.out_features
-          v_out_features = (
+          parts = {"q_proj": self.q_proj, "k_proj": self.k_proj}
+          if self.v_proj is not None:
+            parts["v_proj"] = self.v_proj
+          self.qkv_proj = fused_linear.fuse_linear_modules(
+              parts,
+              fused_name="qkv_proj",
+              disable_flags=fused_linear.FUSE_QKV_FLAGS,
+          )
+
+          self.q_size = self.q_proj.out_features
+          self.k_size = self.k_proj.out_features
+          self.v_size = (
               self.v_proj.out_features if self.v_proj is not None else 0
           )
-
-          self.qkv_proj = torch.nn.Linear(
-              self.q_proj.in_features,
-              q_out_features + k_out_features + v_out_features,
-              bias=self.q_proj.bias is not None,
-              device=self.q_proj.weight.device,
-              dtype=self.q_proj.weight.dtype,
-          )
-
-          # Copy weights and biases when not on the meta device (Converter V2
-          # reconstructs `qkv_proj` from checkpoint weights during export).
-          if not self.q_proj.weight.is_meta:
-            with torch.no_grad():
-              tensors_to_cat = [self.q_proj.weight, self.k_proj.weight]
-              if self.v_proj is not None:
-                tensors_to_cat.append(self.v_proj.weight)
-              self.qkv_proj.weight.copy_(torch.cat(tensors_to_cat, dim=0))
-
-              if self.qkv_proj.bias is not None:
-                biases_to_cat = [self.q_proj.bias, self.k_proj.bias]
-                if self.v_proj is not None:
-                  biases_to_cat.append(self.v_proj.bias)
-                self.qkv_proj.bias.copy_(torch.cat(biases_to_cat, dim=0))
-
-          self.q_size = q_out_features
-          self.k_size = k_out_features
-          self.v_size = v_out_features
 
     def _get_rope_base(self) -> float:
       rope_base = 500000.0
