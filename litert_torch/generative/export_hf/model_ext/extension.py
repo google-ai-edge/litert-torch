@@ -56,7 +56,8 @@ every stage of the export lifecycle:
      `ExportableModule` subclasses traced for each submodel.
 4. **LiteRT-LM Metadata & Packaging**:
    - `get_litert_lm_section_types`, `get_llm_model_type_proto`,
-     `build_llm_metadata`, and `get_executor_metadata_builder` customize how
+     `get_prefill_decode_prefer_activation_type`, `build_llm_metadata`, and
+     `get_executor_metadata_builder` customize how
      exported `.tflite` flatbuffers, tokenizers, and runtime state descriptors
      are bundled into a `.litertlm` package (see
      `model_ext/gemma4/extension.py` and `model_ext/bonsai_flux2/extension.py`).
@@ -680,6 +681,31 @@ class ModelExtension:
     del model_config, export_config
     return None
 
+  def get_prefill_decode_prefer_activation_type(
+      self,
+      model_config: transformers.PretrainedConfig,
+      export_config: exportable_module_config.ExportableModuleConfig,
+  ) -> str | None:
+    """Returns the `prefer_activation_type` of the prefill/decode section.
+
+    Invoked by `core/litert_lm_builder.py` when adding the
+    `TF_LITE_PREFILL_DECODE` model to the `.litertlm` bundle. Returning `None`
+    keeps core's default (`'fp32_fp16'` when
+    `export_config.experimental_use_fp16` is set, otherwise unset). Override it
+    to request another LiteRT-LM activation type, for example `'float16'` for
+    architectures whose GPU kernels run entirely in fp16.
+
+    Args:
+      model_config: Loaded `PretrainedConfig` for the checkpoint.
+      export_config: Active `ExportableModuleConfig`.
+
+    Returns:
+      A LiteRT-LM `prefer_activation_type` string, or `None` to use core's
+      default.
+    """
+    del model_config, export_config
+    return None
+
   def build_llm_metadata(
       self,
       source_model_artifacts: Any,
@@ -870,7 +896,8 @@ class CompositeModelExtension(ModelExtension):
     Piped in forward order so later extensions refine earlier results.
   - **Single-winner selectors** (`get_prefill_decode_exportables`,
     `get_vision_exportables`, `get_audio_exportables`, `get_*_model_cls`,
-    `get_llm_model_type_proto`, `get_executor_metadata_builder`): Queried in
+    `get_llm_model_type_proto`, `get_prefill_decode_prefer_activation_type`,
+    `get_executor_metadata_builder`): Queried in
     reverse order so the **last** extension returning non-`None` wins.
   - **Map mergers** (`get_additional_exportables`,
     `get_litert_lm_section_types`): Merged in forward order (`dict.update`) so
@@ -1101,6 +1128,20 @@ class CompositeModelExtension(ModelExtension):
     """See base class."""
     for ext in reversed(self._extensions):
       res = ext.get_llm_model_type_proto(model_config, export_config)
+      if res is not None:
+        return res
+    return None
+
+  def get_prefill_decode_prefer_activation_type(
+      self,
+      model_config: transformers.PretrainedConfig,
+      export_config: exportable_module_config.ExportableModuleConfig,
+  ) -> str | None:
+    """See base class."""
+    for ext in reversed(self._extensions):
+      res = ext.get_prefill_decode_prefer_activation_type(
+          model_config, export_config
+      )
       if res is not None:
         return res
     return None

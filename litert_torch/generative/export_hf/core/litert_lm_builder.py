@@ -18,6 +18,7 @@ import dataclasses
 import os
 import pathlib
 import re
+from typing import Any
 import urllib.error
 import urllib.request
 
@@ -1005,6 +1006,33 @@ def _resolve_chat_templates(
   return parse_chat_template(tokenizer)
 
 
+def get_prefill_decode_prefer_activation_type(
+    model_config: Any,
+    export_config: exportable_module.ExportableModuleConfig,
+) -> str | None:
+  """Returns the `prefer_activation_type` of the prefill/decode section.
+
+  A registered `ModelExtension` can override it via
+  `get_prefill_decode_prefer_activation_type`; otherwise fp16 exports use
+  `'fp32_fp16'` and fp32 exports leave it unset.
+
+  Args:
+    model_config: Loaded model config.
+    export_config: Active export config.
+
+  Returns:
+    The LiteRT-LM `prefer_activation_type` string, or `None` if unset.
+  """
+  ext = extension_lib.resolve_model_extension(model_config, export_config)
+  if ext is not None:
+    override = ext.get_prefill_decode_prefer_activation_type(
+        model_config, export_config
+    )
+    if override is not None:
+      return override
+  return 'fp32_fp16' if export_config.experimental_use_fp16 else None
+
+
 @progress.task('Package model')
 def package_model(
     source_model_artifacts: export_lib.SourceModelArtifacts,
@@ -1109,17 +1137,13 @@ def package_model(
     builder.add_hf_tokenizer(tokenizer_model_path)
   else:
     builder.add_sentencepiece_tokenizer(tokenizer_model_path)
-  if export_config.experimental_use_fp16:
-    builder.add_tflite_model(
-        exported_model_artifacts.prefill_decode_model_path,  # pyrefly: ignore[bad-argument-type]
-        llm_metadata_pb2.LlmMetadata.TF_LITE_PREFILL_DECODE,
-        prefer_activation_type='fp32_fp16',
-    )
-  else:
-    builder.add_tflite_model(
-        exported_model_artifacts.prefill_decode_model_path,  # pyrefly: ignore[bad-argument-type]
-        llm_metadata_pb2.LlmMetadata.TF_LITE_PREFILL_DECODE,
-    )
+  builder.add_tflite_model(
+      exported_model_artifacts.prefill_decode_model_path,  # pyrefly: ignore[bad-argument-type]
+      llm_metadata_pb2.LlmMetadata.TF_LITE_PREFILL_DECODE,
+      prefer_activation_type=get_prefill_decode_prefer_activation_type(
+          model_cfg, export_config
+      ),
+  )
   if exported_model_artifacts.embedder_model_path:
     builder.add_tflite_model(
         exported_model_artifacts.embedder_model_path,
