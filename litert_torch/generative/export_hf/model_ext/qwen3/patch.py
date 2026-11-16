@@ -16,6 +16,7 @@
 """Patches for Qwen3 model."""
 
 import contextlib
+from litert_torch.generative.export_hf.core import fused_linear
 from litert_torch.generative.export_hf.core.speech import asr_model
 from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope as qkv_norm_rope_composite
 from litert_torch.generative.export_hf.experimental.composites import rope as rope_composite
@@ -70,14 +71,14 @@ class FusedQwen3MLP(torch.nn.Module):
     self.down_proj = original_mlp.down_proj
     self.use_swiglu_composite = use_swiglu_composite
 
-    gate_w = original_mlp.gate_proj.weight.data
-    up_w = original_mlp.up_proj.weight.data
-    fused_weight = torch.cat([gate_w, up_w], dim=0)
-
-    self.gate_up_proj = torch.nn.Linear(
-        self.hidden_size, 2 * self.intermediate_size, bias=False
+    self.gate_up_proj = fused_linear.fuse_linear_modules(
+        {
+            "gate_proj": original_mlp.gate_proj,
+            "up_proj": original_mlp.up_proj,
+        },
+        fused_name="gate_up_proj",
+        disable_flags=fused_linear.FUSE_GATE_UP_FLAGS,
     )
-    self.gate_up_proj.weight = torch.nn.Parameter(fused_weight)
 
   def forward(self, x):
     gate_up = self.gate_up_proj(x)
@@ -138,16 +139,15 @@ class FusedQwen3Attention(torch.nn.Module):
     self.v_size = self.num_key_value_heads * self.head_dim
 
     if fuse_qkv:
-      q_w = original_attn.q_proj.weight.data
-      k_w = original_attn.k_proj.weight.data
-      v_w = original_attn.v_proj.weight.data
-      fused_weight = torch.cat([q_w, k_w, v_w], dim=0)
-
-      total_out_dim = self.q_size + self.k_size + self.v_size
-      self.qkv_proj = torch.nn.Linear(
-          self.config.hidden_size, total_out_dim, bias=False
+      self.qkv_proj = fused_linear.fuse_linear_modules(
+          {
+              "q_proj": original_attn.q_proj,
+              "k_proj": original_attn.k_proj,
+              "v_proj": original_attn.v_proj,
+          },
+          fused_name="qkv_proj",
+          disable_flags=fused_linear.FUSE_QKV_FLAGS,
       )
-      self.qkv_proj.weight = torch.nn.Parameter(fused_weight)
     else:
       self.q_proj = original_attn.q_proj
       self.k_proj = original_attn.k_proj
