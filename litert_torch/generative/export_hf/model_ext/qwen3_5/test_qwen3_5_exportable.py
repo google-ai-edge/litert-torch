@@ -400,6 +400,40 @@ class Qwen35ExportableTest(absltest.TestCase):
         atol=5e-3,
     )
 
+  def test_wrapper_excludes_original_hf_model_from_named_parameters(self):
+    """Verifies `original_hf_model` is excluded from `named_parameters()`."""
+    wrapper = qwen3_5_exportable.Qwen3_5StaticModelHFWrapper(self.hf_model)
+    param_names = [name for name, _ in wrapper.named_parameters()]
+    self.assertTrue(
+        all(name.startswith("static_model.") for name in param_names)
+    )
+
+  def test_prefill_and_decode_share_static_wrapper_and_parameters(self):
+    """Verifies prefill and decode share the cached static wrapper."""
+    export_config = exportable_module_config.ExportableModuleConfig(
+        model="qwen3_5_dummy",
+        task=exportable_module_config.ExportTask.TEXT_GENERATION,
+        batch_size=1,
+        cache_length=512,
+        prefill_lengths=[128],
+        fuse_qkv=True,
+        fuse_gate_up=True,
+    )
+    with qwen3_5_exportable.qwen3_5_patch.patch_qwen3_5_model(
+        self.hf_model, export_config
+    ):
+      prefill_mod = qwen3_5_exportable.LiteRTExportableModuleForQwen3_5Prefill(
+          self.hf_model, export_config
+      )
+      decode_mod = qwen3_5_exportable.LiteRTExportableModuleForQwen3_5Generate(
+          self.hf_model, export_config
+      )
+    self.assertIs(prefill_mod.model, decode_mod.model)
+    prefill_params = dict(prefill_mod.named_parameters())
+    decode_params = dict(decode_mod.named_parameters())
+    self.assertEqual(set(prefill_params.keys()), set(decode_params.keys()))
+    for k in prefill_params:
+      self.assertIs(prefill_params[k], decode_params[k])
 
 if __name__ == "__main__":
   absltest.main()
