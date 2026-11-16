@@ -15,6 +15,7 @@
 """Patches for Gemma3."""
 
 import contextlib
+from litert_torch.generative.export_hf.core import fused_linear
 from litert_torch.generative.export_hf.experimental.composites import rope as rope_composite
 from litert_torch.generative.export_hf.model_ext import patches as patches_lib
 from litert_torch.generative.layers import normalization
@@ -61,29 +62,12 @@ class FusedGemma3MLP(torch.nn.Module):
     self.act_fn = original_mlp.act_fn
 
     # Fuse gate and up projections
-    gate_out_features = self.gate_proj.out_features
-    up_out_features = self.up_proj.out_features
-
-    self.gate_up_proj = torch.nn.Linear(
-        self.gate_proj.in_features,
-        gate_out_features + up_out_features,
-        bias=self.gate_proj.bias is not None,
-        device=self.gate_proj.weight.device,
-        dtype=self.gate_proj.weight.dtype,
+    self.gate_up_proj = fused_linear.fuse_linear_modules(
+        {"gate_proj": self.gate_proj, "up_proj": self.up_proj},
+        fused_name="gate_up_proj",
+        disable_flags=fused_linear.FUSE_GATE_UP_FLAGS,
     )
-
-    # Copy weights and biases
-    if not self.gate_proj.weight.is_meta:
-      with torch.no_grad():
-        self.gate_up_proj.weight.copy_(
-            torch.cat([self.gate_proj.weight, self.up_proj.weight], dim=0)
-        )
-        if self.gate_up_proj.bias is not None:
-          self.gate_up_proj.bias.copy_(
-              torch.cat([self.gate_proj.bias, self.up_proj.bias], dim=0)
-          )
-
-    self.gate_size = gate_out_features
+    self.gate_size = self.gate_proj.out_features
 
   def forward(self, x):
     gate_up = self.gate_up_proj(x)
@@ -127,38 +111,19 @@ class FusedGemma3Attention(torch.nn.Module):
     self.v_proj = original_attn.v_proj
 
     if self.fuse_qkv:
-      q_out_features = self.q_proj.out_features
-      k_out_features = self.k_proj.out_features
-      v_out_features = self.v_proj.out_features
-
-      self.qkv_proj = torch.nn.Linear(
-          self.q_proj.in_features,
-          q_out_features + k_out_features + v_out_features,
-          bias=self.q_proj.bias is not None,
-          device=self.q_proj.weight.device,
-          dtype=self.q_proj.weight.dtype,
+      self.qkv_proj = fused_linear.fuse_linear_modules(
+          {
+              "q_proj": self.q_proj,
+              "k_proj": self.k_proj,
+              "v_proj": self.v_proj,
+          },
+          fused_name="qkv_proj",
+          disable_flags=fused_linear.FUSE_QKV_FLAGS,
       )
 
-      # Copy weights and biases
-      if not self.q_proj.weight.is_meta:
-        with torch.no_grad():
-          self.qkv_proj.weight.copy_(
-              torch.cat(
-                  [self.q_proj.weight, self.k_proj.weight, self.v_proj.weight],
-                  dim=0,
-              )
-          )
-          if self.qkv_proj.bias is not None:
-            self.qkv_proj.bias.copy_(
-                torch.cat(
-                    [self.q_proj.bias, self.k_proj.bias, self.v_proj.bias],
-                    dim=0,
-                )
-            )
-
-      self.q_size = q_out_features
-      self.k_size = k_out_features
-      self.v_size = v_out_features
+      self.q_size = self.q_proj.out_features
+      self.k_size = self.k_proj.out_features
+      self.v_size = self.v_proj.out_features
 
   def forward(
       self,
