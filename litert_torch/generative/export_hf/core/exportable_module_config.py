@@ -163,6 +163,17 @@ class ExportableModuleConfig:
   k_ts_idx: int | None = None
   v_ts_idx: int | None = None
   split_cache: bool = False
+  # Experimental, requires split_cache and a static cache length. If set, the
+  # layers whose KV cache length equals the signature's (bucket's)
+  # cache_length (global layers, and sliding layers without a ring buffer)
+  # attend over it in blocks of this many slots, each block
+  # softmax-normalized with its own row max and combined exactly at the end
+  # (see split_cache/attention.py). Must be a positive int that divides every
+  # cache length (bucket) larger than it; buckets that are not larger use
+  # plain attention, as do ring-buffer caches of any other length (also a
+  # ring buffer larger than a small bucket). In FP16, see the value bound in
+  # split_cache/attention.py's _blocked_attention.
+  attention_kv_block_size: int | None = None
   cache_implementation: str | None = None
   auto_model_override: str | None = None
   use_jinja_template: bool = True
@@ -558,6 +569,9 @@ class ExportableModuleConfig:
       self.cache_implementation = "LiteRTLMCache"
     # pylint: enable=g-bool-id-comparison
 
+    if self.attention_kv_block_size is not None:
+      self._validate_attention_kv_block_size()
+
     if self.sliding_window_ring_buffer_size is not None:
       # Round up to the nearest 32.
       self.sliding_window_ring_buffer_size = (
@@ -565,6 +579,38 @@ class ExportableModuleConfig:
       ) * 32
 
     self._validate_dtype_and_v2_options()
+
+  def _validate_attention_kv_block_size(self) -> None:
+    """Rejects attention_kv_block_size values that wouldn't take effect."""
+    block = self.attention_kv_block_size
+    if not self.split_cache:
+      task = getattr(self.task, "value", self.task)
+      raise ValueError(
+          "attention_kv_block_size requires split_cache (split_cache is off"
+          f" or not supported for task {task})."
+      )
+    if self.enable_dynamic_shape or self.enable_gpu_dynamic_cache:
+      raise ValueError(
+          "attention_kv_block_size requires a static cache length (no"
+          " enable_dynamic_shape or enable_gpu_dynamic_cache)."
+      )
+    if not isinstance(block, int) or isinstance(block, bool) or block <= 0:
+      raise ValueError(
+          f"attention_kv_block_size must be a positive int, got {block!r}."
+      )
+    cache_lengths = sorted(set(self.cache_lengths or []) | {self.cache_length})
+    blocked = [length for length in cache_lengths if length > block]
+    if not blocked:
+      raise ValueError(
+          f"attention_kv_block_size={block} must be smaller than the cache"
+          f" length (cache lengths: {cache_lengths})."
+      )
+    not_dividing = [length for length in blocked if length % block]
+    if not_dividing:
+      raise ValueError(
+          f"attention_kv_block_size={block} must divide every cache length"
+          f" larger than it, got {not_dividing}."
+      )
 
   def _validate_dtype_and_v2_options(self) -> None:
     """Rejects unsupported or conflicting dtype / Converter V2 options."""

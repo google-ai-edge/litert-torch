@@ -78,11 +78,21 @@ class ExportableModuleBase(torch.nn.Module, abc.ABC):
   def attention_kwargs(self):
     k_ts_idx = self.export_config.k_ts_idx
     v_ts_idx = self.export_config.v_ts_idx
-    return {
+    kwargs = {
         "k_ts_idx": k_ts_idx,
         "v_ts_idx": v_ts_idx,
         "sdpa_is_causal": self._is_text_only_causal_export(),
     }
+    if self.export_config.attention_kv_block_size is not None:
+      # Blocked attention for the layers whose cache length equals this
+      # signature's cache_length (see split_cache/attention.py).
+      kwargs["attention_kv_block_size"] = (
+          self.export_config.attention_kv_block_size
+      )
+      kwargs["attention_kv_block_cache_length"] = (
+          self.export_config.cache_length
+      )
+    return kwargs
 
   def _is_text_only_causal_export(self) -> bool:
     """Whether the global attention mask is guaranteed to be purely causal.
