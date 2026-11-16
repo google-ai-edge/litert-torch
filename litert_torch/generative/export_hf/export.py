@@ -507,6 +507,13 @@ def _resolve_plan(
   for key, value in defaults.export_kwargs.items():
     export_kwargs[key] = _normalize_kwarg_value(value)
     sources[key] = SOURCE_MODEL
+  has_quant_config = bool(config.get('quantization_config')) or (
+      isinstance(config.get('text_config'), Mapping)
+      and bool(config['text_config'].get('quantization_config'))
+  )
+  if has_quant_config and 'quantization_recipe' not in overrides:
+    export_kwargs['quantization_recipe'] = None
+    sources['quantization_recipe'] = SOURCE_MODEL
   for key, value in overrides.items():
     if (
         key == 'litert_lm_llm_metadata_override'

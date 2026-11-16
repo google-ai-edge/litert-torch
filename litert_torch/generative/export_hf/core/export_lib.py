@@ -32,6 +32,7 @@ from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.core import exportable_module_config
 from litert_torch.generative.export_hf.core import patches as _
 from litert_torch.generative.export_hf.core import quantization
+from litert_torch.generative.export_hf.core import quantization_layer
 from litert_torch.generative.export_hf.core import utils
 from litert_torch.generative.export_hf.core import weights_loader as weights_loader_lib
 from litert_torch.generative.export_hf.core.external_emb import exportable_module as external_emb_module
@@ -72,7 +73,11 @@ class SourceModelArtifacts:
   feature_extractor: transformers.AutoFeatureExtractor | None = None
   # Set for Converter V2 export: the model is on `meta` and weights are
   # streamed from the checkpoint at serialization time.
-  weights_loader: weights_loader_lib.HFCheckpointWeightsLoader | None = None
+  weights_loader: (
+      weights_loader_lib.HFCheckpointWeightsLoader
+      | weights_loader_lib.WeightsLoader
+      | None
+  ) = None
 
 
 @dataclasses.dataclass
@@ -127,9 +132,9 @@ def verify_model_compatibility(model, model_config, text_model_config):
     print(utils.ERROR_MESSAGE)
     print('Model does not support attention backend.')
 
-  if (
-      hasattr(model_config, 'quantization_config')
-      and model_config.quantization_config
+  quant_config = quantization_layer.get_quantization_config(model_config)
+  if quant_config and not quantization_layer.is_supported_quantization_config(
+      quant_config
   ):
     print(utils.ERROR_MESSAGE)
     raise NotImplementedError('Quantized checkpoint is not supported yet.')
@@ -735,6 +740,11 @@ def load_model(
           config=config,
           export_config=export_config,
       )
+      quant_config = quantization_layer.get_quantization_config(config)
+      if quantization_layer.is_supported_quantization_config(quant_config):
+        weights_loader = quantization_layer.prepare_quantized_model_for_export(
+            model, quant_config, weights_loader
+        )
       weights_loader_lib.load_persistent_buffers_(model, weights_loader)
       # `from_config` only initializes `generation_config` from `config.json`.
       # Load `generation_config.json` when present (matching `from_pretrained`),
