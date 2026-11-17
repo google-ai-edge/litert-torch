@@ -31,6 +31,7 @@ packaging `.litertlm` bundles:
 
 from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module
+from litert_torch.generative.export_hf.core.split_cache import combined_layers
 # Registers built-in extensions.
 from litert_torch.generative.export_hf.model_ext import builtin_extensions as _
 from litert_torch.generative.export_hf.model_ext import extension as extension_lib
@@ -224,6 +225,59 @@ try:
     if minimum_sequence_length is not None:
       buffer.minimum_sequence_length = minimum_sequence_length
 
+  def _add_combined_state_buffers(
+      llm_metadata: executor_metadata_pb2.LlmExecutorMetadata,
+      text_config: transformers.PretrainedConfig,
+      export_config: exportable_module.ExportableModuleConfig,
+      sliding_window_size: int | None,
+      max_cache_length: int,
+  ) -> None:
+    """Adds the state buffers of the combined KV cache layout (experimental).
+
+    With `split_cache_combined_layers`, the KV caches of each layer group are
+    one K and one V tensor (`kv_cache_k_<g>` / `kv_cache_v_<g>`, the layer as
+    the leading dimension) instead of one per layer; the sequence axes are
+    unchanged. Sliding-window ring buffer groups get local cache entries, the
+    other groups global ones.
+
+    Args:
+      llm_metadata: The metadata to add the state buffers to.
+      text_config: The text model config.
+      export_config: The export config.
+      sliding_window_size: The sliding window size, if any.
+      max_cache_length: The global cache length.
+    """
+    for g, is_ring_buffer in enumerate(
+        combined_layers.ring_buffer_groups_for(text_config, export_config)
+    ):
+      if is_ring_buffer:
+        extra = dict(
+            maximum_sequence_length=(
+                export_config.sliding_window_ring_buffer_size
+            ),
+            minimum_sequence_length=sliding_window_size,
+        )
+        k_type = executor_metadata_pb2.StateBuffer.TYPE_LOCAL_KEY_CACHE
+        v_type = executor_metadata_pb2.StateBuffer.TYPE_LOCAL_VALUE_CACHE
+      else:
+        extra = dict(maximum_sequence_length=max_cache_length)
+        k_type = executor_metadata_pb2.StateBuffer.TYPE_GLOBAL_KEY_CACHE
+        v_type = executor_metadata_pb2.StateBuffer.TYPE_GLOBAL_VALUE_CACHE
+      _add_state_buffer(
+          llm_metadata,
+          f'kv_cache_k_{g}',
+          k_type,
+          sequence_axis=export_config.k_ts_idx,
+          **extra,
+      )
+      _add_state_buffer(
+          llm_metadata,
+          f'kv_cache_v_{g}',
+          v_type,
+          sequence_axis=export_config.v_ts_idx,
+          **extra,
+      )
+
   def build_executor_metadata(
       source_model_artifacts: export_lib.SourceModelArtifacts,
       export_config: exportable_module.ExportableModuleConfig,
@@ -294,7 +348,21 @@ try:
         getattr(export_config, 'sliding_window_ring_buffer_size', None)
         is not None
     )
-    for i, layer_type in enumerate(layer_types):
+    use_combined_layers = getattr(
+        export_config, 'split_cache_combined_layers', False
+    )
+    if use_combined_layers:
+      _add_combined_state_buffers(
+          llm_metadata,
+          text_config,
+          export_config,
+          sliding_window_size=sliding_window_size,
+          max_cache_length=max_cache_length,
+      )
+    # With combined layers the per-layer entries are skipped; `layer_types` is
+    # still used below (history size, ring buffer detection).
+    per_layer_types = [] if use_combined_layers else layer_types
+    for i, layer_type in enumerate(per_layer_types):
       if i >= num_layers:
         break
       if layer_type == 'sliding_attention' and not enable_ring_buffer:

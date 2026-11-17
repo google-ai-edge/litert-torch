@@ -24,6 +24,8 @@ from litert_torch.generative.export_hf.core import exportable_module_config
 from litert_torch.generative.export_hf.core import weights_loader
 from litert_torch.generative.export_hf.core.external_rope import preprocess_model as external_rope_preprocess_model
 from litert_torch.generative.export_hf.core.split_cache import attention as split_cache_attention
+from litert_torch.generative.export_hf.core.split_cache import combined_layers
+from litert_torch.generative.export_hf.core.split_cache import exportable_module as split_cache_exportable
 from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope
 import litert_torch.generative.export_hf.model_ext as _
 from litert_torch.generative.export_hf.model_ext import extension as extension_lib
@@ -35,6 +37,7 @@ from transformers.models.gemma4 import configuration_gemma4
 from transformers.models.gemma4 import modeling_gemma4
 
 from absl.testing import absltest as googletest
+from ai_edge_litert import interpreter as interpreter_lib  # pylint: disable=g-direct-tensorflow-import
 
 
 def _make_small_text_config(
@@ -257,6 +260,332 @@ class Gemma4ExportableModuleTest(parameterized.TestCase):
     # Without softcapping, amplified lm_head weights produce > 40 magnitude.
     self.assertLessEqual(logits.abs().max().item(), 30.0 + 1e-4)
     self.assertGreater(logits.abs().max().item(), 25.0)
+
+  def _make_split_cache_modules(self, model, export_cfg, text_cfg):
+    # Selects the classes as the export does: Gemma 4's split-cache classes,
+    # with the combined layout added when split_cache_combined_layers is set.
+    prefill_cls, gen_cls = export_lib.get_prefill_decode_exportable_cls(
+        text_cfg, export_cfg
+    )
+    for cls, gemma4_cls in (
+        (
+            prefill_cls,
+            gemma4_split_cache.LiteRTSplitCacheExportableModuleForDecoderOnlyLMPrefill,
+        ),
+        (
+            gen_cls,
+            gemma4_split_cache.LiteRTSplitCacheExportableModuleForDecoderOnlyLMGenerate,
+        ),
+    ):
+      self.assertTrue(issubclass(cls, gemma4_cls), cls)
+      self.assertEqual(
+          issubclass(cls, combined_layers.CombinedLayersMixin),
+          export_cfg.split_cache_combined_layers,
+      )
+    return (
+        prefill_cls(model, export_cfg).eval(),
+        gen_cls(model, export_cfg).eval(),
+    )
+
+  def _make_split_cache_model(self, **config_kwargs):
+    with gemma4_patch.gemma4_litert_patch():
+      cfg = _make_small_text_config(**config_kwargs)
+      model = modeling_gemma4.Gemma4ForCausalLM(cfg).eval()
+    model = external_rope_preprocess_model.inject_rotary_position_embedding(
+        model
+    )
+    model.set_attn_implementation("lrt_split_cache_attention")
+    model.config._attn_implementation = "lrt_split_cache_attention"
+    return cfg, model
+
+  @parameterized.named_parameters(
+      ("prefill", "prefill_8"),
+      ("decode", "decode"),
+  )
+  def test_split_cache_combined_layers_matches_per_layer(self, signature):
+    # 4 cache layers (Gemma 4 makes the last layer global): sliding layers 0
+    # and 2, global layers 1 and 3. Layers are grouped by layer type (and cache
+    # shape), so the combined layout has two groups: [0, 2] and [1, 3].
+    torch.manual_seed(2)
+    cfg, model = self._make_split_cache_model(
+        num_hidden_layers=4,
+        num_kv_shared_layers=0,
+    )
+    text_cfg = cfg.get_text_config()
+    outputs = {}
+    inputs = None
+    for combined in (False, True):
+      export_cfg = exportable_module_config.ExportableModuleConfig(
+          model="dummy",
+          split_cache=True,
+          split_cache_combined_layers=combined,
+          cache_length=32,
+          prefill_lengths=[8],
+      )
+      with gemma4_patch.patch_gemma4_model(model, export_cfg):
+        prefill_mod, gen_mod = self._make_split_cache_modules(
+            model, export_cfg, text_cfg
+        )
+        mod = prefill_mod if signature.startswith("prefill") else gen_mod
+        if inputs is None:
+          # Per-layer inputs with random cache contents and embeddings.
+          inputs, _ = mod.get_sample_inputs(text_cfg)[signature]
+          for layer in inputs["kv_cache"].layers:
+            layer.keys[0].normal_()
+            layer.values[0].normal_()
+          inputs["embeddings"].normal_()
+          per_layer_cache = inputs["kv_cache"]
+        else:
+          inputs = dict(inputs)
+          inputs["kv_cache"] = combined_layers.combine_split_cache(
+              per_layer_cache
+          )
+          self.assertCountEqual(
+              inputs["kv_cache"], ["k_0", "v_0", "k_1", "v_1"]
+          )
+          self.assertEqual(inputs["kv_cache"]["k_0"].shape[0], 2)
+          self.assertEqual(inputs["kv_cache"]["k_1"].shape[0], 2)
+          layout, _ = mod.kv_cache_group_layout()
+          self.assertEqual(layout, [[0, 2], [1, 3]])
+        with torch.no_grad():
+          outputs[combined] = mod(**inputs)
+
+    per_layer, combined = outputs[False], outputs[True]
+    expected_slices = combined_layers.combine_slices(
+        per_layer["kv_slice_k"], per_layer["kv_slice_v"], [[0, 2], [1, 3]]
+    )
+    for key in ("kv_slice_k", "kv_slice_v"):
+      self.assertLen(combined[key], 2)
+      for got, want in zip(combined[key], expected_slices[key]):
+        torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
+    if "logits" in per_layer:
+      torch.testing.assert_close(
+          combined["logits"], per_layer["logits"], rtol=1e-5, atol=1e-5
+      )
+
+  @parameterized.named_parameters(
+      # (signature, start position, number of valid entries)
+      ("decode_start", "decode_cache_update", 0, 1),
+      ("decode_ring_end", "decode_cache_update", 31, 1),
+      ("decode_ring_wrap", "decode_cache_update", 32, 1),
+      ("decode_last", "decode_cache_update", 63, 1),
+      ("prefill_start", "prefill_cache_update_8", 0, 8),
+      ("prefill_ends_at_ring_end", "prefill_cache_update_8", 24, 8),
+      ("prefill_wraps", "prefill_cache_update_8", 28, 8),
+      ("prefill_wraps_padded", "prefill_cache_update_8", 30, 5),
+      ("prefill_second_lap", "prefill_cache_update_8", 52, 8),
+  )
+  def test_combined_cache_update_matches_per_layer(
+      self, signature, start, num_valid
+  ):
+    # Builds the auxiliary cache-update module as export_lib does, with and
+    # without split_cache_combined_layers, and checks that the combined update
+    # equals the per-layer update stacked into groups. Sliding layers 0 and 2
+    # use a 32-slot ring buffer, global layers 1 and 3 a 64-slot cache.
+    torch.manual_seed(5)
+    text_cfg = _make_small_text_config(
+        num_hidden_layers=4, num_kv_shared_layers=0
+    )
+
+    def make_config(combined):
+      return exportable_module_config.ExportableModuleConfig(
+          model="dummy",
+          split_cache=True,
+          split_cache_combined_layers=combined,
+          cache_length=64,
+          sliding_window_ring_buffer_size=32,
+          prefill_lengths=[8],
+      )
+
+    def make_module(export_cfg):
+      # As in export_lib.export_auxiliary_model.
+      if export_cfg.split_cache_combined_layers:
+        return combined_layers.CombinedCacheUpdate.from_config(
+            text_cfg, export_cfg
+        )
+      return split_cache_exportable.CacheUpdate()
+
+    per_layer_cfg, combined_cfg = make_config(False), make_config(True)
+    self.assertEqual(
+        combined_layers.ring_buffer_groups_for(text_cfg, combined_cfg),
+        (True, False),
+    )
+    self.assertEqual(
+        make_module(combined_cfg).ring_buffer_groups, (True, False)
+    )
+
+    # The combined signature inputs: one K / V tensor per group.
+    combined_inputs, _ = make_module(combined_cfg).get_sample_inputs(
+        text_cfg, combined_cfg
+    )[signature]
+    t = 1 if signature.startswith("decode") else 8
+    expected_shapes = {
+        "k_0": (2, 2, 32, 16),
+        "v_0": (2, 2, 16, 32),
+        "k_1": (2, 2, 64, 16),
+        "v_1": (2, 2, 16, 64),
+    }
+    self.assertEqual(
+        {k: tuple(v.shape) for k, v in combined_inputs["kv_cache"].items()},
+        expected_shapes,
+    )
+    self.assertEqual(
+        {k: tuple(v.shape) for k, v in combined_inputs["kv_slice"].items()},
+        {
+            "k_0": (2, 2, t, 16),
+            "v_0": (2, 2, 16, t),
+            "k_1": (2, 2, t, 16),
+            "v_1": (2, 2, 16, t),
+        },
+    )
+
+    # Per-layer inputs with random contents, and the same data combined.
+    inputs, _ = make_module(per_layer_cfg).get_sample_inputs(
+        text_cfg, per_layer_cfg
+    )[signature]
+    for cache in (inputs["kv_cache"], inputs["kv_slice"]):
+      for layer in cache.layers:
+        layer.keys.normal_()
+        layer.values.normal_()
+    inputs["input_pos"] = torch.arange(start, start + t, dtype=torch.int32)
+    inputs["valid_mask"] = torch.arange(t).unsqueeze(0) < num_valid
+
+    def combine(cache):
+      return combined_layers.combine_kv_layers(
+          [layer.keys.clone() for layer in cache.layers],
+          [layer.values.clone() for layer in cache.layers],
+          [layer.layer_type for layer in cache.layers],
+      )
+
+    combined = dict(
+        inputs,
+        kv_cache=combine(inputs["kv_cache"]),
+        kv_slice=combine(inputs["kv_slice"]),
+    )
+    with torch.no_grad():
+      want = combine(make_module(per_layer_cfg)(**inputs)["kv_cache"])
+      got = make_module(combined_cfg)(**combined)["kv_cache"]
+    self.assertCountEqual(got, want)
+    for name in want:
+      torch.testing.assert_close(got[name], want[name], rtol=0, atol=0)
+
+  def test_export_auxiliary_model_combined_layers(self):
+    # Runs the real auxiliary-model export (RoPE, masks, cache update) with
+    # split_cache_combined_layers and two context buckets, and checks the cache
+    # update signatures of the converted model: one K / V cache input and one
+    # K / V slice input per group, in every bucket.
+    torch.manual_seed(6)
+    text_cfg, model = self._make_split_cache_model(
+        num_hidden_layers=4, num_kv_shared_layers=0
+    )
+    export_cfg = exportable_module_config.ExportableModuleConfig(
+        model="dummy",
+        split_cache=True,
+        split_cache_combined_layers=True,
+        cache_length=128,
+        cache_lengths=[64, 128],
+        sliding_window_ring_buffer_size=32,
+        prefill_lengths=[8],
+        work_dir=self.create_tempdir().full_path,
+    )
+    artifacts = export_lib.export_auxiliary_model(
+        export_lib.SourceModelArtifacts(
+            model=model,
+            model_config=text_cfg,
+            text_model_config=text_cfg,
+            tokenizer=None,
+        ),
+        export_cfg,
+        export_lib.ExportedModelArtifacts(),
+    )
+
+    interpreter = interpreter_lib.Interpreter(
+        model_path=artifacts.auxiliary_model_path
+    )
+    signatures = interpreter.get_signature_list()
+    for cache_len in (64, 128):
+      for name, t in (
+          (f"prefill_cache_update_8_cache_{cache_len}", 8),
+          (f"decode_cache_update_cache_{cache_len}", 1),
+      ):
+        self.assertIn(name, signatures)
+        runner = interpreter.get_signature_runner(name)
+        in_shapes = {
+            k: tuple(v["shape"])
+            for k, v in runner.get_input_details().items()
+            if k.startswith(("kv_cache", "kv_slice"))
+        }
+        self.assertEqual(
+            in_shapes,
+            {
+                # Sliding layers 0 and 2: 32-slot ring buffer.
+                "kv_cache_k_0": (2, 2, 32, 16),
+                "kv_cache_v_0": (2, 2, 16, 32),
+                # Global layers 1 and 3: the bucket's cache length.
+                "kv_cache_k_1": (2, 2, cache_len, 16),
+                "kv_cache_v_1": (2, 2, 16, cache_len),
+                "kv_slice_k_0": (2, 2, t, 16),
+                "kv_slice_v_0": (2, 2, 16, t),
+                "kv_slice_k_1": (2, 2, t, 16),
+                "kv_slice_v_1": (2, 2, 16, t),
+            },
+            name,
+        )
+        out_names = sorted(runner.get_output_details())
+        self.assertEqual(
+            out_names,
+            ["kv_cache_k_0", "kv_cache_k_1", "kv_cache_v_0", "kv_cache_v_1"],
+            name,
+        )
+
+  def test_split_cache_combined_layers_tflite_signature(self):
+    torch.manual_seed(3)
+    cfg, model = self._make_split_cache_model(
+        num_hidden_layers=4,
+        num_kv_shared_layers=0,
+    )
+    text_cfg = cfg.get_text_config()
+    export_cfg = exportable_module_config.ExportableModuleConfig(
+        model="dummy",
+        split_cache=True,
+        split_cache_combined_layers=True,
+        cache_length=32,
+        prefill_lengths=[8],
+    )
+    with gemma4_patch.patch_gemma4_model(model, export_cfg):
+      _, gen_mod = self._make_split_cache_modules(model, export_cfg, text_cfg)
+      out_tflite = os.path.join(
+          self.create_tempdir().full_path, "decode.tflite"
+      )
+      export_lib._convert_and_export_module(  # pylint: disable=protected-access
+          gen_mod,
+          gen_mod.get_sample_inputs(text_cfg),
+          out_tflite,
+          export_cfg,
+          weights_loader=None,
+      )
+    interpreter = interpreter_lib.Interpreter(model_path=out_tflite)
+    runner = interpreter.get_signature_runner("decode")
+    in_shapes = {
+        k: tuple(v["shape"]) for k, v in runner.get_input_details().items()
+    }
+    out_shapes = {
+        k: tuple(v["shape"]) for k, v in runner.get_output_details().items()
+    }
+    # One K / V cache input and one K / V slice output per group.
+    self.assertEqual(
+        sorted(k for k in in_shapes if k.startswith("kv_cache")),
+        ["kv_cache_k_0", "kv_cache_k_1", "kv_cache_v_0", "kv_cache_v_1"],
+    )
+    self.assertEqual(in_shapes["kv_cache_k_0"], (2, 2, 32, 16))
+    self.assertEqual(in_shapes["kv_cache_v_0"], (2, 2, 16, 32))
+    self.assertEqual(in_shapes["kv_cache_k_1"], (2, 2, 32, 16))
+    self.assertEqual(
+        sorted(k for k in out_shapes if k.startswith("kv_slice")),
+        ["kv_slice_k_0", "kv_slice_k_1", "kv_slice_v_0", "kv_slice_v_1"],
+    )
+    self.assertEqual(out_shapes["kv_slice_k_0"], (2, 2, 1, 16))
+    self.assertEqual(out_shapes["kv_slice_v_1"], (2, 2, 16, 1))
 
   @parameterized.named_parameters(
       ("experimental_fp16", True, None, torch.float16),

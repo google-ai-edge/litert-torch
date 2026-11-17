@@ -766,6 +766,7 @@ def export(
     v_ts_idx: int | None = None,
     split_cache: bool | None = None,
     attention_kv_block_size: int | None = None,
+    split_cache_combined_layers: bool | None = None,
     cache_implementation: str | None = None,
     auto_model_override: str | None = None,
     use_jinja_template: bool | None = None,
@@ -910,6 +911,12 @@ def export(
       divides every cache length larger than it; smaller buckets and caches of
       any other length (ring buffers, even one larger than a small bucket) use
       plain attention.
+    split_cache_combined_layers: (Experimental, requires split_cache) Whether
+      to pass the KV caches of all layers with the same cache layout as a
+      single K and a single V tensor (kv_cache_k_<g> / kv_cache_v_<g> with the
+      layer as the leading dimension), with single kv_slice_k_<g> /
+      kv_slice_v_<g> outputs per group. Do not depend on this option: it is
+      subject to change or removal without notice.
     cache_implementation: The cache implementation to use.
     auto_model_override: Overriding the AutoModel class to use for export.
     use_jinja_template: Whether to use jinja template.

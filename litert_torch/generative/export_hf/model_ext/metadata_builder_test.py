@@ -166,6 +166,69 @@ class MetadataBuilderTest(parameterized.TestCase):
     metadata = _build(sliding_window_ring_buffer_size=512)
     self.assertFalse(metadata.HasField("llm_npu_executor_metadata"))
 
+  def test_combined_layers_state_buffers(self):
+    # Two sliding layers (ring buffer) and one global layer: one K and one V
+    # state buffer per group instead of one per layer.
+    config = transformers.Gemma3TextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=3,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        sliding_window=8,
+        layer_types=[
+            "sliding_attention",
+            "full_attention",
+            "sliding_attention",
+        ],
+    )
+    # A model type without NPU defaults, so that only the ring buffer can turn
+    # on the handwritten cache update.
+    config.model_type = "unknown_ring_model"
+    source_artifacts = export_lib.SourceModelArtifacts(
+        model=types.SimpleNamespace(config=config),
+        model_config=config,
+        text_model_config=config,
+        tokenizer=types.SimpleNamespace(),
+    )
+    metadata = _build(
+        source_artifacts,
+        split_cache_combined_layers=True,
+        cache_length=128,
+        sliding_window_ring_buffer_size=32,
+    )
+    buffers = {
+        b.prefill_input_name: b
+        for b in metadata.llm_executor_metadata.state_buffers
+    }
+    self.assertCountEqual(
+        buffers,
+        ["kv_cache_k_0", "kv_cache_v_0", "kv_cache_k_1", "kv_cache_v_1"],
+    )
+    state_buffer = metadata_builder.executor_metadata_pb2.StateBuffer
+    self.assertEqual(
+        buffers["kv_cache_k_0"].type, state_buffer.TYPE_LOCAL_KEY_CACHE
+    )
+    self.assertEqual(
+        buffers["kv_cache_v_0"].type, state_buffer.TYPE_LOCAL_VALUE_CACHE
+    )
+    self.assertEqual(buffers["kv_cache_k_0"].maximum_sequence_length, 32)
+    self.assertEqual(buffers["kv_cache_k_0"].minimum_sequence_length, 8)
+    self.assertEqual(
+        buffers["kv_cache_k_1"].type, state_buffer.TYPE_GLOBAL_KEY_CACHE
+    )
+    self.assertEqual(
+        buffers["kv_cache_v_1"].type, state_buffer.TYPE_GLOBAL_VALUE_CACHE
+    )
+    self.assertEqual(buffers["kv_cache_v_1"].maximum_sequence_length, 128)
+    self.assertEqual(buffers["kv_cache_k_1"].sequence_axis, 2)
+    self.assertEqual(buffers["kv_cache_v_1"].sequence_axis, 3)
+    # The sliding groups are ring buffers, which need the handwritten cache
+    # update path, as with per-layer caches.
+    self.assertTrue(_npu_fields(metadata)["use_hw_cache_update_for_npu"])
+
   def test_sliding_layers_without_ring_buffer_size_is_not_a_ring_buffer(self):
     # Without a ringbuffer size, sliding layers are exported as full caches.
     metadata = _build(_create_sliding_window_source_artifacts())

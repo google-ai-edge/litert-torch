@@ -174,6 +174,16 @@ class ExportableModuleConfig:
   # ring buffer larger than a small bucket). In FP16, see the value bound in
   # split_cache/attention.py's _blocked_attention.
   attention_kv_block_size: int | None = None
+  # Experimental, requires split_cache. Pass the KV cache of all layers with
+  # the same cache layout as one K tensor and one V tensor (layer index as the
+  # leading dimension, e.g. kv_cache_k_0: [num_layers, num_kv_heads,
+  # cache_length, head_dim]) and emit the new entries as one kv_slice_k_<g> /
+  # kv_slice_v_<g> output per group, instead of one tensor per layer. Layers
+  # are grouped by (layer type, cache shape): e.g. one group for Qwen3, and one
+  # for the sliding and one for the global layers of Gemma 4. The auxiliary
+  # cache update model uses the same layout. Do not depend on this option: it
+  # is subject to change or removal without notice.
+  split_cache_combined_layers: bool = False
   cache_implementation: str | None = None
   auto_model_override: str | None = None
   use_jinja_template: bool = True
@@ -540,6 +550,9 @@ class ExportableModuleConfig:
       if self.cache_implementation is None:
         self.cache_implementation = "LiteRTLMSplitCache"
       self.moe_exports_implementation = "litert_moe_sequential"
+
+    if self.split_cache_combined_layers and not self.split_cache:
+      raise ValueError("split_cache_combined_layers requires split_cache.")
 
     if self.use_rope_composite is None:
       self.use_rope_composite = bool(

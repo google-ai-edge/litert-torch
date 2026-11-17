@@ -42,6 +42,7 @@ from litert_torch.generative.export_hf.core.mu import mu_pass_lib
 from litert_torch.generative.export_hf.core.speech import asr_model
 from litert_torch.generative.export_hf.core.speech import exportables as speech_exportables
 from litert_torch.generative.export_hf.core.split_cache import attention as _
+from litert_torch.generative.export_hf.core.split_cache import combined_layers
 from litert_torch.generative.export_hf.core.split_cache import exportable_module as split_cache_module
 from litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler import litert_lm_npu_compiler
 from litert_torch.generative.export_hf.model_ext import exportables as model_ext_exportables
@@ -958,6 +959,17 @@ def get_prefill_decode_exportable_cls(
           model_config, export_config
       )
   )
+  if export_config.split_cache_combined_layers:
+    # Adds the combined KV cache layout to the selected split-cache classes,
+    # model-specific (e.g. Gemma 4) or generic.
+    prefill_cls, decode_cls = model_specific_exportables or (
+        split_cache_module.LiteRTSplitCacheExportableModuleForDecoderOnlyLMPrefill,
+        split_cache_module.LiteRTSplitCacheExportableModuleForDecoderOnlyLMGenerate,
+    )
+    return (
+        combined_layers.with_combined_layers(prefill_cls),
+        combined_layers.with_combined_layers(decode_cls),
+    )
   if model_specific_exportables:
     return model_specific_exportables
   if export_config.split_cache:
@@ -1676,7 +1688,12 @@ def export_auxiliary_model(
           sliding_window_sizes=sliding_window_sizes,
       )
       # Cache Update
-      cache_update_module = split_cache_module.CacheUpdate()
+      if iter_config.split_cache_combined_layers:
+        cache_update_module = combined_layers.CombinedCacheUpdate.from_config(
+            text_model_config, iter_config
+        )
+      else:
+        cache_update_module = split_cache_module.CacheUpdate()
 
       aux_modules = [
           (
