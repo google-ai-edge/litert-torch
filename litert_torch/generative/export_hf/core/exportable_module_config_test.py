@@ -37,6 +37,7 @@ class SdpaCompositeTest(parameterized.TestCase):
     config = _config(cache_length=4096)
     self.assertFalse(config.apply_gpu_composites)
     self.assertFalse(config.externalize_weights)
+    self.assertFalse(config.externalize_moe_weights)
     for flag_name in exportable_module_config._GPU_OPTIMIZATION_FLAGS:
       self.assertFalse(getattr(config, flag_name), msg=flag_name)
     self.assertTrue(config.use_rope_composite)

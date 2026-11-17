@@ -773,6 +773,7 @@ def export(
     jinja_chat_template_override: str | None = _UNSET,
     bundle_litert_lm: bool | None = None,
     externalize_weights: bool | None = None,
+    externalize_moe_weights: bool | None = None,
     experimental_use_mixed_precision: bool | None = None,
     export_vision_encoder: bool | None = None,
     vision_encoder_quantization_recipe: str | None = _UNSET,
@@ -929,6 +930,10 @@ def export(
     bundle_litert_lm: Whether to bundle the model as a LiteRT LM file.
     externalize_weights: Whether to move eligible TFLite weight tensors into a
       separate `tflite_weights` section when packaging the `.litertlm` file.
+    externalize_moe_weights: With `externalize_weights`, whether to also move
+      the quantized expert weights and block scales of CUSTOM "moe" ops into
+      the `tflite_weights` section. Only the CPU (XNNPACK) backend can run such
+      bundles for now; the GPU backend rejects externalized "moe" inputs.
     experimental_use_mixed_precision: Whether to enable mixed precision.
     export_vision_encoder: Whether to export the vision encoder.
     vision_encoder_quantization_recipe: The quantization recipe to use for the

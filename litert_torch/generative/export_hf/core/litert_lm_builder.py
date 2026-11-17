@@ -613,6 +613,11 @@ def _build_litert_lm_file(
   model_path = os.path.join(output_dir, 'model.litertlm')  # pyrefly: ignore[no-matching-overload]
   with open(model_path, 'wb') as f:
     if export_config.externalize_weights:
+      build_kwargs = {}
+      if export_config.externalize_moe_weights:
+        # Only passed when set so that older litert-lm-builder releases without
+        # this option keep working with the default.
+        build_kwargs['moe_weights_in_model_graph'] = False
       builder.build(
           f,
           weights_in_model_graph=False,
@@ -621,6 +626,7 @@ def _build_litert_lm_file(
               if work_dir
               else None
           ),
+          **build_kwargs,
       )
     else:
       # Set the weight placement explicitly instead of relying on the default

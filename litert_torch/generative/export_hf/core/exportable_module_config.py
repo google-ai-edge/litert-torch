@@ -191,6 +191,11 @@ class ExportableModuleConfig:
   # Moves eligible TFLite weight tensors into a separate `tflite_weights`
   # section when packaging the `.litertlm` file.
   externalize_weights: bool = False
+  # With `externalize_weights`, also moves the quantized expert weights and
+  # block scales of CUSTOM "moe" ops into the `tflite_weights` section. Only
+  # the CPU (XNNPACK) backend can run such bundles for now; the GPU backend
+  # rejects externalized "moe" inputs.
+  externalize_moe_weights: bool = False
   # Dtype the model is loaded and traced in (weights and graph): "float32"
   # (default when None) or "bfloat16". Not the deployment activation dtype.
   model_dtype: str | None = None
