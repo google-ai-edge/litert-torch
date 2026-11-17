@@ -479,6 +479,16 @@ class ExportPlanAndPresetResolutionTest(parameterized.TestCase):
     self.assertTrue(plan.export_kwargs["apply_gpu_composites"])
     self.assertTrue(plan.export_kwargs["externalize_weights"])
 
+  def test_externalize_moe_weights_is_forwarded_only_when_set(self):
+    model = self._checkpoint({"model_type": "qwen3", "hidden_size": 1024})
+
+    default_plan = export.export(model, dry_run=True)
+    moe_plan = export.export(model, dry_run=True, externalize_moe_weights=True)
+
+    self.assertNotIn("externalize_moe_weights", default_plan.export_kwargs)
+    self.assertTrue(moe_plan.export_kwargs["externalize_moe_weights"])
+    self.assertEqual(moe_plan.sources["externalize_moe_weights"], "user")
+
   def test_npu_generic_target_resolves_split_cache_defaults(self):
     model = self._checkpoint({"model_type": "qwen3", "hidden_size": 1024})
 
