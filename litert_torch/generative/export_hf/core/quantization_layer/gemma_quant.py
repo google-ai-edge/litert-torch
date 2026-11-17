@@ -15,9 +15,11 @@
 """LiteRT exportable wrappers for HuggingFace gemma_quant layers."""
 
 from collections.abc import Callable
+import math
 import types
 from typing import Any
 
+from litert_torch._convert import converter_v2
 from litert_torch._convert.fx_passes import lower_torchao_pass
 import torch
 
@@ -77,6 +79,59 @@ def unpack_gemma_weight(
         *packed.shape[:-1], -1
     )[..., :orig_width]
   raise ValueError(f"Unsupported num_bits: {num_bits}")
+
+
+def repack_gemma_weight_to_tflite(
+    raw_weight: torch.Tensor,
+    num_bits: int,
+    orig_width: int,
+    *,
+    is_blockwise: bool = False,
+    total_blocks: int = 0,
+    block_size: int = 0,
+) -> torch.Tensor:
+  """Converts packed Gemma weights to the params.bin layout if possible.
+
+  Gemma QAT checkpoints store packed sub-byte weights in offset binary (`q + 8`
+  for int4, `q + 2` for int2), whereas TFLite `params.bin` stores two's
+  complement nibbles/crumbs (`q & 0xF` / `q & 0x3`). When the row and block
+  widths are byte-aligned and Converter V2 packs the weight (see
+  `converter_v2._MIN_PACKED_PARAM_ELEMENTS`), flipping the sign bit of each
+  packed element (`^ 0x88` for int4, `^ 0xAA` for int2) produces the exact
+  TFLite prepacked `uint8` buffer without unpacking to `int8`.
+
+  Args:
+    raw_weight: Checkpoint weight tensor.
+    num_bits: Quantization bit width (`2`, `4`, or `8`).
+    orig_width: Unpacked last-dimension width (`in_features` or
+      `embedding_dim`).
+    is_blockwise: Whether the layer reshapes weights into `[total_blocks,
+      block_size]`.
+    total_blocks: Number of blocks when `is_blockwise` is True.
+    block_size: Elements per block when `is_blockwise` is True.
+
+  Returns:
+    Prepacked `torch.uint8` tensor in TFLite layout when eligible, or unpacked
+    `torch.int8` tensor otherwise.
+  """
+  eff_width = block_size if is_blockwise else orig_width
+  num_elements = math.prod(raw_weight.shape[:-1]) * orig_width
+  if (
+      num_bits in (2, 4)
+      and num_elements >= converter_v2._MIN_PACKED_PARAM_ELEMENTS  # pylint: disable=protected-access
+      and (orig_width * num_bits) % 8 == 0
+      and (eff_width * num_bits) % 8 == 0
+      and raw_weight.shape[-1] == (orig_width * num_bits) // 8
+  ):
+    xor_mask = 0x88 if num_bits == 4 else 0xAA
+    packed = torch.bitwise_xor(raw_weight.to(torch.uint8), xor_mask)
+    if is_blockwise:
+      return packed.reshape(total_blocks, (block_size * num_bits) // 8)
+    return packed
+  int_weight = unpack_gemma_weight(raw_weight, num_bits, orig_width)
+  if is_blockwise:
+    return int_weight.reshape(total_blocks, block_size)
+  return int_weight
 
 
 def create_per_channel_dequant_fn(
@@ -179,6 +234,13 @@ class LiteRTQuantizedLinear(torch.nn.Module):
       self.drq_fq = lower_torchao_pass._create_fake_quant_function(drq_attrs)  # pylint: disable=protected-access
 
   def _unpack_and_reshape(self, raw_weight: torch.Tensor) -> torch.Tensor:
+    if raw_weight.is_meta:
+      shape = (
+          (self.total_blocks, self.block_size)
+          if self.is_blockwise
+          else (self.out_features, self.in_features)
+      )
+      return torch.empty(shape, dtype=torch.int8, device="meta")
     int_weight = unpack_gemma_weight(
         raw_weight, self.num_bits, self.in_features
     )
@@ -192,11 +254,18 @@ class LiteRTQuantizedLinear(torch.nn.Module):
       prefix: str,
       attr: str,
   ) -> torch.Tensor | None:
-    """Loads and unpacks `weight` from `weights_loader`, or returns `None`."""
+    """Loads `weight` packed for params.bin (or as int8), or returns `None`."""
     if attr != "weight":
       return None
     key = f"{prefix}.weight" if prefix else "weight"
-    return self._unpack_and_reshape(weights_loader(key))
+    return repack_gemma_weight_to_tflite(
+        weights_loader(key),
+        self.num_bits,
+        self.in_features,
+        is_blockwise=self.is_blockwise,
+        total_blocks=self.total_blocks,
+        block_size=self.block_size,
+    )
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
     """Applies quantized linear projection with optional SRQ/DRQ fake-quant."""
@@ -243,6 +312,13 @@ class LiteRTQuantizedEmbedding(torch.nn.Module):
     )
 
   def _unpack_and_reshape(self, raw_weight: torch.Tensor) -> torch.Tensor:
+    if raw_weight.is_meta:
+      shape = (
+          (self.total_blocks, self.block_size)
+          if self.is_blockwise
+          else (self.num_embeddings, self.embedding_dim)
+      )
+      return torch.empty(shape, dtype=torch.int8, device="meta")
     int_weight = unpack_gemma_weight(
         raw_weight, self.num_bits, self.embedding_dim
     )
@@ -256,11 +332,18 @@ class LiteRTQuantizedEmbedding(torch.nn.Module):
       prefix: str,
       attr: str,
   ) -> torch.Tensor | None:
-    """Loads and unpacks `weight` from `weights_loader`, or returns `None`."""
+    """Loads `weight` packed for params.bin (or as int8), or returns `None`."""
     if attr != "weight":
       return None
     key = f"{prefix}.embedding_quantized" if prefix else "embedding_quantized"
-    return self._unpack_and_reshape(weights_loader(key))
+    return repack_gemma_weight_to_tflite(
+        weights_loader(key),
+        self.num_bits,
+        self.embedding_dim,
+        is_blockwise=self.is_blockwise,
+        total_blocks=self.total_blocks,
+        block_size=self.block_size,
+    )
 
   embed_tokens_on_cpu = _embed_tokens_on_cpu_method
 

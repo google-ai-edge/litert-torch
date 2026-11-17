@@ -606,6 +606,7 @@ class TestConverterV2(googletest.TestCase):
       expected_params_bytes: int,
       rows: int | None = None,
       check_outputs: bool = True,
+      extra_loaders: dict[str, torch.Tensor] | None = None,
   ):
     """Converts `x @ dequantize(w[:rows]).T` and checks params.bin and outputs.
 
@@ -616,6 +617,8 @@ class TestConverterV2(googletest.TestCase):
       expected_params_bytes: The expected size of params.bin.
       rows: If set, slices the first `rows` rows of `w` before dequantizing.
       check_outputs: Whether to compare the outputs with the eager module.
+      extra_loaders: More weights loader values for `weight` to stream from,
+        by subtest name (e.g. `w` already packed).
     """
 
     class SubbyteLinear(nn.Module):
@@ -644,10 +647,13 @@ class TestConverterV2(googletest.TestCase):
     with torch.no_grad():
       expected = module(x).numpy()
     meta_module = SubbyteLinear(w.to("meta"), dq_fn).eval()
-    for name, mod, args, loader in (
+    cases = [
         ("in_memory", module, (x,), None),
         ("streaming", meta_module, (x.to("meta"),), {"weight": w}),
-    ):
+    ]
+    for name, value in (extra_loaders or {}).items():
+      cases.append((name, meta_module, (x.to("meta"),), {"weight": value}))
+    for name, mod, args, loader in cases:
       with self.subTest(mode=name):
         export_dir = self.create_tempdir().full_path
         edge_model = converter_v2.convert(
@@ -666,12 +672,56 @@ class TestConverterV2(googletest.TestCase):
     """Tests that i4/i2 dequantized weights are bit-packed in params.bin."""
     for dtype, low, high, bit_width in (("i4", -7, 8, 4), ("i2", -2, 2, 2)):
       with self.subTest(dtype=dtype):
+        w = torch.randint(low, high, (16, 32), dtype=torch.int8)
+        packed = torch.from_numpy(
+            converter_v2_lib._pack_subbyte_array(w.numpy(), bit_width)  # pylint: disable=protected-access
+        )
         self._check_subbyte_linear(
-            torch.randint(low, high, (16, 32), dtype=torch.int8),
+            w,
             dtype,
             0,
             expected_params_bytes=16 * 32 * bit_width // 8,
+            extra_loaders={
+                "prepacked": packed.reshape(16, -1),
+                "prepacked_flat": packed,
+            },
         )
+
+  def test_row_padded_subbyte_weight_is_rejected(self):
+    """A uint8 weight with padded rows is not taken as packed."""
+    # (2, 35) i2 rows padded to 9 bytes have as many bytes as the packed weight.
+    w = torch.randint(-2, 2, (2, 35), dtype=torch.int8)
+    padded = np.stack([
+        converter_v2_lib._pack_subbyte_array(row, 2)  # pylint: disable=protected-access
+        for row in w.numpy()
+    ])
+    self.assertEqual(padded.shape, (2, 9))
+    dq_fn = lower_torchao_pass._create_dequantize_function(  # pylint: disable=protected-access
+        lower_torchao_pass._get_quant_composite_attributes(  # pylint: disable=protected-access
+            scale=[0.05] * 2,
+            zero_point=[0],
+            dtype="i2",
+            quant_dimension=0,
+            narrow_range=False,
+        )
+    )
+
+    class SubbyteLinear(nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.register_buffer("weight", w.to("meta"))
+
+      def forward(self, x):
+        return torch.nn.functional.linear(x, dq_fn(self.weight))
+
+    with self.assertRaisesRegex(ValueError, "weights_loader returned shape"):
+      converter_v2.convert(
+          SubbyteLinear().eval(),
+          (torch.randn(2, 35, device="meta"),),
+          export_dir=self.create_tempdir().full_path,
+          weights_loader={"weight": torch.from_numpy(padded)},
+      )
 
   def test_ui4_quant_weights_are_packed(self):
     """Tests that ui8 parameters dequantized as ui4 are bit-packed."""

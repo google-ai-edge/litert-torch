@@ -15,6 +15,7 @@
 """Tests for LiteRT gemma_quant layer wrappers."""
 
 import copy
+import os
 
 from absl.testing import parameterized
 import litert_torch
@@ -253,7 +254,11 @@ class GemmaQuantTest(parameterized.TestCase):
     loader_w = {"proj.weight": orig_linear.weight}.__getitem__
     self.assertIsNone(lrt_linear.load_export_weight(loader_w, "proj", "bias"))
     loaded_w = lrt_linear.load_export_weight(loader_w, "proj", "weight")
-    torch.testing.assert_close(loaded_w, lrt_linear.weight)
+    self.assertEqual(loaded_w.dtype, torch.uint8)
+    self.assertEqual(tuple(loaded_w.shape), (16, 8))
+    torch.testing.assert_close(
+        loaded_w, (orig_linear.weight ^ 0x88).reshape(16, 8)
+    )
 
     orig_emb = hf_gemma_quant.QuantizedEmbedding(
         num_embeddings=16,
@@ -275,7 +280,40 @@ class GemmaQuantTest(parameterized.TestCase):
     }.__getitem__
     self.assertIsNone(lrt_emb.load_export_weight(loader_emb, "emb", "other"))
     loaded_emb = lrt_emb.load_export_weight(loader_emb, "emb", "weight")
-    torch.testing.assert_close(loaded_emb, lrt_emb.weight)
+    self.assertEqual(loaded_emb.dtype, torch.uint8)
+    self.assertEqual(tuple(loaded_emb.shape), (16, 16))
+    torch.testing.assert_close(loaded_emb, orig_emb.embedding_quantized ^ 0x88)
+
+    # Tensors with < 65 elements, rows that are not byte aligned, and blocks
+    # that are not byte aligned fall back to unpacked int8.
+    for in_features, out_features, num_blocks, num_bits in (
+        (16, 4, 1, 4),
+        (33, 4, 1, 4),
+        (36, 4, 2, 2),
+    ):
+      with self.subTest(
+          in_features=in_features, num_blocks=num_blocks, num_bits=num_bits
+      ):
+        fallback_linear = hf_gemma_quant.QuantizedLinear(
+            in_features=in_features,
+            out_features=out_features,
+            num_bits=num_bits,
+        ).eval()
+        fallback_linear.weight.data = torch.randint(
+            0, 256, fallback_linear.weight.shape, dtype=torch.uint8
+        )
+        fallback_linear.weight_scale = nn.Parameter(
+            torch.ones(out_features, num_blocks, dtype=torch.float32),
+            requires_grad=False,
+        )
+        lrt_fallback = lrt_gemma_quant.LiteRTQuantizedLinear(fallback_linear)
+        loaded_fallback = lrt_fallback.load_export_weight(
+            {"proj.weight": fallback_linear.weight}.__getitem__,
+            "proj",
+            "weight",
+        )
+        self.assertEqual(loaded_fallback.dtype, torch.int8)
+        torch.testing.assert_close(loaded_fallback, lrt_fallback.weight)
 
     # Meta scales and non-divisible block counts raise ValueError.
     meta_scale = torch.empty((8, 1), dtype=torch.float32, device="meta")
@@ -494,7 +532,8 @@ class GemmaQuantTest(parameterized.TestCase):
     )
     self.assertEqual(proj.input_activation_scale.item(), 0.0)
 
-  def test_gemma_quant_linear_meta_convert_v2(self):
+  @parameterized.parameters(2, 4)
+  def test_gemma_quant_linear_meta_convert_v2(self, num_bits):
     if not litert_torch.converter_v2.is_supported():
       self.skipTest(
           "Converter V2 is not supported by the installed TensorFlow."
@@ -503,13 +542,14 @@ class GemmaQuantTest(parameterized.TestCase):
     in_features = 64
     out_features = 16
     orig_linear = hf_gemma_quant.QuantizedLinear(
-        in_features=in_features, out_features=out_features, num_bits=4
+        in_features=in_features, out_features=out_features, num_bits=num_bits
     ).eval()
     orig_linear.weight.data = torch.randint(
         0, 256, orig_linear.weight.shape, dtype=torch.uint8
     )
     orig_linear.weight_scale = nn.Parameter(
-        torch.rand(out_features, 2, dtype=torch.float32) * 0.1 + 0.01,
+        (torch.rand(out_features, 2, dtype=torch.float32) * 0.1 + 0.01)
+        / (1 << (num_bits - 1)),
         requires_grad=False,
     )
     orig_linear.input_activation_scale.data = torch.tensor(
@@ -529,7 +569,7 @@ class GemmaQuantTest(parameterized.TestCase):
     ckpt = orig_linear.state_dict()
     with weights_loader_lib.init_params_on_meta():
       meta_orig = hf_gemma_quant.QuantizedLinear(
-          in_features=in_features, out_features=out_features, num_bits=4
+          in_features=in_features, out_features=out_features, num_bits=num_bits
       ).eval()
       meta_orig.weight_scale = nn.Parameter(
           torch.empty(out_features, 2, dtype=torch.float32),
@@ -539,6 +579,7 @@ class GemmaQuantTest(parameterized.TestCase):
     meta_linear = lrt_gemma_quant.LiteRTQuantizedLinear(meta_orig).eval()
     self.assertEqual(meta_linear.weight.device.type, "meta")
 
+    export_dir = self.create_tempdir().full_path
     with weights_loader_lib.prepare_for_export(
         ckpt.__getitem__, meta_linear
     ) as loader:
@@ -546,10 +587,79 @@ class GemmaQuantTest(parameterized.TestCase):
           meta_linear,
           (x.to("meta"),),
           use_v2=True,
+          export_dir=export_dir,
           weights_loader=loader,
       )
+    bin_path = os.path.join(export_dir, "params.bin")
+    self.assertEqual(
+        os.path.getsize(bin_path), (in_features * out_features * num_bits) // 8
+    )
     actual = edge_model(x)
     np.testing.assert_allclose(actual, expected, rtol=5e-2, atol=5e-2)
+
+  @parameterized.parameters(2, 4)
+  def test_gemma_quant_embedding_meta_convert_v2(self, num_bits):
+    if not litert_torch.converter_v2.is_supported():
+      self.skipTest(
+          "Converter V2 is not supported by the installed TensorFlow."
+      )
+    torch.manual_seed(42)
+    num_embeddings, embedding_dim, num_blocks = 32, 64, 2
+
+    def make_embedding():
+      return hf_gemma_quant.QuantizedEmbedding(
+          num_embeddings=num_embeddings,
+          embedding_dim=embedding_dim,
+          output_dtype=torch.float32,
+          embed_scale=2.0,
+          num_bits=num_bits,
+      ).eval()
+
+    orig_emb = make_embedding()
+    orig_emb.embedding_quantized.data = torch.randint(
+        0, 256, orig_emb.embedding_quantized.shape, dtype=torch.uint8
+    )
+    orig_emb.embedding_scale = nn.Parameter(
+        torch.rand(num_embeddings, num_blocks, dtype=torch.float32) * 0.1
+        + 0.01,
+        requires_grad=False,
+    )
+    input_ids = torch.tensor([[1, 5, 10], [20, 25, 30]], dtype=torch.int32)
+    ref_emb = lrt_gemma_quant.LiteRTQuantizedEmbedding(
+        copy.deepcopy(orig_emb)
+    ).eval()
+    with torch.no_grad():
+      expected = ref_emb(input_ids).detach().numpy()
+
+    ckpt = orig_emb.state_dict()
+    with weights_loader_lib.init_params_on_meta():
+      meta_orig = make_embedding()
+      meta_orig.embedding_scale = nn.Parameter(
+          torch.empty(num_embeddings, num_blocks, dtype=torch.float32),
+          requires_grad=False,
+      )
+    quantization_layer.load_quant_scales_(meta_orig, ckpt.__getitem__)
+    meta_emb = lrt_gemma_quant.LiteRTQuantizedEmbedding(meta_orig).eval()
+    self.assertEqual(meta_emb.weight.device.type, "meta")
+
+    export_dir = self.create_tempdir().full_path
+    with weights_loader_lib.prepare_for_export(
+        ckpt.__getitem__, meta_emb
+    ) as loader:
+      edge_model = litert_torch.convert(
+          meta_emb,
+          (input_ids.to("meta"),),
+          use_v2=True,
+          export_dir=export_dir,
+          weights_loader=loader,
+      )
+    self.assertEqual(
+        os.path.getsize(os.path.join(export_dir, "params.bin")),
+        num_embeddings * embedding_dim * num_bits // 8,
+    )
+    np.testing.assert_allclose(
+        edge_model(input_ids), expected, rtol=5e-2, atol=5e-2
+    )
 
 
 if __name__ == "__main__":

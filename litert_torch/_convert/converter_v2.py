@@ -181,6 +181,31 @@ def _storage_nbytes(t: torch.Tensor, bit_width: int) -> int:
   return t.numel() * t.element_size()
 
 
+def _is_prepacked_subbyte_tensor(
+    t: torch.Tensor, param: torch.Tensor, bit_width: int
+) -> bool:
+  """Returns whether `t` holds `param` already bit-packed for params.bin.
+
+  Checkpoints often store sub-byte weights packed in `uint8` tensors in the
+  same LSB-first layout, so they can be written without unpacking. Rows must
+  not be padded: `t` is either flat or packs each innermost row into whole
+  bytes.
+
+  Args:
+    t: The tensor returned by the weights loader.
+    param: The exported parameter.
+    bit_width: The storage bit width of `param`.
+  """
+  if bit_width >= 8 or t.dtype != torch.uint8 or not param.shape:
+    return False
+  if t.numel() != _storage_nbytes(param, bit_width):
+    return False
+  return t.dim() == 1 or (
+      t.shape[:-1] == param.shape[:-1]
+      and t.shape[-1] * 8 == param.shape[-1] * bit_width
+  )
+
+
 def _get_param_id(p: torch.Tensor, origin: torch.Tensor | None = None) -> Any:
   """Returns a unique fingerprint for a parameter tensor to enable deduplication.
 
@@ -473,19 +498,21 @@ class ParameterRegistry:
                   " are unique."
               )
 
-          if tuple(actual_tensor.shape) != tuple(p.shape):
+          is_packed = _is_prepacked_subbyte_tensor(actual_tensor, p, bit_width)
+          if not is_packed and tuple(actual_tensor.shape) != tuple(p.shape):
             raise ValueError(
                 f"weights_loader returned shape {tuple(actual_tensor.shape)}"
                 f" for '{param_name}', but the exported program expects"
                 f" {tuple(p.shape)}."
             )
-          if actual_tensor.dtype != p.dtype:
+          if not is_packed and actual_tensor.dtype != p.dtype:
             actual_tensor = actual_tensor.to(p.dtype)
           raw_view = _tensor_to_byte_view(actual_tensor)
         else:
+          is_packed = False
           raw_view = _tensor_to_byte_view(p)
 
-        if bit_width < 8:
+        if bit_width < 8 and not is_packed:
           raw_view = memoryview(_pack_subbyte_array(raw_view, bit_width))
         expected_nbytes = _storage_nbytes(p, bit_width)
         if raw_view.nbytes != expected_nbytes:
