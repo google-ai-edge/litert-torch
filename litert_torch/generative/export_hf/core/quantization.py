@@ -21,6 +21,7 @@ import cycle.
 
 from litert_torch import progress
 
+from litert_quantizer import qtyping
 from litert_quantizer import quantizer as quantizer_lib
 from litert_quantizer import recipe as recipe_lib
 from litert_quantizer import recipe_manager
@@ -92,6 +93,55 @@ def _qwen3_5_mixed48_b32():
   )
 
 
+def _dynamic_moe_afp32(
+    num_bits: int,
+    granularity: qtyping.QuantGranularity = (
+        qtyping.QuantGranularity.CHANNELWISE
+    ),
+):
+  """Local recipe with explicit multi-axis (0, 1) MoE CUSTOM_OP quantization."""
+  rp_manager = recipe_manager.RecipeManager()
+  rp_manager.add_dynamic_config(
+      regex='.*',
+      operation_name=recipe_lib.TFLOperationName.ALL_SUPPORTED,
+      num_bits=num_bits,
+      granularity=granularity,
+  )
+  rp_manager.add_quantization_config(
+      regex='.*',
+      operation_name=recipe_lib.TFLOperationName.CUSTOM_OP,
+      op_config=qtyping.OpQuantizationConfig(
+          weight_tensor_config=qtyping.TensorQuantizationConfig(
+              num_bits=num_bits,
+              symmetric=True,
+              granularity=granularity,
+              quantized_dimensions=(0, 1),
+          ),
+          compute_precision=qtyping.ComputePrecision.INTEGER,
+          explicit_dequantize=False,
+      ),
+  )
+  return rp_manager.get_quantization_recipe()
+
+
+def _dynamic_wi8_moe_afp32():
+  """Local recipe with 8-bit channelwise dynamic quantization including MoE."""
+  return _dynamic_moe_afp32(num_bits=8)
+
+
+def _dynamic_wi4_moe_afp32():
+  """Local recipe with 4-bit channelwise dynamic quantization including MoE."""
+  return _dynamic_moe_afp32(num_bits=4)
+
+
+def _dynamic_wi4b32_moe_afp32():
+  """Local recipe with 4-bit blockwise-32 dynamic quantization including MoE."""
+  return _dynamic_moe_afp32(
+      num_bits=4,
+      granularity=qtyping.QuantGranularity.BLOCKWISE_32,
+  )
+
+
 _LOCAL_QUANTIZATION_RECIPES = {
     'dynamic_wi8_emb4_afp32': _dynamic_wi8_emb4_afp32,
     'dynamic_fc_weight_only_conv_wi8_afp32': (
@@ -100,6 +150,9 @@ _LOCAL_QUANTIZATION_RECIPES = {
     'dynamic_wi4b32_octav_afp32': _dynamic_wi4b32_octav_afp32,
     'gemma4_mixed48_b32_octav': _gemma4_mixed48_b32_octav,
     'qwen3_5_mixed48_b32': _qwen3_5_mixed48_b32,
+    'dynamic_wi8_moe_afp32': _dynamic_wi8_moe_afp32,
+    'dynamic_wi4_moe_afp32': _dynamic_wi4_moe_afp32,
+    'dynamic_wi4b32_moe_afp32': _dynamic_wi4b32_moe_afp32,
 }
 
 

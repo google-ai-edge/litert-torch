@@ -14,10 +14,16 @@
 # ==============================================================================
 """Tests for quantization recipes and utilities."""
 
+import os
+
 from absl.testing import absltest
 from absl.testing import parameterized
+import litert_torch
 from litert_torch.generative.export_hf.core import quantization
+from litert_torch.generative.layers import moe
+import torch
 
+from litert_quantizer import qtyping
 from litert_quantizer import recipe as recipe_lib
 from litert_quantizer import recipe_manager
 
@@ -59,6 +65,9 @@ class QuantizationTest(parameterized.TestCase):
       ("dynamic_wi4b32_octav_afp32", "dynamic_wi4b32_octav_afp32"),
       ("gemma4_mixed48_b32_octav", "gemma4_mixed48_b32_octav"),
       ("qwen3_5_mixed48_b32", "qwen3_5_mixed48_b32"),
+      ("dynamic_wi8_moe_afp32", "dynamic_wi8_moe_afp32"),
+      ("dynamic_wi4_moe_afp32", "dynamic_wi4_moe_afp32"),
+      ("dynamic_wi4b32_moe_afp32", "dynamic_wi4b32_moe_afp32"),
   )
   def test_local_quantization_recipes_are_valid(self, recipe_name):
     self.assertIn(recipe_name, quantization._LOCAL_QUANTIZATION_RECIPES)
@@ -67,6 +76,91 @@ class QuantizationTest(parameterized.TestCase):
     rp_manager = recipe_manager.RecipeManager()
     rp_manager.load_quantization_recipe(recipe)
     self.assertNotEmpty(rp_manager.get_quantization_recipe())
+
+  @parameterized.named_parameters(
+      (
+          "wi8_moe",
+          "dynamic_wi8_moe_afp32",
+          8,
+          qtyping.QuantGranularity.CHANNELWISE,
+      ),
+      (
+          "wi4_moe",
+          "dynamic_wi4_moe_afp32",
+          4,
+          qtyping.QuantGranularity.CHANNELWISE,
+      ),
+      (
+          "wi4b32_moe",
+          "dynamic_wi4b32_moe_afp32",
+          4,
+          qtyping.QuantGranularity.BLOCKWISE_32,
+      ),
+  )
+  def test_moe_recipes_quantize_moe_custom_op_model(
+      self, recipe_name, expected_bits, expected_granularity
+  ):
+    rp_manager = recipe_manager.RecipeManager()
+    rp_manager.load_quantization_recipe(
+        quantization._LOCAL_QUANTIZATION_RECIPES[recipe_name]()
+    )
+    algo_key, op_cfg = rp_manager.get_quantization_configs(
+        recipe_lib.TFLOperationName.CUSTOM_OP, "moe_layer"
+    )
+    self.assertEqual(algo_key, recipe_lib.AlgorithmName.MIN_MAX_UNIFORM_QUANT)
+    self.assertIsNotNone(op_cfg.weight_tensor_config)
+    assert op_cfg.weight_tensor_config is not None
+    self.assertEqual(op_cfg.weight_tensor_config.num_bits, expected_bits)
+    self.assertEqual(
+        op_cfg.weight_tensor_config.granularity, expected_granularity
+    )
+    self.assertEqual(op_cfg.weight_tensor_config.quantized_dimensions, (0, 1))
+
+    class _TinyMoeModule(torch.nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.proj = torch.nn.Linear(32, 32, bias=False)
+        self.register_buffer(
+            "gate_w", moe.flatten_expert_weight(torch.randn(2, 64, 32))
+        )
+        self.register_buffer(
+            "ff1_w", moe.flatten_expert_weight(torch.randn(2, 64, 32))
+        )
+        self.register_buffer(
+            "down_w", moe.flatten_expert_weight(torch.randn(2, 32, 64))
+        )
+        self.register_buffer("expert_scale", torch.ones(1, 1, 1, 2))
+
+      def forward(self, x, top_w, top_idx):
+        h = self.proj(x)
+        return moe.moe_experts(
+            h,
+            top_w,
+            top_idx,
+            self.gate_w,
+            self.ff1_w,
+            self.down_w,
+            self.expert_scale,
+            num_experts=2,
+            num_active_experts=2,
+            model_dim=32,
+            hidden_dim=64,
+        )
+
+    torch.manual_seed(0)
+    module = _TinyMoeModule().eval()
+    sample_x = torch.randn(1, 2, 32)
+    sample_w = torch.full((1, 2, 2), 0.5, dtype=torch.float32)
+    sample_idx = torch.tensor([[[0, 1], [1, 0]]], dtype=torch.int32)
+    edge_model = litert_torch.convert(module, (sample_x, sample_w, sample_idx))
+    float_path = os.path.join(
+        self.create_tempdir().full_path, f"tiny_{recipe_name}.tflite"
+    )
+    edge_model.export(float_path)
+    quantized_path = quantization.quantize_model(float_path, recipe_name)
+    self.assertTrue(os.path.exists(quantized_path))
+    self.assertGreater(os.path.getsize(quantized_path), 0)
 
   def test_octav_recipes_configure_octav_algorithm_on_fc(self):
     wi4_octav = quantization._dynamic_wi4b32_octav_afp32()
