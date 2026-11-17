@@ -1242,9 +1242,18 @@ def _convert_and_export_module(
           module.eval(),
           sample_kwargs=sig_inputs,
       )
+    converter_flags = dict(getattr(module, 'converter_flags', None) or {})
+    if (
+        '_litert_converter_flags' in v2_kwargs
+        and '_litert_converter_flags' in converter_flags
+    ):
+      converter_flags['_litert_converter_flags'] = {
+          **v2_kwargs['_litert_converter_flags'],
+          **converter_flags['_litert_converter_flags'],
+      }
     lrt_model = converter.convert(
         strict_export=False,
-        **v2_kwargs,
+        **{**v2_kwargs, **converter_flags},
     )
   if not use_v2:
     lrt_model.export(model_path)
