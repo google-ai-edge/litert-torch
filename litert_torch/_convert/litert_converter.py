@@ -16,6 +16,7 @@
 
 import dataclasses
 import logging
+from typing import Any
 
 from litert_torch import backend
 from litert_torch import model as model_lib
@@ -139,6 +140,43 @@ class LazyModelExporter(model_lib.ModelExporter):
     return self.content
 
 
+# `_litert_converter_flags` keys are `tf.lite.TFLiteConverter` attribute names.
+# These are the ones whose converter config field has a different name once the
+# `_experimental_` prefix is dropped.
+_CONVERTER_FLAG_ALIASES = {
+    "strict_qdq": "strict_qdq_mode",
+}
+
+
+def _apply_converter_flags(
+    config: Any, converter_flags: dict[str, Any]
+) -> list[str]:
+  """Sets user-provided converter flags on a converter config.
+
+  Flag names follow `_litert_converter_flags`, which uses the attribute names of
+  `tf.lite.TFLiteConverter`: an optional `_experimental_` prefix is dropped, and
+  the rest names a field of the config, directly or through
+  `_CONVERTER_FLAG_ALIASES`.
+
+  Args:
+    config: The converter config to update.
+    converter_flags: Flag name to value.
+
+  Returns:
+    The names of the flags the config has no field for. These are left unset.
+  """
+  ignored = []
+  for name, value in converter_flags.items():
+    attr_name = name.removeprefix("_experimental_")
+    attr_name = _CONVERTER_FLAG_ALIASES.get(attr_name, attr_name)
+    # A nested dict addresses a sub-message, which this config does not have.
+    if isinstance(value, dict) or not hasattr(config, attr_name):
+      ignored.append(name)
+      continue
+    setattr(config, attr_name, value)
+  return ignored
+
+
 def exported_programs_to_flatbuffer(
     exported_programs: list[torch.export.ExportedProgram],
     signatures: list[signature.Signature],
@@ -147,6 +185,7 @@ def exported_programs_to_flatbuffer(
     lightweight_conversion: bool = False,
     enable_x64: bool = False,
     runtime_constant_folding: bool | None = None,
+    converter_flags: dict[str, Any] | None = None,
 ) -> LazyModelExporter:
   """Convert ExportedPrograms to a LiteRT model."""
   if not exported_programs:
@@ -160,6 +199,38 @@ def exported_programs_to_flatbuffer(
   cross_program_inline_consts_ctx = inline_consts_lib.InlineConstsContext(
       enable_resource_constants=lightweight_conversion,
   )
+
+  # Prepare LiteRT converter config. This comes before lowering so that the
+  # checks below see the values the converter passes will run with.
+  config = converter_api_ext.ConvertToTFLConfig()
+
+  def safe_set_config(attr_name: str, value):
+    if hasattr(config, attr_name):
+      setattr(config, attr_name, value)
+
+  config.model_origin_framework = "PYTORCH"
+  if quant_config is not None:
+    quantizer_mode = quant_config._quantizer_mode
+    if quantizer_mode == qcfg.QuantConfig._QuantizerMode.PT2E_DYNAMIC:
+      config.qdq_conversion_mode = "DYNAMIC"
+    elif quantizer_mode == qcfg.QuantConfig._QuantizerMode.PT2E_STATIC:
+      config.qdq_conversion_mode = "STATIC"
+  config.unsafe_fuse_dynamic_shaped_broadcast = True
+  # litert-torch handles inf clamping before the MLIR conversion.
+  config.canonicalizing_inf_as_min_max_float = False
+  safe_set_config("enable_x64", enable_x64)
+  # User flags go last so that they override the defaults above.
+  if converter_flags:
+    ignored_flags = _apply_converter_flags(config, converter_flags)
+    if ignored_flags:
+      logging.warning(
+          "Ignoring _litert_converter_flags %s: this conversion path only"
+          " supports %s. Other converter flags need use_v2=True.",
+          sorted(ignored_flags),
+          sorted(n for n in dir(config) if not n.startswith("_")),
+      )
+  # A user flag may have overridden the `enable_x64` argument.
+  enable_x64 = getattr(config, "enable_x64", enable_x64)
 
   lowered_programs = []
   for exported_program, sig in zip(exported_programs, signatures):
@@ -201,25 +272,6 @@ def exported_programs_to_flatbuffer(
     translated_recipe = translate_recipe.translate_to_ai_edge_recipe(
         quant_config.generative_recipe
     )
-
-  # Prepare LiteRT converter config.
-  config = converter_api_ext.ConvertToTFLConfig()
-
-  def safe_set_config(attr_name: str, value):
-    if hasattr(config, attr_name):
-      setattr(config, attr_name, value)
-
-  config.model_origin_framework = "PYTORCH"
-  if quant_config is not None:
-    quantizer_mode = quant_config._quantizer_mode
-    if quantizer_mode == qcfg.QuantConfig._QuantizerMode.PT2E_DYNAMIC:
-      config.qdq_conversion_mode = "DYNAMIC"
-    elif quantizer_mode == qcfg.QuantConfig._QuantizerMode.PT2E_STATIC:
-      config.qdq_conversion_mode = "STATIC"
-  config.unsafe_fuse_dynamic_shaped_broadcast = True
-  # litert-torch handles inf clamping before the MLIR conversion.
-  config.canonicalizing_inf_as_min_max_float = False
-  safe_set_config("enable_x64", enable_x64)
 
   # Run LiteRT converter passes.
   with ir_context, progress.task("Run LiteRT Converter Passes"):

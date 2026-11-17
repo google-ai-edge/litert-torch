@@ -229,6 +229,8 @@ def convert_signatures(
       print_ir_after: Regex matching pass names to print IR after execution.
       elide_elementsattrs_if_larger: Size threshold for eliding large elements.
       _litert_converter_flags: Optional flags to configure the LiteRT converter.
+        Without `use_v2`, only the flags the direct converter config exposes are
+        applied; the rest are ignored with a warning.
 
   Returns:
     The converted `model.LiteRTModel` object.
@@ -286,6 +288,7 @@ def convert_signatures(
       quant_config=quant_config,
       lightweight_conversion=lightweight_conversion,
       runtime_constant_folding=runtime_constant_folding,
+      converter_flags=_litert_converter_flags,
   )
 
   return model.LiteRTModel(exporter)
