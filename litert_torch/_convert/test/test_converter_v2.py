@@ -22,6 +22,7 @@ from unittest import mock
 import litert_torch
 from litert_torch import converter_v2
 from litert_torch._convert import converter_v2 as converter_v2_lib
+from litert_torch._convert.fx_passes import lower_torchao_pass
 from litert_torch.backend import export as export_lib
 import numpy as np
 import torch
@@ -323,8 +324,8 @@ class TestConverterV2(googletest.TestCase):
       with self.subTest(loader_type=type(loader).__name__):
         registry = converter_v2_lib.ParameterRegistry()
         p = torch.empty(3, device="meta")
-        registry.unique_params.append(("pid", p, "lifted_tensor_0"))
-        registry.id_to_offset["pid"] = 0
+        registry.unique_params.append((("pid", 32), p, "lifted_tensor_0"))
+        registry.id_to_offset[("pid", 32)] = 0
         out_dir = self.create_tempdir().full_path
         with self.assertRaisesRegex(KeyError, "lifted constant"):
           registry.save(
@@ -587,6 +588,121 @@ class TestConverterV2(googletest.TestCase):
     ):
       with self.assertRaisesRegex(RuntimeError, "requires a newer TensorFlow"):
         converter_v2_lib._build_tfl_converter_flags()
+
+  def test_pack_subbyte_array(self):
+    pack = converter_v2_lib._pack_subbyte_array  # pylint: disable=protected-access
+    np.testing.assert_array_equal(
+        pack(np.array([-8, 7, -1, 0], dtype=np.int8), 4), [0x78, 0x0F]
+    )
+    np.testing.assert_array_equal(
+        pack(np.array([1, -2, -1, 0, 1], dtype=np.int8), 2), [0x39, 0x01]
+    )
+
+  def _check_subbyte_linear(
+      self,
+      w: torch.Tensor,
+      dtype: str,
+      zero_point: int,
+      expected_params_bytes: int,
+      rows: int | None = None,
+      check_outputs: bool = True,
+  ):
+    """Converts `x @ dequantize(w[:rows]).T` and checks params.bin and outputs.
+
+    Args:
+      w: The integer weight.
+      dtype: The `quant.dequantize` dtype.
+      zero_point: The zero point of the dequantize.
+      expected_params_bytes: The expected size of params.bin.
+      rows: If set, slices the first `rows` rows of `w` before dequantizing.
+      check_outputs: Whether to compare the outputs with the eager module.
+    """
+
+    class SubbyteLinear(nn.Module):
+
+      def __init__(self, weight: torch.Tensor, dq_fn):
+        super().__init__()
+        self.register_buffer("weight", weight)
+        self.dq_fn = dq_fn
+
+      def forward(self, x):
+        weight = self.weight if rows is None else self.weight[:rows]
+        return torch.nn.functional.linear(x, self.dq_fn(weight))
+
+    out_features = w.shape[0] if rows is None else rows
+    dq_fn = lower_torchao_pass._create_dequantize_function(  # pylint: disable=protected-access
+        lower_torchao_pass._get_quant_composite_attributes(  # pylint: disable=protected-access
+            scale=[0.05] * out_features,
+            zero_point=[zero_point],
+            dtype=dtype,
+            quant_dimension=0,
+            narrow_range=dtype == "i4",
+        )
+    )
+    x = torch.randn(2, w.shape[1])
+    module = SubbyteLinear(w, dq_fn).eval()
+    with torch.no_grad():
+      expected = module(x).numpy()
+    meta_module = SubbyteLinear(w.to("meta"), dq_fn).eval()
+    for name, mod, args, loader in (
+        ("in_memory", module, (x,), None),
+        ("streaming", meta_module, (x.to("meta"),), {"weight": w}),
+    ):
+      with self.subTest(mode=name):
+        export_dir = self.create_tempdir().full_path
+        edge_model = converter_v2.convert(
+            mod, args, export_dir=export_dir, weights_loader=loader
+        )
+        self.assertEqual(
+            os.path.getsize(os.path.join(export_dir, "params.bin")),
+            expected_params_bytes,
+        )
+        if check_outputs:
+          np.testing.assert_allclose(
+              edge_model(x.numpy()), expected, rtol=1e-3, atol=1e-3
+          )
+
+  def test_subbyte_quant_weights_are_packed(self):
+    """Tests that i4/i2 dequantized weights are bit-packed in params.bin."""
+    for dtype, low, high, bit_width in (("i4", -7, 8, 4), ("i2", -2, 2, 2)):
+      with self.subTest(dtype=dtype):
+        self._check_subbyte_linear(
+            torch.randint(low, high, (16, 32), dtype=torch.int8),
+            dtype,
+            0,
+            expected_params_bytes=16 * 32 * bit_width // 8,
+        )
+
+  def test_ui4_quant_weights_are_packed(self):
+    """Tests that ui8 parameters dequantized as ui4 are bit-packed."""
+    # Only checks params.bin: ui4 `quant.dequantize` with a nonzero zero point
+    # doesn't match the eager reference even for unpacked weights.
+    self._check_subbyte_linear(
+        torch.randint(0, 16, (16, 32), dtype=torch.uint8),
+        "ui4",
+        8,
+        expected_params_bytes=16 * 32 // 2,
+        check_outputs=False,
+    )
+
+  def test_small_subbyte_quant_weight_is_not_packed(self):
+    """Weights of at most 64 elements stay one byte per element."""
+    self._check_subbyte_linear(
+        torch.randint(-7, 8, (4, 16), dtype=torch.int8),
+        "i4",
+        0,
+        expected_params_bytes=4 * 16,
+    )
+
+  def test_sliced_subbyte_quant_weight_is_not_packed(self):
+    """Weights reaching the dequantize through a slice stay one byte each."""
+    self._check_subbyte_linear(
+        torch.randint(-7, 8, (16, 32), dtype=torch.int8),
+        "i4",
+        0,
+        expected_params_bytes=16 * 32,
+        rows=8,
+    )
 
 
 if __name__ == "__main__":

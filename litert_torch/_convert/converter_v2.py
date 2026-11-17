@@ -33,7 +33,7 @@ import os
 import shutil
 import tempfile
 import time
-from typing import Any, Literal, Optional, TYPE_CHECKING
+from typing import Any, Literal, Optional, TYPE_CHECKING, cast
 import uuid
 
 from litert_torch import backend
@@ -43,6 +43,10 @@ from litert_torch import progress
 from litert_torch._convert import core
 from litert_torch._convert import litert_converter
 from litert_torch._convert import signature as signature_module
+from litert_converter.mlir import ir
+from litert_converter.mlir import passmanager
+from litert_converter.mlir.dialects import func
+import numpy as np
 import torch
 
 # TensorFlow is imported lazily: this module is imported by
@@ -138,6 +142,43 @@ def _apply_tfl_converter_flags(
       path.pop()
 
   _iterate_dict_tree(tfl_converter_flags, [])
+
+
+# Sub-byte `quant.dequantize` dtypes whose parameters are stored bit-packed in
+# params.bin, mapped to their bit widths. These are the sub-byte storage types
+# `LowerQuantAnnotationsPass` accepts (`ParseQuantStorage`).
+_SUBBYTE_QUANT_DTYPES: dict[str, int] = {"i4": 4, "ui4": 4, "i2": 2}
+# `slim_model_importer.cc` injects only weights with more than 64 elements as
+# `DenseResourceElementsAttr`, which supports packed sub-byte storage; smaller
+# ones become `DenseElementsAttr`, which stores one byte per element.
+_MIN_PACKED_PARAM_ELEMENTS = 65
+# Ops that may sit between a sub-byte parameter and its `quant.dequantize`:
+# those that `FoldStablehloConstantTransformsPass` folds on packed sub-byte
+# resources. They keep the element count and the element values.
+_SUBBYTE_FOLDABLE_OPS: frozenset[str] = frozenset(
+    {"stablehlo.reshape", "stablehlo.transpose"}
+)
+
+
+def _pack_subbyte_array(
+    arr: np.typing.ArrayLike, bit_width: int
+) -> np.ndarray:
+  """Packs one-byte-per-element integers into LSB-first sub-byte layout."""
+  flat = np.asarray(arr, dtype=np.uint8).ravel()
+  elems_per_byte = 8 // bit_width
+  packed = np.zeros((flat.size * bit_width + 7) // 8, dtype=np.uint8)
+  mask = (1 << bit_width) - 1
+  for i in range(elems_per_byte):
+    slice_vals = flat[i::elems_per_byte] & mask
+    packed[: slice_vals.size] |= slice_vals << (i * bit_width)
+  return packed
+
+
+def _storage_nbytes(t: torch.Tensor, bit_width: int) -> int:
+  """Returns the number of bytes `t` takes in params.bin."""
+  if bit_width < 8:
+    return (t.numel() * bit_width + 7) // 8
+  return t.numel() * t.element_size()
 
 
 def _get_param_id(p: torch.Tensor, origin: torch.Tensor | None = None) -> Any:
@@ -321,19 +362,26 @@ class ParameterRegistry:
           if origin is not None:
             self._origin_refs.append(origin)
         param_id = _get_param_id(tensor, origin)
-        if param_id not in self.id_to_offset:
+        # A param is stored once per bit width: signatures that dequantize it
+        # as a sub-byte type share a packed copy, others share an unpacked one.
+        # Only `_retype_subbyte_quant_params` sets sub-byte dtypes; any other
+        # param takes the size of its tensor.
+        bit_width = _SUBBYTE_QUANT_DTYPES.get(
+            var_sig.dtype, 8 * tensor.element_size()
+        )
+        key = (param_id, bit_width)
+        if key not in self.id_to_offset:
           # Align offset to 64-byte boundary for SIMD / mmap alignment
           self.current_offset = (self.current_offset + 63) // 64 * 64
           offset = self.current_offset
-          self.id_to_offset[param_id] = offset
-          self.unique_params.append((param_id, tensor, param_name))
-          self._param_signature[param_id] = name
-          nbytes = tensor.numel() * tensor.element_size()
-          self.current_offset += nbytes
+          self.id_to_offset[key] = offset
+          self.unique_params.append((key, tensor, param_name))
+          self._param_signature.setdefault(param_id, name)
+          self.current_offset += _storage_nbytes(tensor, key[1])
 
         sig_metadata.append({
             "arg_index": i,
-            "offset": self.id_to_offset[param_id],
+            "offset": self.id_to_offset[key],
         })
 
     self.metadata["signatures"][name] = sig_metadata
@@ -368,9 +416,10 @@ class ParameterRegistry:
     # Maps each weights_loader key to the unique param it was used for.
     loader_key_owner: dict[str, Any] = {}
     with open(bin_path, "wb") as f:
-      for param_id, p, param_name in self.unique_params:
+      for storage_key, p, param_name in self.unique_params:
+        param_id, bit_width = storage_key
         aligned_pos = (current_pos + 63) // 64 * 64
-        expected_offset = self.id_to_offset[param_id]
+        expected_offset = self.id_to_offset[storage_key]
         if aligned_pos != expected_offset:
           raise RuntimeError(
               f"params.bin offset mismatch for '{param_name}': writing at"
@@ -436,7 +485,9 @@ class ParameterRegistry:
         else:
           raw_view = _tensor_to_byte_view(p)
 
-        expected_nbytes = p.numel() * p.element_size()
+        if bit_width < 8:
+          raw_view = memoryview(_pack_subbyte_array(raw_view, bit_width))
+        expected_nbytes = _storage_nbytes(p, bit_width)
         if raw_view.nbytes != expected_nbytes:
           raise RuntimeError(
               f"params.bin size mismatch for '{param_name}': got"
@@ -548,6 +599,113 @@ def _prune_unused_parameters(
   fx_infra.graph_utils.remove_unused_non_user_inputs(exported_program)
 
 
+def _subbyte_dequant_dtype(op: ir.Operation) -> str | None:
+  """Returns the dtype of a sub-byte `quant.dequantize` custom call, or None."""
+  if op.name != "stablehlo.custom_call" or len(op.operands) != 1:
+    return None
+  attrs = op.attributes
+  if "call_target_name" not in attrs or "dtype" not in attrs:
+    return None
+  target, dtype = attrs["call_target_name"], attrs["dtype"]
+  if not isinstance(target, ir.StringAttr) or not isinstance(
+      dtype, ir.StringAttr
+  ):
+    return None
+  if target.value != "quant.dequantize":
+    return None
+  return dtype.value if dtype.value in _SUBBYTE_QUANT_DTYPES else None
+
+
+def _trace_subbyte_param(arg: ir.Value) -> tuple[str, list[ir.Value]] | None:
+  """Traces a parameter that only feeds sub-byte `quant.dequantize` ops.
+
+  The parameter may reach the `quant.dequantize` ops through
+  `_SUBBYTE_FOLDABLE_OPS`, which the converter folds into the packed constant.
+
+  Args:
+    arg: The parameter.
+
+  Returns:
+    The dequantize dtype and the values to retype (the parameter and the
+    results of the intermediate ops), or None if `arg` has any other use.
+  """
+  values, worklist, dtypes = [arg], [arg], set()
+  while worklist:
+    uses = list(worklist.pop().uses)
+    if not uses:
+      return None
+    for use in uses:
+      op = use.owner
+      if (dtype := _subbyte_dequant_dtype(op)) is not None:
+        dtypes.add(dtype)
+        continue
+      if op.name not in _SUBBYTE_FOLDABLE_OPS or len(op.results) != 1:
+        return None
+      values.append(op.results[0])
+      worklist.append(op.results[0])
+  return (dtypes.pop(), values) if len(dtypes) == 1 else None
+
+
+def _retype_subbyte_quant_params(lowered: backend.export.MlirLowered) -> None:
+  """Retypes parameters dequantized as int4/int2 from i8/ui8 to i4/i2.
+
+  PyTorch has no int2 dtype and cannot trace int4 tensors, so sub-byte weights
+  are i8/ui8 parameters feeding `quant.dequantize` with a sub-byte `dtype`.
+  JAX weights already have sub-byte dtypes (`jnp.int4`, `jnp.int2`). Giving
+  the parameters the same types here lets `ParameterRegistry` bit-pack them
+  into params.bin, as the AI Edge JAX converter does, and the converter stream
+  them without one-byte-per-element buffers.
+
+  Args:
+    lowered: The lowered signature, updated in place.
+  """
+  with lowered.ctx, ir.Location.unknown():
+    main_func = cast(
+        func.FuncOp, ir.SymbolTable(lowered.module.operation)["main"]
+    )
+    ops = [op.operation for op in main_func.entry_block.operations]
+    if not any(_subbyte_dequant_dtype(op) for op in ops):
+      return
+    # Inline the private functions of JAX bridge lowerings, as the converter
+    # does before lowering quant annotations, so their ops can be retyped.
+    if any(op.name == "func.call" for op in ops):
+      passmanager.PassManager.parse("builtin.module(inline)").run(
+          lowered.module.operation
+      )
+      main_func = cast(
+          func.FuncOp, ir.SymbolTable(lowered.module.operation)["main"]
+      )
+
+    for arg, var_sig in zip(main_func.arguments, lowered.input_signature):
+      if var_sig.input_spec.is_user_input:
+        continue
+      shaped_type = ir.ShapedType(arg.type)
+      elem_type = shaped_type.element_type
+      if (
+          not shaped_type.has_static_shape
+          or np.prod(shaped_type.shape) < _MIN_PACKED_PARAM_ELEMENTS
+          or not isinstance(elem_type, ir.IntegerType)
+          or elem_type.width != 8
+      ):
+        continue
+      if (traced := _trace_subbyte_param(arg)) is None:
+        continue
+      dtype, values = traced
+      new_elem_type = ir.IntegerType.get_signless(_SUBBYTE_QUANT_DTYPES[dtype])
+      for value in values:
+        shape = ir.ShapedType(value.type).shape
+        value.set_type(ir.RankedTensorType.get(shape, new_elem_type))
+      var_sig.dtype = dtype
+
+    main_func.attributes["function_type"] = ir.TypeAttr.get(
+        ir.FunctionType.get(
+            [arg.type for arg in main_func.arguments],
+            list(main_func.type.results),
+        )
+    )
+    lowered.module.operation.verify()
+
+
 def export_to_dir(
     signatures: list[signature_module.Signature],
     export_dir: str,
@@ -588,6 +746,7 @@ def export_to_dir(
           _pre_lower_pass=_prune_unused_parameters,
           inline_constants=False,
       )
+      _retype_subbyte_quant_params(lowered)
 
     # Save MLIR bytecode
     mlirbc_path = os.path.join(export_dir, f"{sig.name}.mlirbc")

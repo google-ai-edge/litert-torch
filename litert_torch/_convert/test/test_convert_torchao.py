@@ -16,6 +16,7 @@
 
 import collections
 import dataclasses
+import os
 from typing import Any, Optional
 from absl.testing import parameterized
 import litert_torch
@@ -777,6 +778,59 @@ class TestConvertTorchAO(parameterized.TestCase):
     edge_model = litert_torch.convert(model, args, use_v2=True)
     edge_out = edge_model(*args)
     self.assertEqual(edge_out.shape, (2, 8))
+
+  def test_int4_params_bin_is_prepacked(self):
+    """Tests that TorchAO int4 weights are bit-packed in params.bin."""
+
+    class BiasFreeLinear(nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.fc = nn.Linear(64, 16, bias=False)
+
+      def forward(self, x):
+        return self.fc(x)
+
+    args = (torch.randn((2, 64)),)
+    expected_packed_bytes = (16 * 64) // 2
+
+    for name, q_config in (
+        (
+            "per_channel",
+            IntxWeightOnlyConfig(
+                weight_dtype=torch.int4, granularity=PerAxis(0)
+            ),
+        ),
+        (
+            "blockwise",
+            IntxWeightOnlyConfig(
+                weight_dtype=torch.int4, granularity=PerGroup(32)
+            ),
+        ),
+        (
+            "drq",
+            Int8DynamicActivationIntxWeightConfig(
+                weight_dtype=torch.int4, weight_granularity=PerAxis(0)
+            ),
+        ),
+    ):
+      with self.subTest(mode=name):
+        torch_module = BiasFreeLinear().eval()
+        quantize_(torch_module, q_config)
+        with torch.no_grad():
+          torch_out = torch_module(*args).detach().numpy()
+
+        export_dir = self.create_tempdir().full_path
+        edge_model = litert_torch.convert(
+            torch_module, args, use_v2=True, export_dir=export_dir
+        )
+        self.assertEqual(
+            os.path.getsize(os.path.join(export_dir, "params.bin")),
+            expected_packed_bytes,
+        )
+        edge_out = edge_model(*args)
+        diff = get_diff(edge_out, torch_out)
+        self.assertLess(diff["mean_abs_diff"], 1e-1)
 
 
 if __name__ == "__main__":
