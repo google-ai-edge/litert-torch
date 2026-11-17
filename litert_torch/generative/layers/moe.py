@@ -156,6 +156,7 @@ def _moe_experts_reference(
     ff_gate_scale: torch.Tensor | None = None,
     ff1_scale: torch.Tensor | None = None,
     linear_scale: torch.Tensor | None = None,
+    activation: str = "gelu_tanh",
 ) -> torch.Tensor:
   src_flat = src.reshape(1, -1, model_dim).to(torch.float32)
   weights_flat = top_weights.reshape(1, -1, num_active_experts).to(
@@ -178,7 +179,12 @@ def _moe_experts_reference(
   selected_linear = linear_w[indices]
   gate = torch.einsum("bskhd,bsd->bskh", selected_gate, src_flat)
   ff1 = torch.einsum("bskhd,bsd->bskh", selected_ff1, src_flat)
-  hidden = F.gelu(gate, approximate="tanh") * ff1
+  if activation == "silu":
+    hidden = F.silu(gate) * ff1
+  elif activation == "gelu_tanh":
+    hidden = F.gelu(gate, approximate="tanh") * ff1
+  else:
+    raise ValueError(f"Unsupported MoE activation: {activation}")
   expert_output = torch.einsum("bskdh,bskh->bskd", selected_linear, hidden)
   scale = per_expert_scale.reshape(num_experts)[indices].to(torch.float32)
   expert_output = expert_output * scale.unsqueeze(-1)
@@ -193,6 +199,7 @@ def _moe_custom_options(
     model_dim: int,
     hidden_dim: int,
     weight_type: str,
+    activation: str = "gelu_tanh",
 ) -> bytes:
   return bytes(
       flexbuffers.Dumps({
@@ -204,7 +211,7 @@ def _moe_custom_options(
           # label must be "gelu_tanh". The older "gelu" spelling made the
           # XNNPACK CPU kernel select exact GELU while the GPU kernel used the
           # tanh approximation.
-          "activation": "gelu_tanh",
+          "activation": activation,
           "weight_type": weight_type,
           "renormalized_top_weights": True,
       })
@@ -224,6 +231,7 @@ def _tfl_custom_moe(
     model_dim: int,
     hidden_dim: int,
     weight_type: str,
+    activation: str = "gelu_tanh",
 ) -> ir.Value:
   op = ir.Operation.create(
       "tfl.custom",
@@ -238,6 +246,7 @@ def _tfl_custom_moe(
                   model_dim=model_dim,
                   hidden_dim=hidden_dim,
                   weight_type=weight_type,
+                  activation=activation,
               )
           ),
       },
@@ -258,6 +267,7 @@ def _moe_fp32(
     num_active_experts: int,
     model_dim: int,
     hidden_dim: int,
+    activation: str = "gelu_tanh",
 ) -> torch.Tensor:
   return _moe_experts_reference(
       src,
@@ -271,6 +281,7 @@ def _moe_fp32(
       num_active_experts,
       model_dim,
       hidden_dim,
+      activation=activation,
   )
 
 
@@ -287,6 +298,7 @@ def _(
     num_active_experts,
     model_dim,
     hidden_dim,
+    activation="gelu_tanh",
 ):
   del (
       top_weights,
@@ -299,6 +311,7 @@ def _(
       num_active_experts,
       model_dim,
       hidden_dim,
+      activation,
   )
   return torch.empty_like(src)
 
@@ -317,6 +330,7 @@ def _moe_fp32_lower(
     num_active_experts: int,
     model_dim: int,
     hidden_dim: int,
+    activation: str = "gelu_tanh",
 ):
   return _tfl_custom_moe(
       lctx,
@@ -334,6 +348,7 @@ def _moe_fp32_lower(
       model_dim=model_dim,
       hidden_dim=hidden_dim,
       weight_type="fp32",
+      activation=activation,
   )
 
 
@@ -353,6 +368,7 @@ def _moe_int8(
     num_active_experts: int,
     model_dim: int,
     hidden_dim: int,
+    activation: str = "gelu_tanh",
 ) -> torch.Tensor:
   return _moe_experts_reference(
       src,
@@ -369,6 +385,7 @@ def _moe_int8(
       ff_gate_scale=ff_gate_scale,
       ff1_scale=ff1_scale,
       linear_scale=linear_scale,
+      activation=activation,
   )
 
 
@@ -388,6 +405,7 @@ def _(
     num_active_experts,
     model_dim,
     hidden_dim,
+    activation="gelu_tanh",
 ):
   del (
       top_weights,
@@ -403,6 +421,7 @@ def _(
       num_active_experts,
       model_dim,
       hidden_dim,
+      activation,
   )
   return torch.empty_like(src)
 
@@ -424,6 +443,7 @@ def _moe_int8_lower(
     num_active_experts: int,
     model_dim: int,
     hidden_dim: int,
+    activation: str = "gelu_tanh",
 ):
   return _tfl_custom_moe(
       lctx,
@@ -444,6 +464,7 @@ def _moe_int8_lower(
       model_dim=model_dim,
       hidden_dim=hidden_dim,
       weight_type="int8",
+      activation=activation,
   )
 
 
@@ -464,6 +485,7 @@ def moe_experts(
     ff_gate_scale: torch.Tensor | None = None,
     ff1_scale: torch.Tensor | None = None,
     linear_scale: torch.Tensor | None = None,
+    activation: str = "gelu_tanh",
 ) -> torch.Tensor:
   """Builds the `moe` TFLite custom op."""
   if weight_type == "fp32":
@@ -479,6 +501,7 @@ def moe_experts(
         num_active_experts,
         model_dim,
         hidden_dim,
+        activation=activation,
     )
   if weight_type == "int8":
     if ff_gate_scale is None or ff1_scale is None or linear_scale is None:
@@ -498,6 +521,7 @@ def moe_experts(
         num_active_experts,
         model_dim,
         hidden_dim,
+        activation=activation,
     )
   raise ValueError(f"Unsupported MoE expert weight_type: {weight_type}")
 
@@ -521,18 +545,33 @@ def litert_moe_experts_forward(self, hidden_states, top_k_index, top_k_weights):
     ff1_weight = flatten_expert_weight(ff1_w)
     linear_weight = flatten_expert_weight(self.down_proj)
   per_expert_scale = _per_expert_scale_input(self)
+  num_active_experts = getattr(self.config, "top_k_experts", None)
+  if num_active_experts is None:
+    num_active_experts = self.config.num_experts_per_tok
+  raw_act = (
+      getattr(self.config, "hidden_act", None)
+      or getattr(self.config, "hidden_activation", None)
+      or "gelu_tanh"
+  )
+  if raw_act in ("gelu", "gelu_tanh", "gelu_pytorch_tanh"):
+    activation = "gelu_tanh"
+  elif raw_act in ("silu", "swish"):
+    activation = "silu"
+  else:
+    activation = raw_act
   output = moe_experts(
       hidden_states.reshape(1, -1, self.hidden_dim),
-      top_k_weights.reshape(1, -1, self.config.top_k_experts),
-      top_k_index.to(torch.int32).reshape(1, -1, self.config.top_k_experts),
+      top_k_weights.reshape(1, -1, num_active_experts),
+      top_k_index.to(torch.int32).reshape(1, -1, num_active_experts),
       gate_weight,
       ff1_weight,
       linear_weight,
       per_expert_scale,
       num_experts=self.num_experts,
-      num_active_experts=self.config.top_k_experts,
+      num_active_experts=num_active_experts,
       model_dim=self.hidden_dim,
       hidden_dim=self.intermediate_dim,
+      activation=activation,
   )
   return output.reshape(hidden_states.shape)
 

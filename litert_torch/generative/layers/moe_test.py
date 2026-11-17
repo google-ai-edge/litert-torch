@@ -142,6 +142,76 @@ class MoeExpertsTest(googletest.TestCase):
     self.assertIn('custom_code = "moe"', ir_text)
     self.assertNotIn("odml.moe_experts", ir_text)
 
+  def test_moe_experts_silu_matches_reference(self):
+    torch.manual_seed(0)
+    src = torch.randn(1, 2, 4)
+    top_weights = torch.softmax(torch.randn(1, 2, 2), dim=-1)
+    top_indices = torch.tensor([[[0, 1], [1, 0]]], dtype=torch.int32)
+    gate_w = torch.randn(2, 6, 4)
+    ff1_w = torch.randn(2, 6, 4)
+    linear_w = torch.randn(2, 4, 6)
+    output = moe.moe_experts(
+        src,
+        top_weights,
+        top_indices,
+        moe.flatten_expert_weight(gate_w),
+        moe.flatten_expert_weight(ff1_w),
+        moe.flatten_expert_weight(linear_w),
+        torch.ones(1, 1, 1, 2),
+        num_experts=2,
+        num_active_experts=2,
+        model_dim=4,
+        hidden_dim=6,
+        activation="silu",
+    )
+    expected = torch.zeros_like(src)
+    for t in range(2):
+      for k in range(2):
+        e = int(top_indices[0, t, k].item())
+        g = torch.nn.functional.linear(src[0, t], gate_w[e])
+        u = torch.nn.functional.linear(src[0, t], ff1_w[e])
+        out_e = torch.nn.functional.linear(
+            torch.nn.functional.silu(g) * u, linear_w[e]
+        )
+        expected[0, t] += out_e * top_weights[0, t, k]
+    torch.testing.assert_close(output, expected, atol=1e-5, rtol=1e-5)
+
+  def test_litert_moe_experts_forward_swish_and_none_fallback(self):
+    torch.manual_seed(1)
+
+    class _Config:
+
+      def __init__(self, hidden_act, hidden_activation):
+        self.num_experts_per_tok = 2
+        self.hidden_act = hidden_act
+        self.hidden_activation = hidden_activation
+
+    class _Experts(torch.nn.Module):
+
+      def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.num_experts = 2
+        self.hidden_dim = 4
+        self.intermediate_dim = 6
+        self.gate_up_proj = torch.nn.Parameter(torch.randn(2, 12, 4))
+        self.down_proj = torch.nn.Parameter(torch.randn(2, 4, 6))
+
+    x = torch.randn(1, 2, 4)
+    idx = torch.tensor([[[0, 1], [1, 0]]], dtype=torch.int64)
+    w = torch.softmax(torch.randn(1, 2, 2), dim=-1)
+
+    swish_mod = _Experts(_Config(hidden_act="swish", hidden_activation=None))
+    silu_mod = _Experts(_Config(hidden_act="silu", hidden_activation=None))
+    silu_mod.load_state_dict(swish_mod.state_dict())
+    out_swish = moe.litert_moe_experts_forward(swish_mod, x, idx, w)
+    out_silu = moe.litert_moe_experts_forward(silu_mod, x, idx, w)
+    torch.testing.assert_close(out_swish, out_silu, atol=1e-6, rtol=1e-6)
+
+    none_mod = _Experts(_Config(hidden_act=None, hidden_activation=None))
+    out_none = moe.litert_moe_experts_forward(none_mod, x, idx, w)
+    self.assertEqual(out_none.shape, x.shape)
+
 
 class BindPerExpertScaleTest(googletest.TestCase):
 
