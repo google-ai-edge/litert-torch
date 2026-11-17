@@ -126,11 +126,23 @@ def build_llm_metadata(
     # `max_num_patches` sets the default per-image budget used by the runtime
     # preprocessor; use the largest exported budget (smaller budgets can still
     # be requested at runtime via `visual_token_budget`).
-    pooling_kernel_size = getattr(image_processor, 'pooling_kernel_size', 3)
+    model_config = getattr(source_model_artifacts, 'model_config', None)
+    pooling_kernel_size = (
+        getattr(image_processor, 'pooling_kernel_size', None)
+        or getattr(
+            getattr(model_config, 'vision_config', None),
+            'pooling_kernel_size',
+            3,
+        )
+        or 3
+    )
+    llm_metadata.llm_model_type.gemma4.pooling_kernel_size = pooling_kernel_size
     budgets = vision_budgets.get_vision_token_budgets(export_config.extra_kwargs)
     llm_metadata.llm_model_type.gemma4.max_num_patches = (
         pooling_kernel_size * pooling_kernel_size * max(budgets)
     )
+    if getattr(model_config, 'model_type', None) == 'gemma4_unified':
+      llm_metadata.llm_model_type.gemma4.merge_patches = True
   if exported_model_artifacts.audio_encoder_model_path:
     feature_extractor = source_model_artifacts.feature_extractor
     assert (
