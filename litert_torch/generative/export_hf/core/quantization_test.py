@@ -65,6 +65,7 @@ class QuantizationTest(parameterized.TestCase):
       ("dynamic_wi4b32_octav_afp32", "dynamic_wi4b32_octav_afp32"),
       ("gemma4_mixed48_b32_octav", "gemma4_mixed48_b32_octav"),
       ("qwen3_5_mixed48_b32", "qwen3_5_mixed48_b32"),
+      ("qwen3_5_mixed48_h1024", "qwen3_5_mixed48_h1024"),
       ("dynamic_wi8_moe_afp32", "dynamic_wi8_moe_afp32"),
       ("dynamic_wi4_moe_afp32", "dynamic_wi4_moe_afp32"),
       ("dynamic_wi4b32_moe_afp32", "dynamic_wi4b32_moe_afp32"),
@@ -285,6 +286,154 @@ class QuantizationTest(parameterized.TestCase):
     self.assertEqual(weight_config.num_bits, num_bits)
     self.assertEqual(weight_config.granularity, granularity)
     self.assertTrue(weight_config.symmetric)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="embedding",
+          op_name=_TFLOpName.EMBEDDING_LOOKUP,
+          scope=(
+              "Qwen3_5StaticModel_model/"
+              "torch.nn.modules.sparse.Embedding_embed_tokens;1"
+          ),
+          num_bits=4,
+          algorithm_key=recipe_lib.AlgorithmName.DECOMPOSED_HADAMARD_ROTATION,
+      ),
+      dict(
+          testcase_name="lm_head",
+          op_name=_TFLOpName.FULLY_CONNECTED,
+          scope="decode_logits_output",
+          num_bits=4,
+          algorithm_key=recipe_lib.AlgorithmName.DECOMPOSED_HADAMARD_ROTATION,
+      ),
+      dict(
+          testcase_name="down_proj_first_layer",
+          op_name=_TFLOpName.FULLY_CONNECTED,
+          scope=_QWEN3_5_LAYER.format(
+              layer=0, module=_QWEN3_5_MLP, proj="down_proj"
+          ),
+          num_bits=8,
+          algorithm_key=recipe_lib.AlgorithmName.MIN_MAX_UNIFORM_QUANT,
+      ),
+      dict(
+          testcase_name="down_proj_last_layer",
+          op_name=_TFLOpName.FULLY_CONNECTED,
+          scope=_QWEN3_5_LAYER.format(
+              layer=23, module=_QWEN3_5_MLP, proj="down_proj"
+          ),
+          num_bits=8,
+          algorithm_key=recipe_lib.AlgorithmName.MIN_MAX_UNIFORM_QUANT,
+      ),
+      dict(
+          testcase_name="gated_delta_net_out_proj",
+          op_name=_TFLOpName.FULLY_CONNECTED,
+          scope=_QWEN3_5_LAYER.format(
+              layer=8, module=_QWEN3_5_GDN, proj="out_proj"
+          ),
+          num_bits=8,
+          algorithm_key=recipe_lib.AlgorithmName.MIN_MAX_UNIFORM_QUANT,
+      ),
+      dict(
+          testcase_name="attention_o_proj",
+          op_name=_TFLOpName.FULLY_CONNECTED,
+          scope=_QWEN3_5_LAYER.format(
+              layer=3, module=_QWEN3_5_ATTN, proj="o_proj"
+          ),
+          num_bits=8,
+          algorithm_key=recipe_lib.AlgorithmName.MIN_MAX_UNIFORM_QUANT,
+      ),
+      dict(
+          testcase_name="mlp_gate_up_proj",
+          op_name=_TFLOpName.FULLY_CONNECTED,
+          scope=_QWEN3_5_LAYER.format(
+              layer=0, module=_QWEN3_5_MLP, proj="gate_up_proj"
+          ),
+          num_bits=4,
+          algorithm_key=recipe_lib.AlgorithmName.DECOMPOSED_HADAMARD_ROTATION,
+      ),
+      dict(
+          testcase_name="gated_delta_net_in_proj_qkv",
+          op_name=_TFLOpName.FULLY_CONNECTED,
+          scope=_QWEN3_5_LAYER.format(
+              layer=0, module=_QWEN3_5_GDN, proj="in_proj_qkv"
+          ),
+          num_bits=4,
+          algorithm_key=recipe_lib.AlgorithmName.DECOMPOSED_HADAMARD_ROTATION,
+      ),
+      dict(
+          testcase_name="gated_delta_net_in_proj_zba",
+          op_name=_TFLOpName.FULLY_CONNECTED,
+          scope=_QWEN3_5_LAYER.format(
+              layer=0, module=_QWEN3_5_GDN, proj="in_proj_zba"
+          ),
+          num_bits=4,
+          algorithm_key=recipe_lib.AlgorithmName.DECOMPOSED_HADAMARD_ROTATION,
+      ),
+      dict(
+          testcase_name="attention_qkv_proj",
+          op_name=_TFLOpName.FULLY_CONNECTED,
+          scope=_QWEN3_5_LAYER.format(
+              layer=3, module=_QWEN3_5_ATTN, proj="qkv_proj"
+          ),
+          num_bits=4,
+          algorithm_key=recipe_lib.AlgorithmName.DECOMPOSED_HADAMARD_ROTATION,
+      ),
+  )
+  def test_qwen3_5_mixed48_h1024_weight_configs(
+      self, op_name, scope, num_bits, algorithm_key
+  ):
+    rp_manager = recipe_manager.RecipeManager()
+    rp_manager.load_quantization_recipe(quantization._qwen3_5_mixed48_h1024())
+
+    actual_algo, op_config = rp_manager.get_quantization_configs(op_name, scope)
+
+    self.assertEqual(actual_algo, algorithm_key)
+    weight_config = op_config.weight_tensor_config
+    self.assertIsNotNone(weight_config)
+    assert weight_config is not None
+    self.assertEqual(weight_config.num_bits, num_bits)
+    self.assertEqual(weight_config.granularity, _QuantGranularity.CHANNELWISE)
+    self.assertTrue(weight_config.symmetric)
+    if algorithm_key == recipe_lib.AlgorithmName.DECOMPOSED_HADAMARD_ROTATION:
+      self.assertEqual(
+          dict(weight_config.algorithm_params),
+          {
+              "max_hadamard_size": 1024,
+              "q_init_mode": "none",
+              "randomize": True,
+              "sizing_mode": "max_power_of_two",
+          },
+      )
+    else:
+      self.assertEmpty(weight_config.algorithm_params)
+
+  def test_qwen3_5_mixed48_h1024_two_pass_quantize_model(self):
+    class _TinyBlock(torch.nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.embed_tokens = torch.nn.Embedding(16, 32)
+        self.gate_up_proj = torch.nn.Linear(32, 64, bias=False)
+        self.down_proj = torch.nn.Linear(64, 32, bias=False)
+
+      def forward(self, ids):
+        x = self.embed_tokens(ids)
+        return self.down_proj(self.gate_up_proj(x))
+
+    torch.manual_seed(0)
+    module = _TinyBlock().eval()
+    sample_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.int32)
+    edge_model = litert_torch.convert(module, (sample_ids,))
+    float_path = os.path.join(
+        self.create_tempdir().full_path, "tiny_qwen3_5_h1024.tflite"
+    )
+    edge_model.export(float_path)
+
+    pass1_path = quantization.quantize_model(
+        float_path, "qwen3_5_mixed48_h1024"
+    )
+    pass2_path = quantization.quantize_model(pass1_path, "dynamic_wi8_afp32")
+    self.assertTrue(os.path.exists(pass2_path))
+    self.assertGreater(os.path.getsize(pass2_path), 0)
 
 
 if __name__ == "__main__":

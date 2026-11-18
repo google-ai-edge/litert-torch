@@ -93,6 +93,51 @@ def _qwen3_5_mixed48_b32():
   )
 
 
+def _qwen3_5_mixed48_h1024():
+  """Local Qwen3.5 recipe with H=1024 Hadamard int4 and int8 output projections.
+
+  Weights are int4 channelwise with a 1-stage 1024x1024 randomized Hadamard
+  rotation (`q_init_mode='none'`, `sizing_mode='max_power_of_two'`) on
+  `FULLY_CONNECTED` and `EMBEDDING_LOOKUP`, except the residual-writing output
+  projections (MLP `down_proj`, GatedDeltaNet `out_proj`, and attention
+  `o_proj`), which remain unrotated int8 channelwise.
+
+  Use with `--fuse_qkv=True` and a second `dynamic_wi8_afp32` pass
+  (`--quantization_recipe=qwen3_5_mixed48_h1024,dynamic_wi8_afp32`) so the
+  inserted 1024x1024 Hadamard matrices are quantized losslessly to int8.
+  """
+  rp_manager = recipe_manager.RecipeManager()
+  hadamard_op_config = qtyping.OpQuantizationConfig(
+      weight_tensor_config=qtyping.TensorQuantizationConfig(
+          num_bits=4,
+          symmetric=True,
+          granularity=qtyping.QuantGranularity.CHANNELWISE,
+          algorithm_params={
+              'max_hadamard_size': 1024,
+              'q_init_mode': 'none',
+              'randomize': True,
+              'sizing_mode': 'max_power_of_two',
+          },
+      ),
+      compute_precision=qtyping.ComputePrecision.INTEGER,
+      explicit_dequantize=False,
+  )
+  for op_name in (
+      recipe_lib.TFLOperationName.FULLY_CONNECTED,
+      recipe_lib.TFLOperationName.EMBEDDING_LOOKUP,
+  ):
+    rp_manager.add_quantization_config(
+        regex='.*',
+        operation_name=op_name,
+        op_config=hadamard_op_config,
+        algorithm_key=recipe_lib.AlgorithmName.DECOMPOSED_HADAMARD_ROTATION,
+    )
+  return rp_manager.get_quantization_recipe() + recipe_lib.dynamic_wi8c_afp32(
+      regex=r'Linear_(down|out|o)_proj',
+      operation_name=recipe_lib.TFLOperationName.FULLY_CONNECTED,
+  )
+
+
 def _dynamic_moe_afp32(
     num_bits: int,
     granularity: qtyping.QuantGranularity = (
@@ -150,6 +195,7 @@ _LOCAL_QUANTIZATION_RECIPES = {
     'dynamic_wi4b32_octav_afp32': _dynamic_wi4b32_octav_afp32,
     'gemma4_mixed48_b32_octav': _gemma4_mixed48_b32_octav,
     'qwen3_5_mixed48_b32': _qwen3_5_mixed48_b32,
+    'qwen3_5_mixed48_h1024': _qwen3_5_mixed48_h1024,
     'dynamic_wi8_moe_afp32': _dynamic_wi8_moe_afp32,
     'dynamic_wi4_moe_afp32': _dynamic_wi4_moe_afp32,
     'dynamic_wi4b32_moe_afp32': _dynamic_wi4b32_moe_afp32,
