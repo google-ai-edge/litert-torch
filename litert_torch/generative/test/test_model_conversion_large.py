@@ -347,6 +347,7 @@ class TestModelConversion(googletest.TestCase):
 
     pytorch_model = sd_decoder.Decoder(config).eval()
     torch_output = pytorch_model(latents)
+    self.assertFalse(np.isnan(torch_output.detach().numpy()).any())
 
     edge_model = litert_torch.signature(
         "decode", pytorch_model, (latents,)
