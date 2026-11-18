@@ -1530,25 +1530,31 @@ def _load_entry_point_extensions(reload_entry_points: bool = False) -> None:
       print(f'Warning: failed to load model extension entry point {ep}: {e}')
 
 
-def _try_lazy_import_builtin(model_type: str) -> None:
-  """Attempts to lazily import built-in `model_ext.<model_type>` modules."""
-  if not model_type or not model_type.isidentifier():
+_BUILTIN_EXTENSIONS_MODULE = (
+    'litert_torch.generative.export_hf.model_ext.builtin_extensions'
+)
+_BUILTINS_LOADED = False
+
+
+def _ensure_builtin_extensions_loaded() -> None:
+  """Imports `builtin_extensions` once so all built-in extensions register."""
+  global _BUILTINS_LOADED
+  if _BUILTINS_LOADED:
     return
-  base_pkg = f'litert_torch.generative.export_hf.model_ext.{model_type}'
-  for suffix in ('extension', 'patch', ''):
-    mod_name = f'{base_pkg}.{suffix}' if suffix else base_pkg
-    try:
-      importlib.import_module(mod_name)
-    except ImportError:
-      continue
+  _BUILTINS_LOADED = True
+  try:
+    importlib.import_module(_BUILTIN_EXTENSIONS_MODULE)
+  except ModuleNotFoundError as e:
+    if e.name != _BUILTIN_EXTENSIONS_MODULE:
+      raise
 
 
 def get_model_extension(model_type: str | None) -> ModelExtension | None:
   """Looks up a registered `ModelExtension` by `model_type`.
 
-  Checks the in-memory registry first, then attempts lazy built-in module
-  import (`model_ext.<model_type>.extension`), and finally scans installed
-  Python wheel entry points under `litert_torch.model_extensions`.
+  Checks the in-memory registry first, loads the built-in extension catalog if
+  not yet imported, and finally scans installed Python wheel entry points under
+  `litert_torch.model_extensions`.
 
   Args:
     model_type: Target `model_type` string, or `None`.
@@ -1561,7 +1567,7 @@ def get_model_extension(model_type: str | None) -> ModelExtension | None:
     return None
   if model_type in _EXTENSION_REGISTRY:
     return _EXTENSION_REGISTRY[model_type]
-  _try_lazy_import_builtin(model_type)
+  _ensure_builtin_extensions_loaded()
   if model_type in _EXTENSION_REGISTRY:
     return _EXTENSION_REGISTRY[model_type]
   _load_entry_point_extensions()

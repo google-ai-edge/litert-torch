@@ -436,11 +436,12 @@ def build_llm_metadata(
       or getattr(text_cfg, 'model_type', getattr(model_cfg, 'model_type', ''))
   )
 
-  ext = (
-      extension_lib.resolve_model_extension(model_cfg, export_config)
-      if not litert_lm_model_type_override
-      else None
-  )
+  if litert_lm_model_type_override:
+    ext = extension_lib.resolve_model_extension(
+        litert_lm_model_type_override, export_config
+    )
+  else:
+    ext = extension_lib.resolve_model_extension(model_cfg, export_config)
   ext_model_type_proto = (
       ext.get_llm_model_type_proto(model_cfg, export_config)
       if ext is not None
@@ -450,7 +451,7 @@ def build_llm_metadata(
     llm_metadata.llm_model_type.CopyFrom(ext_model_type_proto)
   else:
     match (model_type):
-      case 'qwen3' | 'qwen3_text' | 'qwen3_asr' | 'qwen3_5' | 'qwen3_5_text':
+      case 'qwen3' | 'qwen3_text' | 'qwen3_asr':
         llm_metadata.llm_model_type.CopyFrom(
             llm_model_type_pb2.LlmModelType(qwen3=llm_model_type_pb2.Qwen3())
         )

@@ -46,10 +46,6 @@ _CAUSAL_TEXT_MODEL_KEYS = frozenset({
     "qwen2",
     "qwen3",
     "qwen3_text",
-    "qwen3_5",
-    "qwen3_5_text",
-    "qwen3_5_moe",
-    "qwen3_5_moe_text",
 })
 
 

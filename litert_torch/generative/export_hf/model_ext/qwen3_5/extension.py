@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Built-in `ModelExtension` for Qwen3.5 (`qwen3_5`, `qwen3_5_text`).
+"""Built-in `ModelExtension` for Qwen3.5 (`qwen3_5`, `qwen3_5_text`, `qwen3_5_moe`, `qwen3_5_moe_text`).
 
 Illustrates custom prefill/decode exportables and Converter V2 checkpoint
 weight streaming for a hybrid full-attention + linear-attention architecture:
@@ -29,9 +29,10 @@ from typing import Any
 
 from litert_torch.generative.export_hf.model_ext import extension as extension_lib
 from litert_torch.generative.export_hf.model_ext.qwen3_5 import exportable_module as qwen3_5_exportable
-# Registers qwen3_5 patches.
-from litert_torch.generative.export_hf.model_ext.qwen3_5 import patch as _
+from litert_torch.generative.export_hf.model_ext.qwen3_5 import patch as qwen3_5_patch
 import torch
+
+from litert_lm_builder.runtime.proto import llm_model_type_pb2
 
 _WRAPPER_PREFIXES = (
     'model.',
@@ -166,6 +167,20 @@ class Qwen3_5Extension(extension_lib.ModelExtension):  # pylint: disable=invalid
           'in_proj_zba', ('in_proj_z', 'in_proj_b', 'in_proj_a'), dim=0
       ),
   )
+  is_causal_text_model = True
+
+  def patch_context(self):
+    """See base class."""
+    return qwen3_5_patch.qwen3_5_litert_patch()
+
+  def patch_model(self, model, export_config):
+    """See base class."""
+    return qwen3_5_patch.patch_qwen3_5_model(model, export_config)
+
+  def get_llm_model_type_proto(self, model_config, export_config=None):
+    """See base class."""
+    del model_config, export_config
+    return llm_model_type_pb2.LlmModelType(qwen3=llm_model_type_pb2.Qwen3())
 
   def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
     """See base class."""

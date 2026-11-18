@@ -112,14 +112,6 @@ def get_patch_context(model_type: str, export_config: Any = None):
     Control to the caller while class-level load-time patches are active.
   """
   ext = extension_lib.resolve_model_extension(model_type, export_config)
-  if model_type not in _CONTEXT_REGISTRY:
-    try:
-      __import__(
-          f"litert_torch.generative.export_hf.model_ext.{model_type}.patch"
-      )
-    except ImportError:
-      pass
-
   patch_cm = _CONTEXT_REGISTRY.get(model_type)
   with contextlib.ExitStack() as stack:
     if patch_cm is not None:
@@ -148,14 +140,6 @@ def patch_model(model: Any, model_type: str, export_config: Any):
     Control to the caller while `model` instance patches are active.
   """
   ext = extension_lib.resolve_model_extension(model_type, export_config)
-  if model_type not in _MODEL_PATCH_REGISTRY:
-    try:
-      __import__(
-          f"litert_torch.generative.export_hf.model_ext.{model_type}.patch"
-      )
-    except ImportError:
-      pass
-
   patch_cm = _MODEL_PATCH_REGISTRY.get(model_type)
   with contextlib.ExitStack() as stack:
     if patch_cm is not None:

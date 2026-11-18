@@ -20,7 +20,6 @@ from litert_torch.generative.export_hf.core import fused_linear
 from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope as qkv_norm_rope_composite
 from litert_torch.generative.export_hf.experimental.composites import rope as rope_composite
 from litert_torch.generative.export_hf.experimental.composites import swiglu as swiglu_composite
-from litert_torch.generative.export_hf.model_ext import patches as patches_lib
 from litert_torch.generative.layers import normalization
 import torch
 import transformers
@@ -526,9 +525,6 @@ def apply_qwen3_5_model_patches(
   return replaced_modules
 
 
-@patches_lib.register_patch(
-    ["qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"]
-)
 @contextlib.contextmanager
 def qwen3_5_litert_patch():
   """Qwen3.5 class-level patch."""
@@ -541,9 +537,6 @@ def qwen3_5_litert_patch():
 CACHED_STATIC_WRAPPERS: dict[int, Any] = {}
 
 
-@patches_lib.register_model_patch(
-    ["qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"]
-)
 @contextlib.contextmanager
 def patch_qwen3_5_model(model: torch.nn.Module, export_config: Any):
   """Dynamic model patch for Qwen3.5 export."""

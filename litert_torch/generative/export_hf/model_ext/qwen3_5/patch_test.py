@@ -33,6 +33,7 @@ from absl.testing import parameterized
 import litert_torch
 from litert_torch.generative.export_hf.core import exportable_module_config
 from litert_torch.generative.export_hf.model_ext import patches as patches_lib
+from litert_torch.generative.export_hf.model_ext.qwen3_5 import extension as _
 from litert_torch.generative.export_hf.model_ext.qwen3_5 import modeling_qwen3_5_static
 from litert_torch.generative.export_hf.model_ext.qwen3_5 import patch
 import torch
@@ -507,6 +508,7 @@ class Qwen3_5PatchTest(parameterized.TestCase):
 
     edge_model = litert_torch.convert(wrapper, (x, pos_ids))
     self.assertIn(b"odml.qkv_norm_rope", edge_model.model_content())
+
 
 if __name__ == "__main__":
   absltest.main()

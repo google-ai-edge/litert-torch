@@ -166,6 +166,7 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
   def setUp(self):
     super().setUp()
     self._saved_registry = dict(extension._EXTENSION_REGISTRY)
+    self._saved_builtins_loaded = extension._BUILTINS_LOADED
     self._saved_entry_points_loaded = extension._ENTRY_POINTS_LOADED
     self._saved_extra_kwargs = (
         exportable_module_config.get_registered_extra_kwargs()
@@ -174,11 +175,88 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
   def tearDown(self):
     extension._EXTENSION_REGISTRY.clear()
     extension._EXTENSION_REGISTRY.update(self._saved_registry)
+    extension._BUILTINS_LOADED = self._saved_builtins_loaded
     extension._ENTRY_POINTS_LOADED = self._saved_entry_points_loaded
     exportable_module_config.reset_registered_extra_kwargs(
         self._saved_extra_kwargs
     )
     super().tearDown()
+
+  def test_all_builtin_extensions_load_and_register(self):
+    builtin_classes = [
+        obj
+        for name, obj in vars(builtin_extensions).items()
+        if name.endswith('Extension')
+        and isinstance(obj, type)
+        and issubclass(obj, ModelExtension)
+        and obj is not ModelExtension
+    ]
+    self.assertNotEmpty(builtin_classes)
+
+    # 1. All built-in extensions are registered at import time.
+    for ext_cls in builtin_classes:
+      self.assertNotEmpty(ext_cls.model_types)
+      for mt in ext_cls.model_types:
+        resolved = extension.get_model_extension(mt)
+        self.assertIsNotNone(resolved, f'Missing built-in extension for {mt}')
+        self.assertEqual(type(resolved).__name__, ext_cls.__name__)
+
+    # 2. _ensure_builtin_extensions_loaded() reloads and registers all built-ins
+    # when the registry and module cache are cleared.
+    extension._EXTENSION_REGISTRY.clear()
+    extension._BUILTINS_LOADED = False
+    model_ext_pkg = sys.modules.get(
+        'litert_torch.generative.export_hf.model_ext'
+    )
+    if model_ext_pkg is not None and hasattr(
+        model_ext_pkg, 'builtin_extensions'
+    ):
+      delattr(model_ext_pkg, 'builtin_extensions')
+    for mod_name in list(sys.modules):
+      if mod_name == (
+          'litert_torch.generative.export_hf.model_ext.builtin_extensions'
+      ):
+        sys.modules.pop(mod_name, None)
+      elif (
+          mod_name.startswith('litert_torch.generative.export_hf.model_ext.')
+          and mod_name.endswith('.extension')
+          and mod_name
+          != 'litert_torch.generative.export_hf.model_ext.extension'
+      ):
+        sys.modules.pop(mod_name, None)
+        parent_pkg = sys.modules.get(mod_name.rsplit('.', 1)[0])
+        if parent_pkg is not None and hasattr(parent_pkg, 'extension'):
+          delattr(parent_pkg, 'extension')
+
+    extension._ensure_builtin_extensions_loaded()
+    self.assertTrue(extension._BUILTINS_LOADED)
+
+    for ext_cls in builtin_classes:
+      for mt in ext_cls.model_types:
+        resolved = extension.get_model_extension(mt)
+        self.assertIsNotNone(resolved, f'Missing built-in extension for {mt}')
+        self.assertEqual(type(resolved).__name__, ext_cls.__name__)
+
+    # 3. Missing `builtin_extensions` in modular build targets is ignored,
+    # whereas an ImportError inside a built-in extension propagates.
+    extension._BUILTINS_LOADED = False
+    with mock.patch.object(
+        extension.importlib,
+        'import_module',
+        side_effect=ModuleNotFoundError(
+            'no catalog', name=extension._BUILTIN_EXTENSIONS_MODULE
+        ),
+    ):
+      extension._ensure_builtin_extensions_loaded()
+
+    extension._BUILTINS_LOADED = False
+    with mock.patch.object(
+        extension.importlib,
+        'import_module',
+        side_effect=ModuleNotFoundError('broken dep', name='broken_dep'),
+    ):
+      with self.assertRaises(ModuleNotFoundError):
+        extension._ensure_builtin_extensions_loaded()
 
   def test_register_and_lookup_model_extension(self):
 
