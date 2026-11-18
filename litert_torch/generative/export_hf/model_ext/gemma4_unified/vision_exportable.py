@@ -22,7 +22,13 @@ import torch
 class LiteRTExportableModuleForGemma4UnifiedVisionEncoder(
     exportable_module_base.ExportableModuleBase
 ):
-  """Exportable module for Gemma4 unified vision encoder."""
+  """Exportable module for Gemma4 unified vision encoder.
+
+  Gemma 4 Unified has no vision tower: `model.model.embed_vision`
+  (`Gemma4UnifiedVisionEmbedder`) projects merged raw pixel patches straight
+  into the language model space (LN -> Dense -> LN -> + factorized 2D position
+  embedding -> LN -> RMSNorm -> Linear).
+  """
 
   def __init__(self, model: torch.nn.Module, export_config):
     super().__init__(export_config)
@@ -33,14 +39,22 @@ class LiteRTExportableModuleForGemma4UnifiedVisionEncoder(
       images,
       positions_xy,
   ):
-    pixel_values = images
-    pixel_position_ids = positions_xy
-    vision_embedder = self.model.model.vision_embedder
     embed_vision = self.model.model.embed_vision
+    pixel_values = images.to(embed_vision.patch_dense.weight.dtype)
+    hidden_states = embed_vision.patch_ln1(pixel_values)
+    hidden_states = embed_vision.patch_dense(hidden_states)
+    hidden_states = embed_vision.patch_ln2(hidden_states)
 
-    embedded = vision_embedder(pixel_values, pixel_position_ids)
-    projected = embed_vision(embedded)
-    padding_mask = ~((pixel_position_ids == -1).all(dim=-1))
+    # Factorized 2D position embedding; padding patches are (-1, -1).
+    clamped = positions_xy.clamp(min=0).long()
+    valid = (positions_xy != -1).to(embed_vision.pos_embedding.dtype)
+    pos_x = embed_vision.pos_embedding[clamped[..., 0], 0]
+    pos_y = embed_vision.pos_embedding[clamped[..., 1], 1]
+    pos_embs = pos_x * valid[..., 0:1] + pos_y * valid[..., 1:2]
+    hidden_states = embed_vision.pos_norm(hidden_states + pos_embs)
+
+    projected = embed_vision.multimodal_embedder(hidden_states)
+    padding_mask = ~((positions_xy == -1).all(dim=-1))
     return {'features': projected, 'mask': padding_mask}
 
   def get_sample_inputs(
