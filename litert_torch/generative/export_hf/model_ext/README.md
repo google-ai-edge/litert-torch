@@ -44,8 +44,10 @@ supports lazy fallback imports for `model_ext.<model_type>.extension`:
 | **LLM / VLM** | `gemma3n/` | `Gemma3nExtension` | `gemma3n` |
 | **LLM / VLM / Audio** | `gemma4/` | `Gemma4Extension` | `gemma4`, `gemma4_text` |
 | **VLM** | `gemma4_unified/` | `Gemma4UnifiedExtension` | `gemma4_unified` |
+| **LLM** | `granitemoehybrid/` | `GraniteMoeHybridExtension` | `granitemoehybrid` |
 | **LLM** | `lfm2/` | `Lfm2Extension` | `lfm2` |
 | **VLM** | `lfm2_vl/` | `Lfm2VlExtension` | `lfm2_vl` |
+| **LLM** | `nemotron_h/` | `NemotronHExtension` | `nemotron_h` |
 | **LLM** | `qwen3/` | `Qwen3Extension` | `qwen3`, `qwen3_text` |
 | **LLM** | `qwen3_5/` | `Qwen3_5Extension` | `qwen3_5`, `qwen3_5_text` |
 | **ASR (Speech)** | `moonshine/` | `MoonshineExtension` | `moonshine` |

@@ -29,6 +29,7 @@ packaging `.litertlm` bundles:
    `ModelExtension.get_executor_metadata_builder`.
 """
 
+from litert_torch.generative.export_hf.core import cache as cache_lib
 from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.core.split_cache import combined_layers
@@ -422,6 +423,9 @@ try:
             maximum_sequence_length=local_cache_length,
             minimum_sequence_length=sliding_window_size,
         )
+      elif layer_type in cache_lib.STATELESS_LAYER_TYPES:
+        # Keeps no state, e.g. NemotronH MLP and MoE blocks.
+        pass
       else:
         raise ValueError(f'Unsupported layer type: {layer_type}')
 

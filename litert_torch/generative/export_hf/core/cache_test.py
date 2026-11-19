@@ -445,6 +445,239 @@ class CacheTest(googletest.TestCase):
           torch.zeros(1, hidden_size), layer_type="conv"
       )
 
+  def test_mamba2_and_stateless_cache_layers(self):
+    class MockGraniteMoeHybridConfig:
+
+      def __init__(self):
+        self.num_hidden_layers = 2
+        self.layer_types = ["linear_attention", "full_attention"]
+        self.hidden_size = 64
+        self.num_attention_heads = 4
+        self.num_key_value_heads = 2
+        self.head_dim = 16
+        self.mamba_n_heads = 8
+        self.mamba_d_head = 16
+        self.mamba_d_state = 32
+        self.mamba_n_groups = 2
+        self.mamba_d_conv = 4
+
+    class MockNemotronHConfig:
+
+      def __init__(self):
+        self.num_hidden_layers = 4
+        self.layer_types = [
+            "linear_attention",
+            "mlp",
+            "full_attention",
+            "moe",
+        ]
+        self.hidden_size = 64
+        self.num_attention_heads = 4
+        self.num_key_value_heads = 2
+        self.head_dim = 16
+        self.mamba_num_heads = 8
+        self.mamba_head_dim = 16
+        self.ssm_state_size = 32
+        self.n_groups = 2
+        self.conv_kernel = 4
+
+    class MockExportConfig:
+
+      def __init__(self):
+        self.batch_size = 1
+        self.cache_length = 128
+        self.k_ts_idx = 2
+        self.v_ts_idx = 3
+
+      def get_cache_dtype(self):
+        return torch.float32
+
+    export_config = MockExportConfig()
+    for model_config, expected_names in (
+        (MockGraniteMoeHybridConfig(), ["c_0", "r_0", "k_1", "v_1"]),
+        (MockNemotronHConfig(), ["c_0", "r_0", "k_2", "v_2"]),
+    ):
+      kv_cache = cache_lib.LiteRTLMCache.create_from_config(
+          model_config, export_config
+      )
+      self.assertLen(kv_cache.layers, model_config.num_hidden_layers)
+      conv_layer = kv_cache.layers[0]
+      self.assertIsInstance(conv_layer, cache_lib.LiteRTLMConvCacheLayer)
+      # Channels-last (B, kernel - 1, conv_dim), with
+      # conv_dim = heads * head_dim + 2 * groups * state_size.
+      self.assertEqual(
+          conv_layer.conv_states.shape, (1, 3, 8 * 16 + 2 * 2 * 32)
+      )
+      self.assertEqual(conv_layer.recurrent_states.shape, (1, 8, 16, 32))
+      self.assertEqual(conv_layer.recurrent_states.dtype, torch.float32)
+
+      flattened, context = cache_lib._flatten_kvc_t(kv_cache)
+      self.assertEqual(context[0], expected_names)
+      self.assertLen(flattened, 4)
+      unflattened = cache_lib._unflatten_kvc_t(flattened, context)
+      self.assertEqual(
+          [type(layer) for layer in unflattened.layers],
+          [type(layer) for layer in kv_cache.layers],
+      )
+
+    stateless_layer = kv_cache.layers[1]
+    self.assertIsInstance(
+        stateless_layer, cache_lib.LiteRTLMStatelessCacheLayer
+    )
+    self.assertEqual(stateless_layer.layer_type, "mlp")
+    self.assertEqual(unflattened.layers[3].layer_type, "moe")
+    with self.assertRaises(ValueError):
+      stateless_layer.update(torch.zeros(1), torch.zeros(1))
+    self.assertEqual(kv_cache.max_cache_len, 128)
+
+  def test_mamba2_state_shapes_need_mamba2_fields(self):
+    class MockGatedDeltaNetConfig:
+
+      def __init__(self):
+        self.linear_key_head_dim = 16
+
+    class MockGatedDeltaNetConfigWithMamba2Fields(MockGatedDeltaNetConfig):
+
+      def __init__(self):
+        super().__init__()
+        self.mamba_num_heads = 8
+        self.mamba_head_dim = 16
+        self.ssm_state_size = 32
+        self.n_groups = 2
+        self.conv_kernel = 4
+
+    class MockConfigWithoutStateFields:
+      pass
+
+    # Neither config has Mamba2 fields: the layer keeps the gated delta net
+    # shapes, or fails on the missing fields.
+    self.assertIsNone(
+        cache_lib._mamba2_state_shapes(MockGatedDeltaNetConfig(), 1)
+    )
+    self.assertIsNone(
+        cache_lib._mamba2_state_shapes(MockConfigWithoutStateFields(), 1)
+    )
+    # With the gated delta net fields, the layer keeps the gated delta net
+    # shapes even when the config also has Mamba2 fields.
+    self.assertIsNone(
+        cache_lib._mamba2_state_shapes(
+            MockGatedDeltaNetConfigWithMamba2Fields(), 1
+        )
+    )
+
+  def test_stateless_layers_hold_no_keys_or_values(self):
+    class MockNemotronHConfig:
+
+      def __init__(self):
+        self.num_hidden_layers = 3
+        self.layer_types = ["linear_attention", "mlp", "moe"]
+        self.mamba_num_heads = 8
+        self.mamba_head_dim = 16
+        self.ssm_state_size = 32
+        self.n_groups = 2
+        self.conv_kernel = 4
+
+    export_config = cache_lib.ExportableModuleConfig(
+        model="dummy_model", cache_length=128
+    )
+    kv_cache = cache_lib.LiteRTLMCache.create_from_config(
+        MockNemotronHConfig(), export_config
+    )
+    for stateless_layer in kv_cache.layers[1:]:
+      if not isinstance(stateless_layer, cache_lib.LiteRTLMStatelessCacheLayer):
+        self.fail(f"The layer is a {type(stateless_layer).__name__}.")
+      # The layer has no sequence, no mask positions and no length of its own.
+      self.assertEqual(stateless_layer.get_seq_length(), 0)
+      self.assertEqual(stateless_layer.get_mask_sizes(torch.arange(4)), (0, 0))
+      self.assertEqual(stateless_layer.get_max_cache_shape(), 0)
+      self.assertEqual(stateless_layer.get_max_length(), -1)
+      with self.assertRaises(NotImplementedError):
+        stateless_layer.lazy_initialization(torch.zeros(1, 2, 4, 16))
+      self.assertIsNone(stateless_layer.keys)
+      self.assertIsNone(stateless_layer.values)
+      # The layer holds no tensor: moving it returns the layer itself.
+      self.assertIs(stateless_layer.to(torch.float16), stateless_layer)
+    # Only the layer types that keep no state get a stateless layer.
+    with self.assertRaises(AssertionError):
+      cache_lib.LiteRTLMStatelessCacheLayer("full_attention")
+    # Made without a batch size, the layer holds one sequence.
+    self.assertEqual(
+        cache_lib.LiteRTLMStatelessCacheLayer("mlp").get_batch_size(), 1
+    )
+
+  def test_stateless_layers_keep_the_cache_compileable_and_initialized(self):
+    class MockNemotronHConfig:
+
+      def __init__(self):
+        self.num_hidden_layers = 3
+        self.layer_types = ["linear_attention", "mlp", "moe"]
+        self.mamba_num_heads = 8
+        self.mamba_head_dim = 16
+        self.ssm_state_size = 32
+        self.n_groups = 2
+        self.conv_kernel = 4
+
+    export_config = cache_lib.ExportableModuleConfig(
+        model="dummy_model", cache_length=128
+    )
+    kv_cache = cache_lib.LiteRTLMCache.create_from_config(
+        MockNemotronHConfig(), export_config
+    )
+    for stateless_layer in kv_cache.layers[1:]:
+      self.assertIsInstance(
+          stateless_layer, cache_lib.LiteRTLMStatelessCacheLayer
+      )
+      # Statically shaped, never a sliding window, and nothing to initialize
+      # lazily, like the other LiteRT-LM cache layers.
+      self.assertTrue(stateless_layer.is_compileable)
+      self.assertFalse(stateless_layer.is_sliding)
+      self.assertTrue(stateless_layer.is_initialized)
+    self.assertTrue(kv_cache.is_compileable)
+    self.assertEqual(kv_cache.is_sliding, [False, False, False])
+
+  def test_flatten_without_attention_layers_reads_the_first_layer(self):
+    class MockMamba2AndMlpConfig:
+
+      def __init__(self):
+        self.num_hidden_layers = 2
+        self.layer_types = ["mlp", "linear_attention"]
+        self.mamba_num_heads = 8
+        self.mamba_head_dim = 16
+        self.ssm_state_size = 32
+        self.n_groups = 2
+        self.conv_kernel = 4
+
+    export_config = cache_lib.ExportableModuleConfig(
+        model="dummy_model", cache_length=128, batch_size=2
+    )
+    kv_cache = cache_lib.LiteRTLMCache.create_from_config(
+        MockMamba2AndMlpConfig(), export_config
+    )
+    flattened, context = cache_lib._flatten_kvc_t(kv_cache)
+    # Without an attention layer, the batch size and the (unused) key and
+    # value sequence axes come from layer 0, here the stateless layer.
+    self.assertEqual(
+        context,
+        (["c_1", "r_1"], (2, 2, 2, 3, ["mlp", "linear_attention"])),
+    )
+    unflattened = cache_lib._unflatten_kvc_t(flattened, context)
+    stateless_layer, conv_layer = unflattened.layers
+    if not isinstance(stateless_layer, cache_lib.LiteRTLMStatelessCacheLayer):
+      self.fail(f"Layer 0 is a {type(stateless_layer).__name__}.")
+    if not isinstance(conv_layer, cache_lib.LiteRTLMConvCacheLayer):
+      self.fail(f"Layer 1 is a {type(conv_layer).__name__}.")
+    self.assertEqual(
+        [stateless_layer.get_batch_size(), conv_layer.get_batch_size()], [2, 2]
+    )
+
+  def test_flatten_and_unflatten_reject_an_unknown_layer_type(self):
+    layer = cache_lib.LiteRTLMStatelessCacheLayer("mlp")
+    layer.layer_type = "unknown"
+    with self.assertRaisesRegex(ValueError, "Unsupported layer type"):
+      cache_lib._flatten_kvc_t(cache_lib.LiteRTLMCache([layer]))
+    with self.assertRaisesRegex(ValueError, "Unsupported layer type"):
+      cache_lib._unflatten_kvc_t([], ([], (1, 1, 2, 3, ["unknown"])))
+
 
 if __name__ == "__main__":
   googletest.main()

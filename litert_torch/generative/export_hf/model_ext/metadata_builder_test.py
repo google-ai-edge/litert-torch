@@ -294,5 +294,78 @@ class NpuExecutorSettingsTest(absltest.TestCase):
     )
 
 
+class StateBufferTest(absltest.TestCase):
+  """Tests the state buffers that `build_executor_metadata` adds per layer."""
+
+  def _build_executor_metadata(self, config: transformers.PretrainedConfig):
+    build_executor_metadata = metadata_builder.build_executor_metadata
+    if build_executor_metadata is None:
+      self.skipTest("litert_lm_builder is not available.")
+    # The executor metadata is built from the config alone.
+    source_model_artifacts = export_lib.SourceModelArtifacts(
+        model=None,  # pyrefly: ignore[bad-argument-type]
+        model_config=config,
+        text_model_config=config,
+        tokenizer=None,  # pyrefly: ignore[bad-argument-type]
+    )
+    export_config = exportable_module.ExportableModuleConfig(
+        model="dummy", cache_length=64
+    )
+    return build_executor_metadata(
+        source_model_artifacts,
+        export_config,
+        export_lib.ExportedModelArtifacts(),
+    )
+
+  def test_mamba2_and_stateless_layers(self):
+    config = transformers.NemotronHConfig(
+        hidden_size=64,
+        layers_block_type=[
+            "linear_attention",
+            "mlp",
+            "full_attention",
+            "moe",
+        ],
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        mamba_num_heads=8,
+        mamba_head_dim=16,
+        ssm_state_size=16,
+        n_groups=2,
+    )
+
+    executor_metadata = self._build_executor_metadata(config)
+
+    llm_metadata = executor_metadata.llm_executor_metadata
+    state_buffer_type = (
+        metadata_builder.executor_metadata_pb2.StateBuffer
+    )
+    self.assertEqual(
+        [
+            (buffer.prefill_input_name, buffer.type)
+            for buffer in llm_metadata.state_buffers
+        ],
+        [
+            ("kv_cache_c_0", state_buffer_type.TYPE_LINEAR_ATTENTION),
+            ("kv_cache_r_0", state_buffer_type.TYPE_LINEAR_ATTENTION),
+            ("kv_cache_k_2", state_buffer_type.TYPE_GLOBAL_KEY_CACHE),
+            ("kv_cache_v_2", state_buffer_type.TYPE_GLOBAL_VALUE_CACHE),
+        ],
+    )
+    # Linear attention states cannot be rolled back.
+    self.assertEqual(llm_metadata.max_history_size, 0)
+
+  def test_unsupported_layer_type_raises(self):
+    # The stateless layer types are skipped; any other unknown type still
+    # raises instead of being exported without its state buffers.
+    config = _make_config("dummy", num_layers=3)
+    config.layer_types = ["mlp", "moe", "unknown_layer"]
+    with self.assertRaisesRegex(
+        ValueError, "Unsupported layer type: unknown_layer"
+    ):
+      self._build_executor_metadata(config)
+
+
 if __name__ == "__main__":
   absltest.main()
