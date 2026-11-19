@@ -1056,14 +1056,19 @@ def export_text_prefill_decode_model(
     model_path = os.path.join(work_dir, 'model.tflite')  # pyrefly: ignore[no-matching-overload]
     with contextlib.ExitStack() as stack:
       if weights_loader is not None:
-        # Parameters are on meta, so tracing runs on meta: move real buffers
-        # (e.g. RoPE inv_freq) there too and serve their values to the
-        # converter through the weights loader.
-        buffer_values = stack.enter_context(
-            weights_loader_lib.buffers_on_meta(*signature_modules)
+        # Pre-quantized checkpoints: replace the layers model extensions built.
+        stack.enter_context(
+            quantization_layer.prepare_quantized_export_modules(
+                weights_loader, *signature_modules
+            )
         )
-        weights_loader = weights_loader_lib.with_tensors(
-            weights_loader, buffer_values
+        # Parameters are on meta, so tracing runs on meta: move real buffers
+        # (e.g. RoPE inv_freq) there too and serve their values and any custom
+        # module weights to the converter through the weights loader.
+        weights_loader = stack.enter_context(
+            weights_loader_lib.prepare_for_export(
+                weights_loader, *signature_modules
+            )
         )
       converter = converter_utils.Converter()
       for sig_name, module, inputs, dynamic_shapes in signatures:
@@ -1165,27 +1170,47 @@ def export_embedder_model(
     embedder_module = external_emb_module.LiteRTExportableModuleForEmbedder(
         embedding
     )
-    converter = converter_utils.Converter()
-    sample_inputs = embedder_module.get_sample_inputs(
-        text_model_config, export_config
-    )
-    for signature_name, (sample_inputs, _) in sample_inputs.items():
-      converter.add_signature(
-          signature_name,
-          embedder_module.eval(),
-          sample_kwargs=sample_inputs,
-      )
     weights_loader = source_model_artifacts.weights_loader
     if weights_loader is not None:
       weights_loader = weights_loader_lib.submodule_weights_loader(
           weights_loader, source_model_artifacts.model, embedding
       )
-    model_path = os.path.join(work_dir, 'embedder.tflite')  # pyrefly: ignore[no-matching-overload]
-    lrt_model = converter.convert(
-        lightweight_conversion=export_config.experimental_lightweight_conversion,
-        strict_export=False,
-        **_v2_convert_kwargs(export_config, weights_loader, model_path),
+    sample_inputs = embedder_module.get_sample_inputs(
+        text_model_config, export_config
     )
+    model_path = os.path.join(work_dir, 'embedder.tflite')  # pyrefly: ignore[no-matching-overload]
+    with contextlib.ExitStack() as stack:
+      if export_config.use_v2 and weights_loader is not None:
+        stack.enter_context(
+            quantization_layer.prepare_quantized_export_modules(
+                weights_loader, embedder_module
+            )
+        )
+        weights_loader = stack.enter_context(
+            weights_loader_lib.prepare_for_export(
+                weights_loader, embedder_module
+            )
+        )
+      device = next(
+          itertools.chain(
+              embedder_module.parameters(), embedder_module.buffers()
+          ),
+          torch.empty(0),
+      ).device
+      converter = converter_utils.Converter()
+      for signature_name, (sig_inputs, _) in sample_inputs.items():
+        if export_config.use_v2 and weights_loader is not None:
+          sig_inputs = {k: v.to(device) for k, v in sig_inputs.items()}
+        converter.add_signature(
+            signature_name,
+            embedder_module.eval(),
+            sample_kwargs=sig_inputs,
+        )
+      lrt_model = converter.convert(
+          lightweight_conversion=export_config.experimental_lightweight_conversion,
+          strict_export=False,
+          **_v2_convert_kwargs(export_config, weights_loader, model_path),
+      )
   if not export_config.use_v2:
     lrt_model.export(model_path)
   model_path = _quantize_and_cleanup(
@@ -1214,13 +1239,16 @@ def _convert_and_export_module(
       trace_on_meta = False
     else:
       if weights_loader is not None:
-        # Parameters are on meta (Converter V2): trace on meta and serve real
-        # buffer values to the converter, as for the prefill/decode model.
-        buffer_values = stack.enter_context(
-            weights_loader_lib.buffers_on_meta(module)
+        stack.enter_context(
+            quantization_layer.prepare_quantized_export_modules(
+                weights_loader, module
+            )
         )
-        weights_loader = weights_loader_lib.with_tensors(
-            weights_loader, buffer_values
+        # Parameters are on meta (Converter V2): trace on meta and serve real
+        # buffer values and custom module weights to the converter, as for the
+        # prefill/decode model.
+        weights_loader = stack.enter_context(
+            weights_loader_lib.prepare_for_export(weights_loader, module)
         )
       v2_kwargs = _v2_convert_kwargs(export_config, weights_loader, model_path)
       trace_on_meta = weights_loader is not None
