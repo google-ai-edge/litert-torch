@@ -1681,6 +1681,42 @@ class BuiltinQwen3TtsExtensionContractTest(
   extension_cls = builtin_extensions.Qwen3TtsExtension
 
 
+class BuiltinParakeetCtcExtensionContractTest(
+    ext_testing.ModelExtensionTestMixin, googletest.TestCase
+):
+  extension_cls = builtin_extensions.ParakeetCtcExtension
+
+  def test_patch_context_and_sample_input_duration(self):
+    ext = self.get_extension()
+    model_cls = ext.get_speech_model_cls('parakeet_ctc')
+    self.assertAlmostEqual(
+        model_cls.get_sample_input_duration(None, 5.0), 4.99
+    )
+    attn_funs = transformers.modeling_utils.ALL_ATTENTION_FUNCTIONS
+    orig_sdpa = attn_funs.get('sdpa')
+    with ext.patch_context():
+      self.assertIsNot(attn_funs.get('sdpa'), orig_sdpa)
+    self.assertIs(attn_funs.get('sdpa'), orig_sdpa)
+
+
+class BuiltinParakeetTdtExtensionContractTest(
+    ext_testing.ModelExtensionTestMixin, googletest.TestCase
+):
+  extension_cls = builtin_extensions.ParakeetTdtExtension
+
+  def test_patch_context_and_sample_input_duration(self):
+    ext = self.get_extension()
+    model_cls = ext.get_speech_model_cls('parakeet_tdt')
+    self.assertAlmostEqual(
+        model_cls.get_sample_input_duration(None, 5.0), 4.99
+    )
+    attn_funs = transformers.modeling_utils.ALL_ATTENTION_FUNCTIONS
+    orig_sdpa = attn_funs.get('sdpa')
+    with ext.patch_context():
+      self.assertIsNot(attn_funs.get('sdpa'), orig_sdpa)
+    self.assertIs(attn_funs.get('sdpa'), orig_sdpa)
+
+
 class BuiltinGemma3nExtensionContractTest(
     ext_testing.ModelExtensionTestMixin, googletest.TestCase
 ):

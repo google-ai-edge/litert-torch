@@ -74,6 +74,9 @@ class ParakeetCTC(asr_model.AsrModel):
   def get_processor(self) -> asr_model.AsrProcessor:
     return self._processor
 
+  def get_sample_input_duration(self, input_sec: float) -> float:
+    return input_sec - 0.01  # Parakeet processor adds extra 10ms.
+
   def get_encoder_sample_input(
       self, processed_audio: dict[str, torch.Tensor]
   ) -> tuple[torch.Tensor, ...]:

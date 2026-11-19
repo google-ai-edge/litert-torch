@@ -287,6 +287,10 @@ class AsrModel:
     """Returns the processor to convert audio to model inputs."""
     raise NotImplementedError()
 
+  def get_sample_input_duration(self, input_sec: float) -> float:
+    """Returns the sample audio duration (seconds) passed to the processor."""
+    return input_sec
+
   @abc.abstractmethod
   def get_encoder_sample_input(
       self, processed_audio: tuple[str, torch.Tensor]

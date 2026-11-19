@@ -15,6 +15,8 @@
 
 """Wrapper for ParakeetTDT to compute logits."""
 
+import os
+
 from litert_torch.generative.export_hf.core.speech import asr_model
 import numpy as np
 import torch
@@ -145,12 +147,34 @@ class ParakeetTDT(asr_model.AsrModel):
     nemo_asr.parts.submodules.subsampling.MaskedConvSequential = (
         _MaskedConvSequential
     )
-    model = nemo_asr.models.asr_model.ASRModel.from_pretrained(model_id)
+    model = self._load_nemo_model(nemo_asr, model_id)
     self._model = model.float().eval()
     self._replace_normalizations(self._model)
     self._encoder = ParakeetTDTEncoder(self._model).eval()
     self._decoder = ParakeetTDTDecoder(self._model).eval()
     self._processor = ParakeetAsrProcessor(self._model)
+
+  @staticmethod
+  def _load_nemo_model(nemo_asr, model_id: str) -> torch.nn.Module:
+    """Loads a NeMo ASRModel from a local `.nemo` path/dir or HF/NGC ID."""
+    if os.path.isfile(model_id) and model_id.endswith('.nemo'):
+      return nemo_asr.models.asr_model.ASRModel.restore_from(model_id)
+    if os.path.isdir(model_id):
+      nemo_files = sorted(
+          f for f in os.listdir(model_id) if f.endswith('.nemo')
+      )
+      if not nemo_files:
+        raise FileNotFoundError(
+            f'No .nemo file found in local directory: {model_id}'
+        )
+      if len(nemo_files) == 1:
+        return nemo_asr.models.asr_model.ASRModel.restore_from(
+            os.path.join(model_id, nemo_files[0])
+        )
+      raise ValueError(
+          f'Multiple .nemo files found in {model_id}: {nemo_files}'
+      )
+    return nemo_asr.models.asr_model.ASRModel.from_pretrained(model_id)
 
   def get_speech2text_metadata(self, export_config):
     return self.build_speech2text_metadata(
@@ -165,6 +189,9 @@ class ParakeetTDT(asr_model.AsrModel):
 
   def get_processor(self) -> asr_model.AsrProcessor:
     return self._processor
+
+  def get_sample_input_duration(self, input_sec: float) -> float:
+    return input_sec - 0.01  # Parakeet processor adds extra 10ms.
 
   def get_encoder_sample_input(
       self, processed_audio: dict[str, torch.Tensor]

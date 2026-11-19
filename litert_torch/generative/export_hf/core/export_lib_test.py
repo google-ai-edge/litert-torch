@@ -163,6 +163,39 @@ class ExportLibTest(parameterized.TestCase):
 
     self.assertEqual(result_config["pre_tokenizer"]["type"], "Metaspace")
 
+  def test_maybe_patch_tokenizer_skips_metaspace_with_literal_maltese_chars(
+      self,
+  ):
+    tokenizer_path = os.path.join(self.test_dir, "tokenizer.json")
+
+    # Genuine multilingual SentencePiece/Metaspace BPE (e.g. Parakeet-TDT-v3)
+    # whose vocab predominantly uses '▁' but also includes Maltese 'Ġ' and 'Ċ'.
+    config = {
+        "model": {
+            "type": "BPE",
+            "vocab": {
+                "▁what": 1,
+                "▁paintings": 2,
+                "▁were": 3,
+                "Ġ": 4,
+                "Ċ": 5,
+            },
+        },
+        "pre_tokenizer": {"type": "Metaspace", "replacement": "▁"},
+        "decoder": {"type": "Metaspace", "replacement": "▁"},
+    }
+
+    with open(tokenizer_path, "w") as f:
+      json.dump(config, f)
+
+    export_lib._maybe_patch_tokenizer(tokenizer_path)
+
+    with open(tokenizer_path, "r") as f:
+      result_config = json.load(f)
+
+    self.assertEqual(result_config["pre_tokenizer"]["type"], "Metaspace")
+    self.assertEqual(result_config["decoder"]["type"], "Metaspace")
+
   def test_asr_export_config_rules(self):
     config = export_lib.exportable_module_config.ExportableModuleConfig(
         model="dummy_asr_model",

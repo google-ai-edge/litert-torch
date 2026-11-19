@@ -17,11 +17,9 @@
 
 import contextlib
 from litert_torch.generative.export_hf.core.speech import asr_model
-from litert_torch.generative.export_hf.model_ext import patches as patches_lib
 import transformers
 
 
-@patches_lib.register_patch(["parakeet_ctc", "parakeet_tdt"])
 @contextlib.contextmanager
 def parakeet_litert_patch():
   print("Parakeet ASR patch applied.")

@@ -1823,9 +1823,17 @@ def _maybe_patch_tokenizer(tokenizer_path: str) -> None:
     return
 
   vocab = model.get('vocab') or {}
-  has_bpe_chars = isinstance(vocab, dict) and any(
-      'Ġ' in k or 'Ċ' in k for k in vocab.keys()
-  )
+  if not isinstance(vocab, dict):
+    return
+  # Compare ByteLevel marker frequency against Metaspace replacement frequency.
+  # Genuine multilingual SentencePiece/Metaspace BPE tokenizers (e.g.
+  # Parakeet-TDT-0.6B-v3) can include literal Maltese letters 'Ġ' / 'Ċ'
+  # alongside thousands of '▁' metaspace tokens, whereas misconfigured
+  # ByteLevel-BPE tokenizers predominantly use 'Ġ' / 'Ċ' as whitespace markers.
+  replacement = pre_tokenizer.get('replacement') or '▁'
+  bpe_char_count = sum(1 for k in vocab if 'Ġ' in k or 'Ċ' in k)
+  metaspace_count = sum(1 for k in vocab if replacement in k)
+  has_bpe_chars = bpe_char_count > 0 and bpe_char_count > metaspace_count
 
   if has_bpe_chars:
     print(

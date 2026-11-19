@@ -25,8 +25,7 @@ from litert_torch.generative.export_hf.core.speech import exportables as speech_
 from litert_torch.generative.export_hf.model_ext import extension as extension_lib
 from litert_torch.generative.export_hf.model_ext.parakeet import parakeet_ctc as parakeet_ctc_lib
 from litert_torch.generative.export_hf.model_ext.parakeet import parakeet_tdt as parakeet_tdt_lib
-# Registers parakeet patches.
-from litert_torch.generative.export_hf.model_ext.parakeet import patch as _
+from litert_torch.generative.export_hf.model_ext.parakeet import patch as parakeet_patch
 
 
 @extension_lib.register_model_extension(override=False)
@@ -34,6 +33,10 @@ class ParakeetCtcExtension(extension_lib.ModelExtension):
   """Built-in extension for encoder-only Parakeet CTC ASR models."""
 
   model_types = ('parakeet_ctc',)
+
+  def patch_context(self):
+    """See base class."""
+    return parakeet_patch.parakeet_litert_patch()
 
   def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
     """See base class."""
@@ -61,6 +64,10 @@ class ParakeetTdtExtension(extension_lib.ModelExtension):
   """Built-in extension for Parakeet Token-and-Duration Transducer (TDT) ASR."""
 
   model_types = ('parakeet_tdt',)
+
+  def patch_context(self):
+    """See base class."""
+    return parakeet_patch.parakeet_litert_patch()
 
   def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
     """See base class."""

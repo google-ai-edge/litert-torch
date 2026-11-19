@@ -40,13 +40,11 @@ class LiteRTExportableModuleForAsrEncode(
       self, model_config, **kwargs
   ) -> dict[str, tuple[Any, dict[str, torch.export.Dim]]]:
     """Returns the sample inputs for the ASR encoder."""
+    del model_config, kwargs
     processor = self.asr_model.get_processor()
     sr = processor.get_sampling_rate()
     input_sec = getattr(self.export_config, "input_sec", 1.0)
-    if model_config.model_type.startswith("parakeet"):
-      duration = input_sec - 0.01  # Parakeet processor adds extra 10ms.
-    else:
-      duration = input_sec
+    duration = self.asr_model.get_sample_input_duration(input_sec)
     dummy_audio = np.zeros(int(duration * sr), dtype=np.float32)
     processed = processor.process(dummy_audio)
     encoder_inputs = self.asr_model.get_encoder_sample_input(processed)
