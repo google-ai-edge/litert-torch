@@ -184,6 +184,38 @@ class TestOptimizeLayoutTransposesPass(googletest.TestCase):
         model, exported_program.module(), forward_args()
     )
 
+  def _conv_then(self, func):
+
+    class ConvThen(torch.nn.Module):
+
+      def __init__(self):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(3, 4, 1)
+
+      def forward(self, x):
+        return func(self.conv(x))
+
+    return ConvThen().eval()
+
+  def test_repeat_each_dim(self):
+    """repeat after a conv repeats the dims given in NCHW order."""
+    for repeats in [(1, 2, 1, 1), (1, 1, 2, 1), (1, 1, 1, 3), (2, 3, 1, 2)]:
+      with self.subTest(repeats=repeats):
+        model = self._conv_then(lambda x, r=repeats: x.repeat(*r))
+        forward_args = lambda: (torch.rand(1, 3, 9, 11),)
+        exported_program = export_with_pass(model, forward_args())
+        self.assert_outputs_allclose(
+            model, exported_program.module(), forward_args()
+        )
+
+  def test_tile_channels(self):
+    model = self._conv_then(lambda x: x.tile((1, 2, 1, 1)))
+    forward_args = lambda: (torch.rand(1, 3, 9, 11),)
+    exported_program = export_with_pass(model, forward_args())
+    self.assert_outputs_allclose(
+        model, exported_program.module(), forward_args()
+    )
+
 
 if __name__ == "__main__":
   googletest.main()

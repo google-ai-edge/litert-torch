@@ -193,7 +193,6 @@ def _qdq_per_channel_rewriter(node: torch.fx.Node):
 @rewriters.register(aten.where.self)
 @rewriters.register(aten.clone.default)
 @rewriters.register(aten.any.default)
-@rewriters.register(aten.repeat.default)
 @rewriters.register(aten.alias.default)
 @rewriters.register(aten._pdist_forward.default)
 @rewriters.register(aten._cdist_forward.default)
@@ -432,6 +431,15 @@ def _aten_native_group_norm(node):
     return (output, None, None)
 
   node.target = native_group_norm
+
+
+@rewriters.register(aten.repeat.default)
+def _aten_repeat(node):
+  # The repeats are given per NCHW dim. A 4-D output requires exactly four
+  # repeats on a 4-D input, so they map one to one onto the NHWC dims.
+  x, repeats = node.args[:2]
+  n, c, h, w = repeats
+  node.args = (x, [n, h, w, c]) + tuple(node.args[2:])
 
 
 @rewriters.register(aten.index)
