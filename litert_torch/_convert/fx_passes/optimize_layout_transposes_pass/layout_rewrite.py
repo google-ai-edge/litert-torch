@@ -318,6 +318,11 @@ def dim_attr_rewriter(node: torch.fx.Node):
 
   for spec in op._schema.arguments[len(node.args) :]:
     if spec.name not in node.kwargs:
+      # An omitted dim argument takes its schema default, which refers to an
+      # NCHW dim too (e.g. dim=-1 of aten.sort and aten.topk is W), so it must
+      # be set explicitly with the NHWC dim.
+      if spec.name.startswith("dim") and spec.has_default_value():
+        new_kwargs[spec.name] = dims_nchw_to_nhwc(spec.default_value)
       continue
 
     if spec.name.startswith("dim"):
