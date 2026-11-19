@@ -206,8 +206,9 @@ class QwenOmni:
       generate_audio: bool,
   ) -> str:
     """Exports Thinker LLM prefill (core) and decode (`llm.py`) to `.tflite`."""
-    llm.ensure_mrope_section(thinker.model.config)
-    thinker.model.set_attn_implementation("lrt_transposed_attention")
+    text_model = llm.thinker_text_model(thinker)
+    llm.ensure_mrope_section(text_model.config)
+    text_model.set_attn_implementation("lrt_transposed_attention")
     cache_lengths = export_config.cache_lengths or [export_config.cache_length]
     prefill_lengths = export_config.prefill_lengths or [128]
     out_dir = os.path.join(base_dir, "model")
@@ -225,7 +226,7 @@ class QwenOmni:
       )
       prefill_mod = (
           ext_emb.LiteRTExportableModuleForDecoderOnlyLMPrefillExternalEmbedder(
-              thinker.model, iter_config
+              text_model, iter_config
           )
       )
       decode_mod = llm.QwenOmniThinkerDecodeModule(
@@ -233,7 +234,7 @@ class QwenOmni:
       )
       for module in (prefill_mod, decode_mod):
         for sig_name, (inputs, _) in module.get_sample_inputs(
-            thinker.model.config
+            text_model.config
         ).items():
           if len(cache_lengths) > 1:
             sig_name = f"{sig_name}_cache_{cache_len}"
@@ -388,20 +389,21 @@ class QwenOmni:
 
     hf_model = self._load_hf_model(export_config, generate_audio)
     thinker = hf_model.thinker if hasattr(hf_model, "thinker") else hf_model
+    towers = llm.thinker_towers(thinker)
     sub_models: dict[str, str] = {}
 
     if export_vision:
       image_size = self._vision_image_size(export_config)
       sub_models["vision_encoder"] = _export_tflite(
           vision_encoder.QwenOmniVisionEncoderWrapper(
-              thinker.visual, image_size=image_size
+              towers.visual, image_size=image_size
           ).eval(),
           {"pixel_values": torch.zeros((1, 3, image_size, image_size))},
           os.path.join(output_dir, "vision_encoder"),
           export_config.vision_encoder_quantization_recipe,
       )
-    if hasattr(thinker, "visual"):
-      del thinker.visual
+    if hasattr(towers, "visual"):
+      del towers.visual
     gc.collect()
 
     if export_audio:
@@ -409,7 +411,7 @@ class QwenOmni:
       chunk_frames = self._audio_chunk_frames(export_config)
       sub_models["audio_encoder"] = _export_tflite(
           audio_encoder.QwenOmniAudioEncoderWrapper(
-              thinker.audio_tower, chunk_frames=chunk_frames
+              towers.audio_tower, chunk_frames=chunk_frames
           ).eval(),
           {
               "mel_features": torch.zeros(
@@ -420,8 +422,9 @@ class QwenOmni:
           os.path.join(output_dir, "audio_encoder"),
           export_config.audio_encoder_quantization_recipe,
       )
-    if hasattr(thinker, "audio_tower"):
-      del thinker.audio_tower
+    if hasattr(towers, "audio_tower"):
+      del towers.audio_tower
+    del towers
     gc.collect()
 
     sub_models["text_embedder"] = _export_tflite(

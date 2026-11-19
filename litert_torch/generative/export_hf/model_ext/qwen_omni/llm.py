@@ -32,6 +32,24 @@ if TYPE_CHECKING:
   from transformers.models.qwen2_5_omni import modeling_qwen2_5_omni as hf_qwen25  # pylint: disable=g-import-not-at-top
 
 
+def thinker_text_model(thinker: Any) -> Any:
+  """Returns the Thinker text model (`Qwen2_5OmniThinkerTextModel`).
+
+  Since transformers 5.21, `thinker.model` is `Qwen2_5OmniThinkerModel`, which
+  holds the text model as `language_model` next to `visual` and `audio_tower`.
+  Before that, `thinker.model` was the text model itself.
+
+  Args:
+    thinker: HF `Qwen2_5OmniThinkerForConditionalGeneration`.
+  """
+  return getattr(thinker.model, "language_model", thinker.model)
+
+
+def thinker_towers(thinker: Any) -> Any:
+  """Returns the module holding the Thinker's `visual` and `audio_tower`."""
+  return thinker.model if hasattr(thinker.model, "audio_tower") else thinker
+
+
 def ensure_mrope_section(cfg: Any) -> None:
   """Populates `cfg.rope_parameters['mrope_section']` when absent.
 
@@ -78,7 +96,7 @@ class QwenOmniThinkerDecodeModule(
       *,
       include_hidden_states: bool = True,
   ):
-    super().__init__(thinker.model, export_config)
+    super().__init__(thinker_text_model(thinker), export_config)
     self.lm_head = thinker.lm_head
     self._include_hidden_states = include_hidden_states
 

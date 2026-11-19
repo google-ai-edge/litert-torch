@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -113,14 +114,28 @@ class QwenOmniVisionEncoderWrapper(nn.Module):
         "_reverse_indices", torch.argsort(window_index), persistent=False
     )
     with torch.no_grad():
-      pos_dev = visual.rotary_pos_emb.inv_freq.device
-      rotary_pos_emb = (
-          visual.rotary_pos_emb(position_ids.to(pos_dev))
-          .reshape(self.num_merged_tokens, self.spatial_merge_unit, -1)[
-              window_index.to(pos_dev), :, :
-          ]
-          .reshape(grid_h * grid_w, -1)
+      rotary = visual.rotary_pos_emb
+      pos_dev = rotary.inv_freq.device
+      position_ids = position_ids.to(pos_dev)
+      window_index_dev = window_index.to(pos_dev)
+
+      def _window_order(freqs: torch.Tensor) -> torch.Tensor:
+        return freqs.reshape(
+            self.num_merged_tokens, self.spatial_merge_unit, -1
+        )[window_index_dev, :, :].reshape(grid_h * grid_w, -1)
+
+      # Since transformers 5.17, the vision rotary embedding takes
+      # `(x, position_ids)` and returns the `(cos, sin)` the blocks expect;
+      # before, it took `position_ids` and returned raw frequencies.
+      self._rotary_cos_sin = (
+          len(inspect.signature(rotary.forward).parameters) == 2
       )
+      if self._rotary_cos_sin:
+        rotary_pos_emb = torch.stack(
+            [_window_order(t) for t in rotary(rotary.inv_freq, position_ids)]
+        )
+      else:
+        rotary_pos_emb = _window_order(rotary(position_ids))
     self.register_buffer("_rotary_pos_emb", rotary_pos_emb, persistent=False)
 
   def compute_patches(self, pixel_values: torch.Tensor) -> torch.Tensor:
@@ -179,6 +194,11 @@ class QwenOmniVisionEncoderWrapper(nn.Module):
         self.num_merged_tokens, self.spatial_merge_unit, -1
     )[self._window_index, :, :].reshape(seq_len, -1)
 
+    position_embeddings: Any = (
+        (self._rotary_pos_emb[0], self._rotary_pos_emb[1])
+        if self._rotary_cos_sin
+        else self._rotary_pos_emb
+    )
     for layer_idx, blk in enumerate(self.visual.blocks):
       cu_seqlens = (
           self._cu_seqlens
@@ -188,7 +208,7 @@ class QwenOmniVisionEncoderWrapper(nn.Module):
       hidden = blk(
           hidden,
           cu_seqlens=cu_seqlens,
-          position_embeddings=self._rotary_pos_emb,
+          position_embeddings=position_embeddings,
       )
 
     return self.visual.merger(hidden)[self._reverse_indices, :].unsqueeze(0)

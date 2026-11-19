@@ -1148,11 +1148,27 @@ class Qwen3TTSTokenizerV2Encoder(MimiModel):
     super().__init__(config)
     self.config = config
 
-    self.upsample: Optional[nn.ModuleList] = None
-    self.decoder_transformer: Optional[nn.Module] = None
+    for name in ("upsample", "decoder_transformer"):
+      if not isinstance(getattr(MimiModel, name, None), property):
+        setattr(self, name, None)
     self.decoder: Optional[nn.ModuleList] = None
 
     self.post_init()
+
+
+# Apply MimiModel's checkpoint renamings, which are looked up by class name.
+try:
+  from transformers import conversion_mapping  # pylint: disable=g-import-not-at-top
+
+  _mimi_renamings = conversion_mapping.get_checkpoint_conversion_mapping(
+      "MimiModel"
+  )
+  if _mimi_renamings:
+    conversion_mapping.register_checkpoint_conversion_mapping(
+        "Qwen3TTSTokenizerV2Encoder", _mimi_renamings, overwrite=True
+    )
+except (ImportError, AttributeError):
+  pass
 
 
 @auto_docstring

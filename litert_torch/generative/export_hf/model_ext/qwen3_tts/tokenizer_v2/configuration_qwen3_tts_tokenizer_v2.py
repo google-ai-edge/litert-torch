@@ -148,7 +148,7 @@ class Qwen3TTSTokenizerV2Config(PretrainedConfig):
   """
 
   model_type = "qwen3_tts_tokenizer_12hz"
-  sub_configs: ClassVar[dict[str, Any]] = {
+  sub_configs: ClassVar[dict[str, Any]] = {  # pyrefly: ignore[bad-override]
       "encoder_config": MimiConfig,
       "decoder_config": Qwen3TTSTokenizerV2DecoderConfig,
   }
