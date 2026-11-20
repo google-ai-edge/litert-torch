@@ -81,7 +81,11 @@ def load_pytorch_statedict(full_path: str):
 
   tensors = {}
   for file in files:
-    this_file_tensors = torch.load(file, map_location=torch.device("cpu"))
+    # Checkpoint directories may come from third parties; never unpickle
+    # arbitrary objects from them.
+    this_file_tensors = torch.load(
+        file, map_location=torch.device("cpu"), weights_only=True
+    )
     for k in this_file_tensors:
       assert k not in tensors
     tensors.update(this_file_tensors)

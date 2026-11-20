@@ -912,21 +912,11 @@ class MiniCpmO:
     flow_sd: dict[str, torch.Tensor] = {}
     hift_sd: dict[str, torch.Tensor] = {}
     if os.path.exists(flow_path):
-      try:
-        loaded_flow = torch.load(
-            flow_path, map_location="cpu", weights_only=True
-        )
-      except TypeError:  # pragma: no cover
-        loaded_flow = torch.load(flow_path, map_location="cpu")
+      loaded_flow = torch.load(flow_path, map_location="cpu", weights_only=True)
       if isinstance(loaded_flow, dict):
         flow_sd = loaded_flow
     if os.path.exists(hift_path):
-      try:
-        loaded_hift = torch.load(
-            hift_path, map_location="cpu", weights_only=True
-        )
-      except TypeError:  # pragma: no cover
-        loaded_hift = torch.load(hift_path, map_location="cpu")
+      loaded_hift = torch.load(hift_path, map_location="cpu", weights_only=True)
       if isinstance(loaded_hift, dict):
         hift_sd = loaded_hift
 

@@ -581,4 +581,4 @@ class SelfieSegmentation(nn.Module):
     Args:
       pth_path: The path to the pth file to load the model from.
     """
-    self.load_state_dict(torch.load(pth_path))
+    self.load_state_dict(torch.load(pth_path, weights_only=True))

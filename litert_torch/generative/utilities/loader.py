@@ -136,7 +136,11 @@ def load_pytorch_statedict(full_path: str):
   tensors = {}
   for file in files:
     map_location = "cpu" if not torch.cuda.is_available() else None
-    this_file_tensors = torch.load(file, map_location=map_location)
+    # Checkpoint directories may come from third parties; never unpickle
+    # arbitrary objects from them.
+    this_file_tensors = torch.load(
+        file, map_location=map_location, weights_only=True
+    )
     for k in this_file_tensors:
       assert k not in tensors
     tensors.update(this_file_tensors)
