@@ -302,6 +302,21 @@ def _aten_abs(lctx, input: ir.Value, *, out=None) -> ir.Value:
   return stablehlo.abs(input)
 
 
+# https://pytorch.org/docs/stable/generated/torch.sigmoid.html
+# https://openxla.org/stablehlo/spec#logistic
+# Lowered natively rather than through the JAX bridge, which fails on dynamic
+# dimensions (e.g. a SiLU MLP exported with a dynamic sequence length).
+@lower(torch.ops.aten.sigmoid)
+def _aten_sigmoid(lctx, x: ir.Value, *, out=None) -> ir.Value:
+  if isinstance(x.type.element_type, ir.IntegerType):
+    # Like torch, promote integer inputs to the result's float dtype.
+    result_type = utils.node_meta_to_ir_types(lctx.node)[0]
+    x = stablehlo.convert(
+        ir.RankedTensorType.get(x.type.shape, result_type.element_type), x
+    )
+  return stablehlo.logistic(x)
+
+
 # Schema:
 #   - aten::cat(Tensor[] tensors, int dim=0) -> Tensor
 # Torch Reference:
