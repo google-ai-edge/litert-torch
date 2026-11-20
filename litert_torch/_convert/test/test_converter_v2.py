@@ -24,6 +24,9 @@ from litert_torch import converter_v2
 from litert_torch._convert import converter_v2 as converter_v2_lib
 from litert_torch._convert.fx_passes import lower_torchao_pass
 from litert_torch.backend import export as export_lib
+from litert_torch.backend import export_utils
+from litert_torch.generative.layers import moe
+from litert_converter.mlir.dialects import stablehlo
 import numpy as np
 import torch
 from torch import nn
@@ -129,6 +132,17 @@ class TestConverterV2(googletest.TestCase):
     self.assertTrue(os.path.exists(mlirbc_path))
     self.assertTrue(os.path.exists(params_path))
     self.assertTrue(os.path.exists(meta_path))
+
+    # Verify .mlirbc is a versioned VHLO portable artifact rather than raw
+    # unversioned StableHLO bytecode.
+    with open(mlirbc_path, "rb") as f:
+      mlirbc_bytes = f.read()
+    self.assertTrue(mlirbc_bytes.startswith(b"ML\xefR"))
+    self.assertIn(b"StableHLO_v", mlirbc_bytes[:64])
+    deserialized = stablehlo.deserialize_portable_artifact(
+        export_utils.create_ir_context(), mlirbc_bytes
+    )
+    self.assertIn("stablehlo.dot_general", str(deserialized))
 
     with open(meta_path, "r") as f:
       meta = json.load(f)
@@ -752,6 +766,88 @@ class TestConverterV2(googletest.TestCase):
         0,
         expected_params_bytes=16 * 32,
         rows=8,
+    )
+
+  def test_mixed_dialect_tfl_custom_conversion(self):
+    """Modules emitting raw tfl.custom ops serialize and convert via VHLO."""
+
+    class MoeModule(nn.Module):
+
+      def forward(
+          self,
+          src,
+          top_weights,
+          top_indices,
+          ff_gate,
+          ff1,
+          linear,
+          per_expert_scale,
+      ):
+        return moe.moe_experts(
+            src,
+            top_weights,
+            top_indices,
+            ff_gate,
+            ff1,
+            linear,
+            per_expert_scale,
+            num_experts=2,
+            num_active_experts=2,
+            model_dim=4,
+            hidden_dim=6,
+        )
+
+    sample_inputs = (
+        torch.randn(1, 2, 4),
+        torch.softmax(torch.randn(1, 2, 2), dim=-1),
+        torch.tensor([[[0, 1], [1, 0]]], dtype=torch.int32),
+        moe.flatten_expert_weight(torch.randn(2, 6, 4)),
+        moe.flatten_expert_weight(torch.randn(2, 6, 4)),
+        moe.flatten_expert_weight(torch.randn(2, 4, 6)),
+        torch.ones(1, 1, 1, 2),
+    )
+    export_dir = self.create_tempdir().full_path
+
+    edge_model = litert_torch.convert(
+        MoeModule().eval(),
+        sample_inputs,
+        use_v2=True,
+        export_dir=export_dir,
+    )
+    self.assertIsNotNone(edge_model)
+
+    mlirbc_path = os.path.join(export_dir, "serving_default.mlirbc")
+    with open(mlirbc_path, "rb") as f:
+      mlirbc_bytes = f.read()
+    self.assertTrue(mlirbc_bytes.startswith(b"ML\xefR"))
+    self.assertIn(b"StableHLO_v", mlirbc_bytes[:64])
+    deserialized = stablehlo.deserialize_portable_artifact(
+        export_utils.create_ir_context(), mlirbc_bytes
+    )
+    self.assertIn("tfl.custom", str(deserialized))
+
+  def test_serialization_failure_does_not_leave_empty_mlirbc(self):
+    """A failed serialization leaves no 0-byte .mlirbc file in export_dir."""
+    m = SimpleLinearModel().eval()
+    sample_input = (torch.randn(1, 4),)
+    export_dir = self.create_tempdir().full_path
+
+    with mock.patch.object(
+        converter_v2_lib,
+        "_serialize_portable_artifact",
+        autospec=True,
+        side_effect=ValueError("serialization failed"),
+    ):
+      with self.assertRaisesRegex(ValueError, "serialization failed"):
+        litert_torch.convert(
+            m, sample_input, use_v2=True, export_dir=export_dir
+        )
+
+    self.assertFalse(
+        os.path.exists(os.path.join(export_dir, "serving_default.mlirbc"))
+    )
+    self.assertFalse(
+        converter_v2_lib._has_any_intermediates(export_dir, [])  # pylint: disable=protected-access
     )
 
 

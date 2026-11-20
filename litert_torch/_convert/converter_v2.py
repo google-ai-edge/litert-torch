@@ -46,6 +46,7 @@ from litert_torch._convert import signature as signature_module
 from litert_converter.mlir import ir
 from litert_converter.mlir import passmanager
 from litert_converter.mlir.dialects import func
+from litert_converter.mlir.dialects import stablehlo
 import numpy as np
 import torch
 
@@ -733,6 +734,40 @@ def _retype_subbyte_quant_params(lowered: backend.export.MlirLowered) -> None:
     lowered.module.operation.verify()
 
 
+def _serialize_portable_artifact(module: ir.Module) -> bytes:
+  """Serializes a StableHLO module as a versioned VHLO portable artifact.
+
+  Raw MLIR bytecode (`Operation.write_bytecode`) encodes unversioned StableHLO
+  dialect attributes and breaks whenever the writer (`litert-converter`) and
+  reader (`tf-nightly` `LoadSlimModel`) are built from different StableHLO
+  commits. Portable VHLO artifacts are versioned and upgraded on load by
+  `createStablehloDeserializePipeline`.
+
+  `allow_other_dialects=True` is enabled so modules containing mixed-dialect ops
+  such as `tfl.custom` (e.g., `moe.moe_experts`, `gdn_tril_inv`) still
+  serialize cleanly; `VhloLegalizeToStablehloPass` reconciles any inserted
+  `builtin.unrealized_conversion_cast` ops during deserialization.
+
+  Note: `stablehlo.serialize_portable_artifact` converts `module` to VHLO in
+  place.
+
+  Args:
+    module: The StableHLO MLIR module to serialize.
+
+  Returns:
+    The serialized VHLO portable artifact bytes.
+  """
+  if stablehlo.get_api_version() < 9:
+    target_version = stablehlo.get_minimum_version()
+    return stablehlo.serialize_portable_artifact(module, target_version)
+  target_version = stablehlo.get_version_from_compatibility_requirement(
+      stablehlo.StablehloCompatibilityRequirement.WEEK_12
+  )
+  return stablehlo.serialize_portable_artifact(
+      module, target_version, allow_other_dialects=True
+  )
+
+
 def export_to_dir(
     signatures: list[signature_module.Signature],
     export_dir: str,
@@ -775,12 +810,8 @@ def export_to_dir(
       )
       _retype_subbyte_quant_params(lowered)
 
-    # Save MLIR bytecode
-    mlirbc_path = os.path.join(export_dir, f"{sig.name}.mlirbc")
-    with open(mlirbc_path, "wb") as f:
-      lowered.module.operation.write_bytecode(file=f)
-
-    # Register parameters and metadata
+    # Register parameters and metadata before portable serialization mutates
+    # `lowered.module` in place from StableHLO to VHLO.
     output_names = litert_converter._get_output_names(exported_program, lowered)
     registry.register_signature(
         sig.name,
@@ -789,6 +820,13 @@ def export_to_dir(
         output_names=output_names,
         module=sig.module,
     )
+
+    # Serialize before opening the output file so a serialization failure does
+    # not leave behind a 0-byte .mlirbc file in `export_dir`.
+    mlirbc_bytes = _serialize_portable_artifact(lowered.module)
+    mlirbc_path = os.path.join(export_dir, f"{sig.name}.mlirbc")
+    with open(mlirbc_path, "wb") as f:
+      f.write(mlirbc_bytes)
     del lowered
     del ir_context
     del exported_program
