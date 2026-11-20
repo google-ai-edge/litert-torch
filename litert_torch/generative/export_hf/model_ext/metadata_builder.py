@@ -38,6 +38,8 @@ from litert_torch.generative.export_hf.model_ext import builtin_extensions as _
 from litert_torch.generative.export_hf.model_ext import extension as extension_lib
 import transformers
 
+_MISSING = object()
+
 
 def get_metadata_builder(
     model_config: transformers.PretrainedConfig,
@@ -440,23 +442,31 @@ try:
       llm_metadata.max_history_size = max_cache_length
 
     if sliding_window_size is not None and enable_ring_buffer:
-      local_mask_type = executor_metadata_pb2.ATTENTION_MASK_TYPE_CAUSAL
-      if (
+      hf_bidir = getattr(text_config, 'use_bidirectional_attention', _MISSING)
+      has_vis = (
           getattr(source_model_artifacts.model_config, 'vision_config', None)
           is not None
-      ):
-        local_mask_type = (
-            executor_metadata_pb2.ATTENTION_MASK_TYPE_VISION_BIDIRECTIONAL
-        )
-      llm_metadata.attention_mask_settings.attention_mask_type = (
-          executor_metadata_pb2.ATTENTION_MASK_TYPE_CAUSAL
       )
-      llm_metadata.attention_mask_settings.local_attention_mask_type = (
-          local_mask_type
-      )
-      llm_metadata.attention_mask_settings.sliding_window_size = (
-          sliding_window_size
-      )
+      _bidir_map = {
+          _MISSING: (
+              executor_metadata_pb2.ATTENTION_MASK_TYPE_VISION_BIDIRECTIONAL
+              if has_vis
+              else executor_metadata_pb2.ATTENTION_MASK_TYPE_CAUSAL
+          ),
+          None: executor_metadata_pb2.ATTENTION_MASK_TYPE_CAUSAL,
+          False: executor_metadata_pb2.ATTENTION_MASK_TYPE_CAUSAL,
+          'vision': (
+              executor_metadata_pb2.ATTENTION_MASK_TYPE_VISION_BIDIRECTIONAL
+          ),
+          'all': executor_metadata_pb2.ATTENTION_MASK_TYPE_BIDIRECTIONAL,
+          True: executor_metadata_pb2.ATTENTION_MASK_TYPE_BIDIRECTIONAL,
+      }
+      if type(hf_bidir) is int or hf_bidir not in _bidir_map:
+        raise ValueError(f'Unsupported use_bidirectional_attention: {hf_bidir}')
+      s = llm_metadata.attention_mask_settings
+      s.attention_mask_type = executor_metadata_pb2.ATTENTION_MASK_TYPE_CAUSAL
+      s.local_attention_mask_type = _bidir_map[hf_bidir]
+      s.sliding_window_size = sliding_window_size
 
     # A ringbuffer only exists when sliding_attention layers get local caches,
     # i.e. exactly when TYPE_LOCAL_*_CACHE buffers are emitted above. The
