@@ -595,29 +595,26 @@ def _annotate_gru_io_only(
     # inside each GRU partition, we should be able to annotate each linear
     # subgraph
     input_qspec_map: Dict[Node, QuantizationSpecBase] = {}
-    input_act = input_nodes[0]
-    input_act_user = next(iter(input_act.users.keys()))
-    assert isinstance(input_act, Node)
-    assert isinstance(input_act_user, Node)
-    input_act_user.meta["quantization_annotation"] = QuantizationAnnotation(
-        input_qspec_map={
-            input_act: get_input_act_qspec(quantization_config),
-        },
-        _annotated=True,
-    )
+    # The input and the initial hidden state feed the same GRU node: merge
+    # their annotations rather than replace one with the other. The initial
+    # hidden state is not an input of the partition when it is omitted
+    # (`gru(x)`): the GRU then starts from zeros made inside the partition.
+    # Partition inputs are in graph order: the input, then the initial hidden
+    # state when it is passed.
+    for input_act in input_nodes[:2]:
+      assert isinstance(input_act, Node)
+      input_act_user = next(
+          user for user in input_act.users if user in gru_partition.nodes
+      )
+      annotate_input_qspec_map(
+          input_act_user,
+          input_act,
+          get_input_act_qspec(quantization_config),
+      )
 
-    hidden_state = input_nodes[1]
-    hidden_state_user = next(iter(hidden_state.users.keys()))
-    assert isinstance(hidden_state, Node)
-    assert isinstance(hidden_state_user, Node)
-    hidden_state_user.meta["quantization_annotation"] = QuantizationAnnotation(
-        input_qspec_map={
-            hidden_state: get_input_act_qspec(quantization_config),
-        },
-        _annotated=True,
-    )
-
-    assert len(output_nodes) == 2, "expecting GRU to have two outputs"
+    # An unused output (`out, _ = gru(x, h0)`) is not an output of the
+    # partition.
+    assert len(output_nodes) in (1, 2), "expecting GRU to have 1 or 2 outputs"
     for output in output_nodes:
       output.meta["quantization_annotation"] = QuantizationAnnotation(
           output_qspec=get_output_act_qspec(quantization_config),
