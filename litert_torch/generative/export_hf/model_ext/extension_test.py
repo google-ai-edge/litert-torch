@@ -1717,6 +1717,45 @@ class BuiltinParakeetTdtExtensionContractTest(
     self.assertIs(attn_funs.get('sdpa'), orig_sdpa)
 
 
+class BuiltinBonsaiFlux2ExtensionContractTest(
+    ext_testing.ModelExtensionTestMixin, googletest.TestCase
+):
+  extension_cls = builtin_extensions.BonsaiFlux2Extension
+
+  def test_infer_model_type_for_bonsai_and_default_t2i(self):
+    self.assertEqual(
+        exportables.infer_model_type(
+            model_path='prism-ml/bonsai-image-ternary-4B-unpacked',
+            task='text_to_image',
+            config_dict={'_class_name': 'Flux2KleinPipeline'},
+        ),
+        'bonsai_flux2',
+    )
+    self.assertEqual(
+        exportables.infer_model_type(
+            model_path='/tmp/custom_t2i_checkpoint',
+            task='text_to_image',
+            config_dict={'_class_name': 'BonsaiFlux2Pipeline'},
+        ),
+        'bonsai_flux2',
+    )
+    self.assertIsNone(
+        exportables.infer_model_type(
+            model_path='/tmp/unlabeled_checkpoint',
+            task='text_to_image',
+            config_dict={'istftnet': {}, 'n_token': 178},
+        )
+    )
+    self.assertEqual(
+        exportables.infer_model_type(
+            model_path='black-forest-labs/FLUX.2-klein-4B',
+            task='text_to_image',
+            config_dict={'_class_name': 'Flux2KleinPipeline'},
+        ),
+        'Flux2KleinPipeline',
+    )
+
+
 class BuiltinGemma3nExtensionContractTest(
     ext_testing.ModelExtensionTestMixin, googletest.TestCase
 ):

@@ -562,9 +562,6 @@ def load_model(
       elif os.path.exists(config_path):
         with open(config_path, 'r') as f:
           raw_cfg = json.load(f)
-      # prism-ml/bonsai-image-ternary-4B-unpacked also sets
-      # "_class_name": "Flux2KleinPipeline" in its model_index.json, so check
-      # for "bonsai" in model_path before reading model_index.json.
       inferred = model_ext_exportables.infer_model_type(
           model_path=model_path,
           task=task,
@@ -573,14 +570,12 @@ def load_model(
       )
       if inferred:
         model_type = inferred
-      elif 'bonsai' in model_path.lower():
-        model_type = 'bonsai_flux2'
       elif raw_cfg and '_class_name' in raw_cfg:
-        model_type = raw_cfg.get('_class_name', 'bonsai_flux2')
+        model_type = raw_cfg.get('_class_name', '')
       elif raw_cfg and 'model_type' in raw_cfg:
-        model_type = raw_cfg.get('model_type', 'bonsai_flux2')
+        model_type = raw_cfg.get('model_type', '')
       else:
-        model_type = 'bonsai_flux2'
+        model_type = ''
     if getattr(export_config, 'model_extension', None) is not None:
       model_cls = model_ext_exportables.get_image_gen_model_cls(
           model_type, export_config

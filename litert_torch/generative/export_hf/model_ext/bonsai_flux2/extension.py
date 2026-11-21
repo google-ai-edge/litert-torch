@@ -70,11 +70,17 @@ class BonsaiFlux2Extension(extension_lib.ModelExtension):
       config_dict: dict[str, Any] | None = None,
   ) -> bool:
     """See base class."""
-    del config_dict
+    task_name = getattr(task, 'value', task)
+    if task_name != 'text_to_image':
+      return False
     # prism-ml/bonsai-image-ternary-4B-unpacked also sets
     # "_class_name": "Flux2KleinPipeline" in its model_index.json, so check
     # for "bonsai" in model_path before reading model_index.json.
-    task_name = getattr(task, 'value', task)
-    if task_name == 'text_to_image' and 'bonsai' in str(model_path).lower():
+    if 'bonsai' in str(model_path).lower():
+      return True
+    if config_dict and (
+        config_dict.get('_class_name') == 'BonsaiFlux2Pipeline'
+        or config_dict.get('model_type') in cls.model_types
+    ):
       return True
     return False
