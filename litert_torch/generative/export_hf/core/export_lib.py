@@ -619,9 +619,9 @@ def load_model(
       if inferred:
         model_type = inferred
       elif raw_cfg and 'model_type' in raw_cfg:
-        model_type = raw_cfg.get('model_type', 'minicpmo')
+        model_type = raw_cfg.get('model_type', '')
       else:
-        model_type = 'minicpmo'
+        model_type = ''
     if getattr(export_config, 'model_extension', None) is not None:
       model_cls = model_ext_exportables.get_any2any_model_cls(
           model_type, export_config

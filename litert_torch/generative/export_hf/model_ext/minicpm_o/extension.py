@@ -25,6 +25,10 @@ from litert_torch.generative.export_hf.model_ext import extension as extension_l
 from litert_torch.generative.export_hf.model_ext.minicpm_o import minicpm_o as minicpm_o_lib
 
 _MINICPM5_PATTERN = re.compile(r'minicpm5', re.IGNORECASE)
+# Matches MiniCPM-o repo IDs / paths (e.g. `openbmb/MiniCPM-o-4_5`,
+# `minicpm_o`, `minicpmo`) but not other MiniCPM families (`MiniCPM-V`,
+# `MiniCPM3`, `MiniCPM4`, `MiniCPM5`).
+_MINICPM_O_PATTERN = re.compile(r'minicpm[._-]?o(?![a-z])', re.IGNORECASE)
 
 
 @extension_lib.register_model_extension(override=False)
@@ -73,6 +77,19 @@ class MiniCpmOExtension(extension_lib.ModelExtension):
       'MiniCPM-o-4_5',
       'MiniCPMO',
   )
+
+  @classmethod
+  def match_checkpoint(cls, model_path, task=None, config_dict=None) -> bool:
+    """Matches MiniCPM-o checkpoints when `task='any_to_any'`."""
+    task_val = getattr(task, 'value', task)
+    if task_val != extension_lib.ExportTask.ANY_TO_ANY.value:
+      return False
+    if config_dict and config_dict.get('model_type') in cls.model_types:
+      return True
+    if config_dict and config_dict.get('model_type'):
+      # Never override a checkpoint that declares another `model_type`.
+      return False
+    return bool(_MINICPM_O_PATTERN.search(str(model_path or '')))
 
   def get_export_defaults(self, config_dict, task=None, target='cpu_gpu'):
     """See base class."""

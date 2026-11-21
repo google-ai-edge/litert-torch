@@ -1717,6 +1717,61 @@ class BuiltinParakeetTdtExtensionContractTest(
     self.assertIs(attn_funs.get('sdpa'), orig_sdpa)
 
 
+class BuiltinMiniCpmOExtensionContractTest(
+    ext_testing.ModelExtensionTestMixin, googletest.TestCase
+):
+  extension_cls = builtin_extensions.MiniCpmOExtension
+
+  def test_infer_model_type_for_minicpm_o(self):
+    self.assertEqual(
+        exportables.infer_model_type(
+            model_path='openbmb/MiniCPM-o-4_5',
+            task='any_to_any',
+            config_dict=None,
+        ),
+        'minicpmo',
+    )
+    self.assertIsNone(
+        exportables.infer_model_type(
+            model_path='/tmp/unlabeled_checkpoint',
+            task='any_to_any',
+            config_dict={'istftnet': {}, 'n_token': 178},
+        )
+    )
+
+  def test_match_checkpoint_for_minicpm_o(self):
+    match = builtin_extensions.MiniCpmOExtension.match_checkpoint
+    # `model_type` from config.json wins regardless of path.
+    self.assertTrue(
+        match('/tmp/any_dir', 'any_to_any', {'model_type': 'minicpmo'})
+    )
+    # Path heuristic only for unlabeled configs, and only for MiniCPM-o.
+    for path in (
+        'openbmb/MiniCPM-o-4_5',
+        '/data/ckpts/MiniCPM-o-4_5/v1',
+        '/tmp/minicpm_o_4p5',
+        '/tmp/minicpmo',
+    ):
+      self.assertTrue(match(path, 'any_to_any', None), path)
+    for path in (
+        'openbmb/MiniCPM-V-4',
+        'openbmb/MiniCPM3-4B',
+        'openbmb/MiniCPM4-8B',
+        'openbmb/MiniCPM5-1B',
+    ):
+      self.assertFalse(match(path, 'any_to_any', None), path)
+    # Never overrides another declared `model_type`.
+    self.assertFalse(
+        match(
+            '/tmp/minicpm-o-copy',
+            'any_to_any',
+            {'model_type': 'qwen2_5_omni'},
+        )
+    )
+    # Only applies to `any_to_any`.
+    self.assertFalse(match('openbmb/MiniCPM-o-4_5', 'text_generation', None))
+
+
 class BuiltinBonsaiFlux2ExtensionContractTest(
     ext_testing.ModelExtensionTestMixin, googletest.TestCase
 ):
