@@ -366,8 +366,11 @@ def mamba2_mixer_forward(
 ) -> torch.Tensor:
   """Exportable forward of a transformers Mamba2 mixer.
 
-  Bound to `GraniteMoeHybridMambaLayer` and `NemotronHMamba2Mixer` instances,
-  which share these attribute names.
+  Bound to `GraniteMoeHybridMambaLayer`, `NemotronHMamba2Mixer`,
+  `Zamba2MambaMixer` and `FalconH1Mixer` instances, which share these attribute
+  names. `FalconH1Mixer` also scales its input by `ssm_in_multiplier` and the
+  projected states by `mup_vector`, and without `mamba_rms_norm` it gates the
+  output without a norm.
 
   Args:
     self: The Mamba2 mixer module.
@@ -394,7 +397,15 @@ def mamba2_mixer_forward(
     valid = valid_mask.reshape(batch_size, seq_len).to(dtype)
     hidden_states = hidden_states * valid[..., None]
 
+  # `ssm_in_multiplier`, `mup_vector` and `mamba_rms_norm` are attributes of
+  # `FalconH1Mixer` only; `mup_vector` is a buffer that `FalconH1Model` adds.
+  ssm_in_multiplier = getattr(self, "ssm_in_multiplier", None)
+  if ssm_in_multiplier is not None:
+    hidden_states = hidden_states * ssm_in_multiplier
   projected_states = self.in_proj(hidden_states)
+  mup_vector = getattr(self, "mup_vector", None)
+  if mup_vector is not None:
+    projected_states = projected_states * mup_vector
   gate, xbc, dt = projected_states.split(
       [self.intermediate_size, self.conv_dim, self.num_heads], dim=-1
   )
@@ -445,7 +456,10 @@ def mamba2_mixer_forward(
   if layer_cache is not None:
     layer_cache.recurrent_states = ssm_state.to(torch.float32)
 
-  y = self.norm(y, gate)
+  if getattr(self, "mamba_rms_norm", True):
+    y = self.norm(y, gate)
+  else:
+    y = y * F.silu(gate)
   return self.out_proj(y.to(dtype))
 
 
@@ -506,16 +520,19 @@ def patch_mamba2_mixers(model: torch.nn.Module, mixer_cls: type[Any]):
 
   Raises:
     ValueError: If the number of mixers differs from the number of
-      "linear_attention" layers of the config.
+      "linear_attention" and "hybrid" layers of the config.
   """
   config = getattr(model.config, "text_config", model.config)
   layer_types = getattr(config, "layer_types", None) or []
-  num_mamba_layers = sum(t == "linear_attention" for t in layer_types)
+  # A "hybrid" layer (FalconH1, Zamba2) has a Mamba2 mixer next to attention.
+  num_mamba_layers = sum(
+      t in ("linear_attention", "hybrid") for t in layer_types
+  )
   mixers = [m for m in model.modules() if isinstance(m, mixer_cls)]
   if len(mixers) != num_mamba_layers:
     raise ValueError(
         f"Found {len(mixers)} {mixer_cls.__name__} modules for"
-        f" {num_mamba_layers} linear_attention layers."
+        f" {num_mamba_layers} hybrid and linear_attention layers."
     )
   # The valid_mask of the base model call in progress. It is cleared after
   # every call, so no traced tensor outlives the call that made it.

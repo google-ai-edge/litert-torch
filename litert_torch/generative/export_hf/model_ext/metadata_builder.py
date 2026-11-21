@@ -423,6 +423,32 @@ try:
             maximum_sequence_length=local_cache_length,
             minimum_sequence_length=sliding_window_size,
         )
+      elif layer_type == 'hybrid':
+        # Attention and a Mamba2 mixer at one layer index, e.g. FalconH1.
+        _add_state_buffer(
+            llm_metadata,
+            f'kv_cache_k_{i}',
+            executor_metadata_pb2.StateBuffer.TYPE_GLOBAL_KEY_CACHE,
+            sequence_axis=export_config.k_ts_idx,
+            maximum_sequence_length=max_cache_length,
+        )
+        _add_state_buffer(
+            llm_metadata,
+            f'kv_cache_v_{i}',
+            executor_metadata_pb2.StateBuffer.TYPE_GLOBAL_VALUE_CACHE,
+            sequence_axis=export_config.v_ts_idx,
+            maximum_sequence_length=max_cache_length,
+        )
+        _add_state_buffer(
+            llm_metadata,
+            f'kv_cache_c_{i}',
+            executor_metadata_pb2.StateBuffer.TYPE_LINEAR_ATTENTION,
+        )
+        _add_state_buffer(
+            llm_metadata,
+            f'kv_cache_r_{i}',
+            executor_metadata_pb2.StateBuffer.TYPE_LINEAR_ATTENTION,
+        )
       elif layer_type in cache_lib.STATELESS_LAYER_TYPES:
         # Keeps no state, e.g. NemotronH MLP and MoE blocks.
         pass
@@ -432,7 +458,7 @@ try:
     # Because linear attention states are fixed-size and not easily invertible,
     # rolling back is unsupported.
     if any(
-        layer_type == 'linear_attention' or layer_type == 'conv'
+        layer_type in ('linear_attention', 'conv', 'hybrid')
         for layer_type in layer_types
     ):
       llm_metadata.max_history_size = 0

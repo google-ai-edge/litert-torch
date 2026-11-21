@@ -366,6 +366,73 @@ class StateBufferTest(absltest.TestCase):
     ):
       self._build_executor_metadata(config)
 
+  def test_hybrid_layers(self):
+    config = transformers.Zamba2Config(
+        hidden_size=64,
+        num_hidden_layers=3,
+        layers_block_type=["linear_attention", "hybrid", "linear_attention"],
+        num_attention_heads=4,
+        n_mamba_heads=8,
+        mamba_d_state=16,
+    )
+
+    executor_metadata = self._build_executor_metadata(config)
+
+    llm_metadata = executor_metadata.llm_executor_metadata
+    state_buffer_type = (
+        metadata_builder.executor_metadata_pb2.StateBuffer
+    )
+    # A hybrid layer has a KV cache and the Mamba2 states at its index.
+    self.assertEqual(
+        [
+            (buffer.prefill_input_name, buffer.type)
+            for buffer in llm_metadata.state_buffers
+        ],
+        [
+            ("kv_cache_c_0", state_buffer_type.TYPE_LINEAR_ATTENTION),
+            ("kv_cache_r_0", state_buffer_type.TYPE_LINEAR_ATTENTION),
+            ("kv_cache_k_1", state_buffer_type.TYPE_GLOBAL_KEY_CACHE),
+            ("kv_cache_v_1", state_buffer_type.TYPE_GLOBAL_VALUE_CACHE),
+            ("kv_cache_c_1", state_buffer_type.TYPE_LINEAR_ATTENTION),
+            ("kv_cache_r_1", state_buffer_type.TYPE_LINEAR_ATTENTION),
+            ("kv_cache_c_2", state_buffer_type.TYPE_LINEAR_ATTENTION),
+            ("kv_cache_r_2", state_buffer_type.TYPE_LINEAR_ATTENTION),
+        ],
+    )
+    # The default key cache sequence axis, as for a full attention layer.
+    key_buffer = llm_metadata.state_buffers[2]
+    self.assertEqual(key_buffer.sequence_axis, 2)
+    self.assertEqual(key_buffer.maximum_sequence_length, 64)
+    self.assertEqual(llm_metadata.max_history_size, 0)
+
+    # FalconH1: every layer is a hybrid layer.
+    config = transformers.FalconH1Config(
+        hidden_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        mamba_d_ssm=128,
+        mamba_n_heads=8,
+        mamba_d_state=16,
+    )
+    executor_metadata = self._build_executor_metadata(config)
+    self.assertEqual(
+        [
+            buffer.prefill_input_name
+            for buffer in executor_metadata.llm_executor_metadata.state_buffers
+        ],
+        [
+            "kv_cache_k_0",
+            "kv_cache_v_0",
+            "kv_cache_c_0",
+            "kv_cache_r_0",
+            "kv_cache_k_1",
+            "kv_cache_v_1",
+            "kv_cache_c_1",
+            "kv_cache_r_1",
+        ],
+    )
+
 
 if __name__ == "__main__":
   absltest.main()
