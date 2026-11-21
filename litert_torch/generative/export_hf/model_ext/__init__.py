@@ -28,6 +28,10 @@ See `model_ext/extension.py` for full hook documentation and
 `kokoro_tts`, `bonsai_flux2`, `minicpm_o`) for built-in implementations.
 """
 
+# Imported first: it replaces `use_kernel_forward_from_hub`, which transformers
+# modeling modules apply to their RMSNorm classes at import time, and the
+# built-in extensions below import such modules.
+from litert_torch.generative.export_hf.core import patches as _
 from litert_torch.generative.export_hf.model_ext import extension
 from litert_torch.generative.layers import moe
 from transformers.utils import auto_docstring

@@ -1217,6 +1217,16 @@ class ExportPlanAndPresetResolutionTest(parameterized.TestCase):
 
     self.assertNotIn("not documented", buf.getvalue())
 
+  def test_rms_norm_patch_applies_to_modeling_imported_by_model_ext(self):
+    from litert_torch.generative.export_hf.core import patches  # pylint: disable=g-import-not-at-top
+    from transformers.models.lfm2 import modeling_lfm2  # pylint: disable=g-import-not-at-top
+    from transformers.models.qwen3 import modeling_qwen3  # pylint: disable=g-import-not-at-top
+
+    # Importing `export` imports model_ext, whose built-in extensions import
+    # these modeling modules; core.patches has to be in effect by then.
+    self.assertIs(modeling_lfm2.Lfm2RMSNorm, patches.RMSNorm)
+    self.assertIs(modeling_qwen3.Qwen3RMSNorm, patches.RMSNorm)
+
 
 if __name__ == "__main__":
   absltest.main()
