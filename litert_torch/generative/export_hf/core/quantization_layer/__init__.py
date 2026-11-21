@@ -14,7 +14,8 @@
 # ==============================================================================
 """Quantization layer wrappers and checkpoint helpers for HuggingFace export."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+import contextlib
 from typing import Any
 
 from litert_torch.generative.export_hf.core.quantization_layer import gemma_quant
@@ -110,6 +111,38 @@ def prepare_quantized_model_for_export(
         f"Quantization method {quant_method!r} is not supported yet."
     )
   return prepare_fn(model, cfg, weights_loader)
+
+
+@contextlib.contextmanager
+def prepare_quantized_export_modules(
+    weights_loader: WeightsLoader | None, *roots: torch.nn.Module
+) -> Iterator[None]:
+  """Applies pre-quantized checkpoint layers to the modules to be exported.
+
+  Model extensions can reauthor and fuse the source model's layers after
+  `prepare_quantized_model_for_export`. If `weights_loader` defines
+  `prepare_export_modules(*roots, weights_loader=...)`, this calls it before
+  tracing `roots`. If it returns a context manager, the context manager is
+  entered so any mutations to shared source modules are restored on exit.
+
+  Args:
+    weights_loader: The loader returned by `prepare_quantized_model_for_export`,
+      or any other loader (then a no-op).
+    *roots: The modules to be exported.
+
+  Yields:
+    None.
+  """
+  prepare = getattr(weights_loader, "prepare_export_modules", None)
+  if not callable(prepare):
+    yield
+    return
+  cm = prepare(*roots)
+  if cm is not None and hasattr(cm, "__enter__"):
+    with cm:
+      yield
+  else:
+    yield
 
 
 def get_quant_param_suffixes(

@@ -14,8 +14,9 @@
 # ==============================================================================
 """Streaming weights loading for Converter V2 (meta-device) export."""
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
 import contextlib
+import dataclasses
 import glob
 import inspect
 import json
@@ -30,6 +31,50 @@ import torch
 from torch import nn
 
 WeightsLoader = Callable[[str], torch.Tensor]
+
+# safetensors dtype names (`get_slice(...).get_dtype()`).
+_SAFETENSORS_DTYPES = {
+    "BOOL": torch.bool,
+    "U8": torch.uint8,
+    "I8": torch.int8,
+    "I16": torch.int16,
+    "I32": torch.int32,
+    "I64": torch.int64,
+    "F16": torch.float16,
+    "BF16": torch.bfloat16,
+    "F32": torch.float32,
+    "F64": torch.float64,
+    **{
+        name: dtype
+        for name, dtype in (
+            ("F8_E4M3", getattr(torch, "float8_e4m3fn", None)),
+            ("F8_E5M2", getattr(torch, "float8_e5m2", None)),
+        )
+        if dtype is not None
+    },
+}
+
+
+class ProtectedCheckpointTensorError(RuntimeError):
+  """Raised on a raw read of a protected checkpoint tensor (`protect_keys`)."""
+
+
+@dataclasses.dataclass(frozen=True)
+class CheckpointSource:
+  """Where an export parameter's value comes from in the checkpoint.
+
+  Attributes:
+    keys: Checkpoint keys the value is read from. Several keys are concatenated
+      along `dim` (fused projections), unless `transformed`.
+    dim: Concatenation dimension for several keys.
+    transformed: Whether a `ModelExtension.resolve_checkpoint_tensor` hook
+      computes the value from `keys` (e.g. slicing, permuting, rescaling),
+      rather than reading or concatenating them as stored.
+  """
+
+  keys: tuple[str, ...]
+  dim: int = 0
+  transformed: bool = False
 
 _SNAPSHOT_PATTERNS = ("*.safetensors", "*.json")
 _INDEX_FILE = "model.safetensors.index.json"
@@ -229,7 +274,11 @@ def embed_tokens_on_cpu(
         ),
         "embed_tokens.weight",
     )
-    rows = weights_loader(fqn)[ids.long()].to(emb.weight.dtype).clone()
+    read_rows = getattr(weights_loader, "read_rows", None)
+    if callable(read_rows):
+      rows = read_rows(fqn, ids.long()).to(emb.weight.dtype).clone()
+    else:
+      rows = weights_loader(fqn)[ids.long()].to(emb.weight.dtype).clone()
     scale = getattr(emb, "embed_scale", None)
     if scale is not None:
       rows = rows * scale.detach().cpu().to(rows.dtype)
@@ -404,6 +453,28 @@ def submodule_weights_loader(
       raise KeyError(name)
     return weights_loader(f"{fqn}.{name.removeprefix(wrapper_prefix)}")
 
+  base = getattr(weights_loader, "base_weights_loader", weights_loader)
+  setattr(load, "base_weights_loader", base)
+  base_resolve = getattr(weights_loader, "resolve_source", None)
+  if not callable(base_resolve):
+    base_resolve = getattr(base, "resolve_source", None)
+  if callable(base_resolve):
+
+    def resolve_source(name: str) -> CheckpointSource | None:
+      if not name.startswith(wrapper_prefix):
+        return None
+      return base_resolve(f"{fqn}.{name.removeprefix(wrapper_prefix)}")
+
+    setattr(load, "resolve_source", resolve_source)
+  base_prepare = getattr(weights_loader, "prepare_export_modules", None)
+  if callable(base_prepare):
+    setattr(
+        load,
+        "prepare_export_modules",
+        lambda *roots: base_prepare(*roots, weights_loader=load),
+    )
+  if hasattr(weights_loader, "close"):
+    setattr(load, "close", getattr(weights_loader, "close"))
   return load
 
 
@@ -520,6 +591,14 @@ class HFCheckpointWeightsLoader:
     self.config = config
     self.export_config = export_config
     self._handles: dict[str, Any] = {}
+    # Optional reader `(key, shape, dtype) -> Tensor` replacing disk reads
+    # (used by `resolve_source` and callers probing `tensor_resolver`).
+    self._read_override: (
+        Callable[[str, tuple[int, ...], torch.dtype], torch.Tensor] | None
+    ) = None
+    self._protected_keys: frozenset[str] = frozenset()
+    self._protected_key_handler: Callable[[str], torch.Tensor] | None = None
+    self._protected_reads_allowed = 0
     self._checkpoint_dir = self._resolve_checkpoint_dir(model_path)
     self._weights_dir = weights_dir or self._checkpoint_dir
     self._weight_map = self._load_weight_map()
@@ -576,7 +655,63 @@ class HFCheckpointWeightsLoader:
 
   def _get(self, key: str) -> torch.Tensor:
     path = os.path.join(self._weights_dir, self._weight_map[key])
+    if self._read_override is not None:
+      slice_ = self._handle(path).get_slice(key)
+      shape = tuple(int(s) for s in slice_.get_shape())
+      dtype = _SAFETENSORS_DTYPES.get(slice_.get_dtype(), torch.float32)
+      return self._read_override(key, shape, dtype)
+    if key in self._protected_keys and not self._protected_reads_allowed:
+      if self._protected_key_handler is None:
+        raise ProtectedCheckpointTensorError(
+            f"Checkpoint tensor '{key}' is protected (e.g. pre-quantized) and"
+            " can't be read raw; it must be consumed by the layer that owns"
+            " it."
+        )
+      return self._protected_key_handler(key)
     return self._handle(path).get_tensor(key)
+
+  @contextlib.contextmanager
+  def override_reads(
+      self,
+      reader: Callable[[str, tuple[int, ...], torch.dtype], torch.Tensor],
+  ) -> Iterator[None]:
+    """Temporarily replaces safetensors reads with `reader(key, shape, dtype)`."""
+    prev = self._read_override
+    self._read_override = reader
+    try:
+      yield
+    finally:
+      self._read_override = prev
+
+  def protect_keys(
+      self,
+      keys: Collection[str],
+      handler: Callable[[str], torch.Tensor] | None = None,
+  ) -> None:
+    """Protects checkpoint tensors from raw reads (replaces any previous set).
+
+    Pre-quantized checkpoints store tensors (e.g. packed integer weights) that
+    are only meaningful to the layers that own them. Those layers read them
+    within `allow_protected_reads()`. Any other read, e.g. by a
+    `ModelExtension.resolve_checkpoint_tensor` hook that transforms the tensor,
+    is served by `handler` (e.g. an equivalent float tensor), or raises
+    `ProtectedCheckpointTensorError` without one.
+
+    Args:
+      keys: Checkpoint keys to protect.
+      handler: Optional `key -> tensor` replacement for raw reads.
+    """
+    self._protected_keys = frozenset(keys)
+    self._protected_key_handler = handler
+
+  @contextlib.contextmanager
+  def allow_protected_reads(self) -> Iterator[None]:
+    """Allows raw reads of protected keys (for the layers that own them)."""
+    self._protected_reads_allowed += 1
+    try:
+      yield
+    finally:
+      self._protected_reads_allowed -= 1
 
   @staticmethod
   def _strip_prefixes(param_name: str, prefixes: Sequence[str]) -> str:
@@ -607,16 +742,8 @@ class HFCheckpointWeightsLoader:
     ]
     return list(dict.fromkeys(candidates))  # Dedupe, preserving order.
 
-  def _try_load(self, param_name: str) -> torch.Tensor | None:
-    """Returns the raw checkpoint tensor matching `param_name`, or `None`.
-
-    Args:
-      param_name: Export-time parameter name to look up.
-
-    Returns:
-      The matching checkpoint tensor, or `None` if no candidate key is in the
-      checkpoint.
-    """
+  def _find_key(self, param_name: str) -> str | None:
+    """Returns the checkpoint key matching `param_name`, or `None`."""
     candidates = self._candidates(param_name)
     if self._extra_prefixes:
       stripped = self._strip_prefixes(
@@ -630,23 +757,114 @@ class HFCheckpointWeightsLoader:
               *self._candidates(stripped),
           ])
       )
-    for candidate in candidates:
-      if candidate in self._weight_map:
-        return self._get(candidate)
-    return None
+    return next((c for c in candidates if c in self._weight_map), None)
+
+  def _try_load(self, param_name: str) -> torch.Tensor | None:
+    """Returns the raw checkpoint tensor matching `param_name`, or `None`.
+
+    Args:
+      param_name: Export-time parameter name to look up.
+
+    Returns:
+      The matching checkpoint tensor, or `None` if no candidate key is in the
+      checkpoint.
+    """
+    key = self._find_key(param_name)
+    return self._get(key) if key is not None else None
+
+  def _call_resolver(self, param_name: str) -> torch.Tensor | None:
+    if self._tensor_resolver is None:
+      return None
+    if self._resolver_accepts_configs:
+      return self._tensor_resolver(
+          param_name, self._try_load, self.config, self.export_config
+      )
+    return self._tensor_resolver(param_name, self._try_load)
 
   def _resolve_single(self, param_name: str) -> torch.Tensor | None:
     """Resolves `param_name` via `tensor_resolver` first, then `_try_load`."""
-    if self._tensor_resolver is not None:
-      if self._resolver_accepts_configs:
-        tensor = self._tensor_resolver(
-            param_name, self._try_load, self.config, self.export_config
-        )
-      else:
-        tensor = self._tensor_resolver(param_name, self._try_load)
-      if tensor is not None:
-        return tensor
+    tensor = self._call_resolver(param_name)
+    if tensor is not None:
+      return tensor
     return self._try_load(param_name)
+
+  def _resolve_single_source(
+      self, param_name: str, reads: list[tuple[str, torch.Tensor]]
+  ) -> CheckpointSource | None:
+    """`_resolve_single` counterpart of `resolve_source`."""
+    start = len(reads)
+    try:
+      tensor = self._call_resolver(param_name)
+    except (RuntimeError, NotImplementedError, TypeError, ValueError) as exc:
+      # The resolver doesn't support meta stand-ins: its result is opaque.
+      logging.debug(
+          "resolve_source(%s): resolver failed on meta stand-in (%s).",
+          param_name,
+          exc,
+      )
+      keys = tuple(dict.fromkeys(k for k, _ in reads[start:]))
+      return CheckpointSource(keys, transformed=True)
+    if tensor is not None:
+      new_reads = reads[start:]
+      if len(new_reads) == 1 and tensor is new_reads[0][1]:
+        return CheckpointSource((new_reads[0][0],))  # Renamed key.
+      keys = tuple(dict.fromkeys(k for k, _ in new_reads))
+      return CheckpointSource(keys, transformed=True)
+    key = self._find_key(param_name)
+    return CheckpointSource((key,)) if key is not None else None
+
+  def resolve_source(self, param_name: str) -> CheckpointSource | None:
+    """Returns where `__call__(param_name)` takes its value from.
+
+    Follows the same resolution as `__call__` without loading tensor data:
+    `tensor_resolver` hooks run on meta stand-ins of the tensors they read.
+
+    Args:
+      param_name: Export-time parameter name.
+
+    Returns:
+      The checkpoint source, or `None` if `param_name` isn't in the checkpoint.
+    """
+    reads: list[tuple[str, torch.Tensor]] = []
+
+    def record_meta(
+        key: str, shape: tuple[int, ...], dtype: torch.dtype
+    ) -> torch.Tensor:
+      tensor = torch.empty(shape, dtype=dtype, device="meta")
+      reads.append((key, tensor))
+      return tensor
+
+    with self.override_reads(record_meta):
+      source = self._resolve_single_source(param_name, reads)
+      if source is None:
+        for fused_name, part_names, dim in self._fused_specs:
+          head, sep, tail = param_name.rpartition(f"{fused_name}.")
+          if not sep or tail not in ("weight", "bias"):
+            continue
+          parts = [
+              self._resolve_single_source(f"{head}{part}.{tail}", reads)
+              for part in part_names
+          ]
+          if any(p is None for p in parts):
+            continue
+          return CheckpointSource(
+              tuple(k for p in parts if p is not None for k in p.keys),
+              dim=dim,
+              transformed=any(
+                  p is not None and (p.transformed or len(p.keys) != 1)
+                  for p in parts
+              ),
+          )
+      if (
+          source is None
+          and self._tie_word_embeddings
+          and param_name.endswith("lm_head.weight")
+      ):
+        for emb_key in (*_EMBEDDING_KEYS, "wte.weight"):
+          source = self._resolve_single_source(emb_key, reads)
+          if source is not None:
+            break
+      return source
 
   def _load_fused(
       self,
