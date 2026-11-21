@@ -24,8 +24,10 @@ from litert_torch.generative.export_hf.core import export_lib
 from litert_torch.generative.export_hf.core import exportable_module_config
 from litert_torch.generative.export_hf.core import weights_loader
 import litert_torch.generative.export_hf.model_ext as _
+from litert_torch.generative.export_hf.model_ext.gemma4 import metadata_builder as gemma4_metadata_builder
 from litert_torch.generative.export_hf.model_ext.gemma4 import patch
 from litert_torch.generative.export_hf.model_ext.gemma4 import vision_exportable
+from litert_torch.generative.export_hf.model_ext.gemma4_unified import vision_exportable as gemma4_unified_vision_exportable
 from litert_torch.generative.layers import moe
 import torch
 import transformers
@@ -33,6 +35,7 @@ from transformers.models.gemma4 import image_processing_gemma4
 from transformers.models.gemma4 import modeling_gemma4
 
 from absl.testing import absltest as googletest
+from litert_lm_builder.runtime.proto import llm_metadata_pb2
 
 
 def _get_dummy_gemma4_text_config():
@@ -1003,6 +1006,104 @@ class PatchTest(parameterized.TestCase):
     for n in (70, 280):
       inputs_dict, _ = sample_inputs[f"vision_adapter_{n}"]
       self.assertEqual(tuple(inputs_dict["soft_tokens"].shape), (1, n, 1152))
+
+  def test_gemma4_vision_exportable_multi_signature_and_metadata(self):
+    class DummyImageProcessor:
+      patch_size = 16
+
+      def __call__(self, images, max_soft_tokens, return_tensors="pt"):
+        del images, return_tensors
+
+        class DummyBatch:
+          pass
+
+        batch = DummyBatch()
+        batch.pixel_values = torch.zeros((1, max_soft_tokens * 9, 768))
+        batch.image_position_ids = torch.zeros(
+            (1, max_soft_tokens * 9, 2), dtype=torch.long
+        )
+        return batch
+
+    dummy_proc = DummyImageProcessor()
+    all_budgets = (70, 140, 280, 560, 1120)
+    export_cfg = exportable_module_config.ExportableModuleConfig(
+        model="dummy",
+        extra_kwargs={"gemma4_vision_token_budgets": all_budgets},
+    )
+    enc_exp = vision_exportable.LiteRTExportableModuleForGemma4VisionEncoder(
+        torch.nn.Module(), export_cfg
+    )
+    enc_inputs = enc_exp.get_sample_inputs(
+        None,
+        image_processor=dummy_proc,
+        gemma4_vision_token_budgets=all_budgets,
+    )
+    self.assertEqual(
+        list(enc_inputs.keys()),
+        ["vision_70", "vision_140", "vision_280", "vision_560", "vision_1120"],
+    )
+
+    adap_exp = vision_exportable.LiteRTExportableModuleForGemma4VisionAdapter(
+        torch.nn.Module(), export_cfg, tokenizer=None
+    )
+    adap_inputs = adap_exp.get_sample_inputs(
+        None,
+        image_processor=dummy_proc,
+        gemma4_vision_token_budgets=all_budgets,
+    )
+    self.assertEqual(
+        list(adap_inputs.keys()),
+        [
+            "vision_adapter_70",
+            "vision_adapter_140",
+            "vision_adapter_280",
+            "vision_adapter_560",
+            "vision_adapter_1120",
+        ],
+    )
+
+    unified_exp = gemma4_unified_vision_exportable.LiteRTExportableModuleForGemma4UnifiedVisionEncoder(
+        torch.nn.Module(), export_cfg
+    )
+    unified_inputs = unified_exp.get_sample_inputs(
+        None,
+        image_processor=dummy_proc,
+        gemma4_vision_token_budgets=all_budgets,
+    )
+    self.assertEqual(
+        list(unified_inputs.keys()),
+        ["vision_70", "vision_140", "vision_280", "vision_560", "vision_1120"],
+    )
+
+    class DummyTokenizer:
+      special_tokens_map = {"boi_token": "<|image>", "eoi_token": "<image|>"}
+
+    class DummyVisionConfig:
+      pooling_kernel_size = 3
+
+    class DummyModelConfig:
+      model_type = "gemma4_unified"
+      vision_config = DummyVisionConfig()
+
+    source_artifacts = export_lib.SourceModelArtifacts(
+        model=torch.nn.Module(),
+        model_config=DummyModelConfig(),
+        text_model_config=DummyModelConfig(),
+        tokenizer=DummyTokenizer(),
+        image_processor=dummy_proc,
+    )
+    exported_artifacts = export_lib.ExportedModelArtifacts(
+        vision_encoder_model_path="/tmp/vision.tflite"
+    )
+    metadata = gemma4_metadata_builder.build_llm_metadata(
+        source_artifacts,
+        export_cfg,
+        exported_artifacts,
+        llm_metadata_pb2.LlmMetadata(),
+    )
+    self.assertEqual(metadata.llm_model_type.gemma4.max_num_patches, 10080)
+    self.assertEqual(metadata.llm_model_type.gemma4.pooling_kernel_size, 3)
+    self.assertTrue(metadata.llm_model_type.gemma4.merge_patches)
 
 
 if __name__ == "__main__":

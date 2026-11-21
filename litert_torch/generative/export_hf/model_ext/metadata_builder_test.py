@@ -15,7 +15,7 @@
 """Unit tests verifying serialization and defaults for LiteRT executor metadata."""
 
 import types
-from typing import Any
+from typing import Any, cast
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -24,6 +24,8 @@ from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.model_ext import metadata_builder
 import transformers
 
+from litert_lm_builder.runtime.proto import executor_metadata_pb2
+
 # Expected NPU executor metadata for every supported model type.
 _ALL_HW_COMPONENTS = {
     "enable_neon_for_npu_greedy_sampling": True,
@@ -31,6 +33,8 @@ _ALL_HW_COMPONENTS = {
     "use_hw_cache_update_for_npu": True,
     "use_hw_ple_for_npu": True,
 }
+
+_UNSET = object()
 
 
 def _make_config(model_type: str, num_layers: int = 2):
@@ -92,6 +96,54 @@ def _npu_fields(executor_metadata) -> dict[str, bool]:
       for field in metadata_builder.NPU_EXECUTOR_SETTING_FIELDS
       if npu_metadata.HasField(field)
   }
+
+
+def _make_attention_mask_inputs(
+    *,
+    has_vision: bool,
+    use_bidirectional_attention: Any = _UNSET,
+    sliding_window: int = 512,
+    ring_buffer_size: int = 512,
+) -> tuple[
+    export_lib.SourceModelArtifacts,
+    exportable_module.ExportableModuleConfig,
+    export_lib.ExportedModelArtifacts,
+]:
+  text_config = types.SimpleNamespace(
+      sliding_window=sliding_window,
+      num_hidden_layers=2,
+      layer_types=["sliding_attention", "full_attention"],
+  )
+  if use_bidirectional_attention is not _UNSET:
+    text_config.use_bidirectional_attention = use_bidirectional_attention
+
+  vision_config = types.SimpleNamespace() if has_vision else None
+  model_config = types.SimpleNamespace(
+      text_config=text_config,
+      vision_config=vision_config,
+  )
+  source_model_artifacts = cast(
+      export_lib.SourceModelArtifacts,
+      types.SimpleNamespace(
+          model_config=model_config,
+          text_model_config=text_config,
+      ),
+  )
+  export_config = cast(
+      exportable_module.ExportableModuleConfig,
+      types.SimpleNamespace(
+          cache_length=4096,
+          sliding_window_ring_buffer_size=ring_buffer_size,
+          k_ts_idx=2,
+          v_ts_idx=3,
+          split_cache=False,
+      ),
+  )
+  exported_model_artifacts = cast(
+      export_lib.ExportedModelArtifacts,
+      types.SimpleNamespace(),
+  )
+  return source_model_artifacts, export_config, exported_model_artifacts
 
 
 # TODO(b/542876170): Remove the skip once litert-torch requires a
@@ -269,6 +321,109 @@ class MetadataBuilderTest(parameterized.TestCase):
         litert_lm_model_type_override="function_gemma",
     )
     self.assertFalse(metadata.HasField("llm_npu_executor_metadata"))
+
+
+class AttentionMaskMetadataBuilderTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="e2b_like",
+          has_vision=True,
+          use_bidirectional_attention=None,
+          expected_local="ATTENTION_MASK_TYPE_CAUSAL",
+      ),
+      dict(
+          testcase_name="false_like",
+          has_vision=True,
+          use_bidirectional_attention=False,
+          expected_local="ATTENTION_MASK_TYPE_CAUSAL",
+      ),
+      dict(
+          testcase_name="31b_like",
+          has_vision=True,
+          use_bidirectional_attention="vision",
+          expected_local="ATTENTION_MASK_TYPE_VISION_BIDIRECTIONAL",
+      ),
+      dict(
+          testcase_name="gemma3_like",
+          has_vision=True,
+          use_bidirectional_attention=_UNSET,
+          expected_local="ATTENTION_MASK_TYPE_VISION_BIDIRECTIONAL",
+      ),
+      dict(
+          testcase_name="all_bidirectional",
+          has_vision=True,
+          use_bidirectional_attention="all",
+          expected_local="ATTENTION_MASK_TYPE_BIDIRECTIONAL",
+      ),
+      dict(
+          testcase_name="true_bidirectional",
+          has_vision=True,
+          use_bidirectional_attention=True,
+          expected_local="ATTENTION_MASK_TYPE_BIDIRECTIONAL",
+      ),
+      dict(
+          testcase_name="text_only",
+          has_vision=False,
+          use_bidirectional_attention=_UNSET,
+          expected_local="ATTENTION_MASK_TYPE_CAUSAL",
+      ),
+  )
+  def test_global_attention_mask_type_stays_causal_in_every_case(
+      self,
+      has_vision: bool,
+      use_bidirectional_attention: Any,
+      expected_local: str,
+  ):
+    assert executor_metadata_pb2 is not None
+    assert metadata_builder.build_executor_metadata is not None
+    source_artifacts, export_config, exported_artifacts = (
+        _make_attention_mask_inputs(
+            has_vision=has_vision,
+            use_bidirectional_attention=use_bidirectional_attention,
+        )
+    )
+    if use_bidirectional_attention is _UNSET:
+      self.assertFalse(
+          hasattr(
+              source_artifacts.model_config.text_config,
+              "use_bidirectional_attention",
+          )
+      )
+    if not has_vision:
+      self.assertIsNone(source_artifacts.model_config.vision_config)
+    executor_metadata = metadata_builder.build_executor_metadata(
+        source_artifacts, export_config, exported_artifacts
+    )
+    mask_settings = (
+        executor_metadata.llm_executor_metadata.attention_mask_settings
+    )
+    self.assertEqual(
+        mask_settings.attention_mask_type,
+        executor_metadata_pb2.ATTENTION_MASK_TYPE_CAUSAL,
+    )
+    self.assertEqual(
+        mask_settings.local_attention_mask_type,
+        getattr(executor_metadata_pb2, expected_local),
+    )
+    self.assertEqual(mask_settings.sliding_window_size, 512)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="unknown_string", value="unknown"),
+      dict(testcase_name="invalid_int", value=123),
+  )
+  def test_unknown_use_bidirectional_attention_raises_value_error(self, value):
+    assert metadata_builder.build_executor_metadata is not None
+    source_artifacts, export_config, exported_artifacts = (
+        _make_attention_mask_inputs(
+            has_vision=True,
+            use_bidirectional_attention=value,
+        )
+    )
+    with self.assertRaises(ValueError):
+      metadata_builder.build_executor_metadata(
+          source_artifacts, export_config, exported_artifacts
+      )
 
 
 class NpuExecutorSettingsTest(absltest.TestCase):
