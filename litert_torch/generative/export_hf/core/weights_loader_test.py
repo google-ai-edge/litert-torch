@@ -167,6 +167,27 @@ class InitAndCastTest(absltest.TestCase):
         out, tensors["embed_tokens.packed"][[1, 3]].unsqueeze(0).float() * 3.0
     )
 
+  def test_embed_tokens_on_cpu_uses_loader_read_rows(self):
+    with weights_loader_lib.init_params_on_meta():
+      model = _Tiny()
+    model.get_input_embeddings = lambda: model.embed_tokens
+    full = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+    seen = []
+
+    def loader(name):
+      raise AssertionError(f"Unexpected full-table read of {name}")
+
+    def read_rows(name, ids):
+      seen.append((name, ids.tolist()))
+      return full[ids]
+
+    setattr(loader, "read_rows", read_rows)
+    out = weights_loader_lib.embed_tokens_on_cpu(
+        model, [2, 5], weights_loader=loader
+    )
+    self.assertEqual(seen, [("embed_tokens.weight", [[2, 5]])])
+    torch.testing.assert_close(out, full[[2, 5]].unsqueeze(0))
+
   def test_submodule_weights_loader(self):
     root = _Wrapper(_Tiny())
     requested = []
@@ -175,11 +196,35 @@ class InitAndCastTest(absltest.TestCase):
       requested.append(name)
       return torch.zeros(1)
 
+    resolved = []
+    setattr(
+        loader,
+        "resolve_source",
+        lambda name: (
+            resolved.append(name) or weights_loader_lib.CheckpointSource((name,))
+        ),
+    )
+    prepared = []
+    setattr(
+        loader,
+        "prepare_export_modules",
+        lambda *roots, weights_loader=None: prepared.append(
+            (roots, weights_loader)
+        ),
+    )
+
     sub_loader = weights_loader_lib.submodule_weights_loader(
         loader, root, root.model.embed_tokens
     )
     sub_loader("model.weight")
     self.assertEqual(requested, ["model.embed_tokens.weight"])
+    src = sub_loader.resolve_source("model.weight")
+    self.assertEqual(
+        src, weights_loader_lib.CheckpointSource(("model.embed_tokens.weight",))
+    )
+    self.assertIsNone(sub_loader.resolve_source("other.weight"))
+    sub_loader.prepare_export_modules(root)
+    self.assertEqual(prepared, [((root,), sub_loader)])
     with self.assertRaises(KeyError):
       sub_loader("other.weight")
 
@@ -437,6 +482,98 @@ class HFCheckpointWeightsLoaderTest(absltest.TestCase):
         loader("model.model.language_model.embed_tokens.weight"),
         self.tensors["model.language_model.embed_tokens.weight"],
     )
+
+  def test_resolve_source_direct_fused_tied_and_missing(self):
+    source = weights_loader_lib.CheckpointSource
+    p = "model.language_model.layers."
+    self.assertEqual(
+        self.loader.resolve_source(
+            "static_model.model.layers.0.self_attn.q_proj.weight"
+        ),
+        source((f"{p}0.self_attn.q_proj.weight",)),
+    )
+    self.assertEqual(
+        self.loader.resolve_source("model.model.layers.0.self_attn.qkv_proj.weight"),
+        source(tuple(f"{p}0.self_attn.{n}_proj.weight" for n in "qkv")),
+    )
+    self.assertEqual(
+        self.loader.resolve_source("model.model.layers.1.self_attn.qkv_proj.weight"),
+        source(tuple(f"{p}1.self_attn.{n}_proj.weight" for n in "qk")),
+    )
+    tied = weights_loader_lib.HFCheckpointWeightsLoader(
+        self.ckpt_dir, tie_word_embeddings=True
+    )
+    self.assertEqual(
+        tied.resolve_source("model.lm_head.weight"),
+        source(("model.language_model.embed_tokens.weight",)),
+    )
+    self.assertIsNone(self.loader.resolve_source("model.lm_head.weight"))
+
+  def test_resolve_source_classifies_resolver_hooks(self):
+    emb = "model.language_model.embed_tokens.weight"
+
+    def resolver(param_name, try_load):
+      if param_name == "renamed.weight":
+        return try_load(emb)  # A pure rename.
+      if param_name == "scaled.weight":
+        return try_load(emb) * 2.0  # A transform.
+      if param_name == "data_dependent.weight":
+        return try_load(emb) * try_load(emb).abs().max().item()
+      return None
+
+    loader = weights_loader_lib.HFCheckpointWeightsLoader(
+        self.ckpt_dir, tensor_resolver=resolver
+    )
+    # Resolution never reads tensor data, even for protected keys.
+    loader.protect_keys({emb})
+    source = weights_loader_lib.CheckpointSource
+    self.assertEqual(loader.resolve_source("renamed.weight"), source((emb,)))
+    self.assertEqual(
+        loader.resolve_source("scaled.weight"),
+        source((emb,), transformed=True),
+    )
+    self.assertEqual(
+        loader.resolve_source("data_dependent.weight"),
+        source((emb,), transformed=True),
+    )
+
+  def test_protect_keys(self):
+    emb = "model.language_model.embed_tokens.weight"
+    self.loader.protect_keys({emb})
+    with self.assertRaises(
+        weights_loader_lib.ProtectedCheckpointTensorError
+    ) as ctx:
+      self.loader("model.embed_tokens.weight")
+    # Not a `KeyError`, which callers treat as a missing key.
+    self.assertNotIsInstance(ctx.exception, KeyError)
+    with self.loader.allow_protected_reads():
+      torch.testing.assert_close(
+          self.loader("model.embed_tokens.weight"), self.tensors[emb]
+      )
+    # Unprotected keys are unaffected.
+    self.assertIsNotNone(
+        self.loader("model.layers.0.mlp.gate_proj.weight")
+    )
+    replacement = torch.zeros(8, 4)
+    self.loader.protect_keys({emb}, handler=lambda key: replacement)
+    self.assertIs(self.loader("model.embed_tokens.weight"), replacement)
+
+  def test_override_reads(self):
+    seen = []
+
+    def reader(key, shape, dtype):
+      seen.append((key, shape, dtype))
+      return torch.full(shape, 7.0, dtype=dtype)
+
+    emb = "model.language_model.embed_tokens.weight"
+    self.loader.protect_keys({emb})
+    with self.loader.override_reads(reader):
+      out = self.loader("model.embed_tokens.weight")
+    self.assertEqual(seen, [(emb, (8, 4), torch.float32)])
+    torch.testing.assert_close(out, torch.full((8, 4), 7.0))
+    # Original behavior (including key protection) is restored on exit.
+    with self.assertRaises(weights_loader_lib.ProtectedCheckpointTensorError):
+      self.loader("model.embed_tokens.weight")
 
 
 class ResolveCheckpointDirTest(absltest.TestCase):
