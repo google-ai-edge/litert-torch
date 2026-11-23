@@ -30,6 +30,7 @@ from litert_torch.generative.export_hf.model_ext.gemma3n import extension as gem
 from litert_torch.generative.export_hf.model_ext.gemma4 import extension as gemma4_ext
 from litert_torch.generative.export_hf.model_ext.gemma4_unified import extension as gemma4_unified_ext
 from litert_torch.generative.export_hf.model_ext.granitemoehybrid import extension as granitemoehybrid_ext
+from litert_torch.generative.export_hf.model_ext.inkling2_loop import extension as inkling2_loop_ext
 from litert_torch.generative.export_hf.model_ext.kokoro_tts import extension as kokoro_tts_ext
 from litert_torch.generative.export_hf.model_ext.lfm2 import extension as lfm2_ext
 from litert_torch.generative.export_hf.model_ext.lfm2_vl import extension as lfm2_vl_ext
@@ -50,6 +51,7 @@ Gemma3nExtension = gemma3n_ext.Gemma3nExtension
 Gemma4Extension = gemma4_ext.Gemma4Extension
 Gemma4UnifiedExtension = gemma4_unified_ext.Gemma4UnifiedExtension
 GraniteMoeHybridExtension = granitemoehybrid_ext.GraniteMoeHybridExtension
+Inkling2LoopExtension = inkling2_loop_ext.Inkling2LoopExtension
 KokoroTtsExtension = kokoro_tts_ext.KokoroTtsExtension
 Lfm2Extension = lfm2_ext.Lfm2Extension
 Lfm2VlExtension = lfm2_vl_ext.Lfm2VlExtension

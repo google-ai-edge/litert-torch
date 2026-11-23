@@ -157,6 +157,8 @@ def _moe_experts_reference(
     ff1_scale: torch.Tensor | None = None,
     linear_scale: torch.Tensor | None = None,
     activation: str = "gelu_tanh",
+    gate_softcap: float = 0.0,
+    up_softcap: float = 0.0,
 ) -> torch.Tensor:
   src_flat = src.reshape(1, -1, model_dim).to(torch.float32)
   weights_flat = top_weights.reshape(1, -1, num_active_experts).to(
@@ -179,8 +181,15 @@ def _moe_experts_reference(
   selected_linear = linear_w[indices]
   gate = torch.einsum("bskhd,bsd->bskh", selected_gate, src_flat)
   ff1 = torch.einsum("bskhd,bsd->bskh", selected_ff1, src_flat)
+  if up_softcap > 0.0:
+    ff1 = torch.tanh(ff1 / up_softcap) * up_softcap
   if activation == "silu":
-    hidden = F.silu(gate) * ff1
+    if gate_softcap > 0.0:
+      capped_gate = torch.tanh(gate / gate_softcap) * gate_softcap
+      gate_act = capped_gate * torch.sigmoid(gate)
+    else:
+      gate_act = F.silu(gate)
+    hidden = gate_act * ff1
   elif activation == "gelu_tanh":
     hidden = F.gelu(gate, approximate="tanh") * ff1
   else:
@@ -200,22 +209,28 @@ def _moe_custom_options(
     hidden_dim: int,
     weight_type: str,
     activation: str = "gelu_tanh",
+    gate_softcap: float = 0.0,
+    up_softcap: float = 0.0,
 ) -> bytes:
-  return bytes(
-      flexbuffers.Dumps({
-          "num_experts": num_experts,
-          "num_active_experts": num_active_experts,
-          "model_dim": model_dim,
-          "hidden_dim": hidden_dim,
-          # The reference math is `F.gelu(gate, approximate="tanh")`, so the
-          # label must be "gelu_tanh". The older "gelu" spelling made the
-          # XNNPACK CPU kernel select exact GELU while the GPU kernel used the
-          # tanh approximation.
-          "activation": activation,
-          "weight_type": weight_type,
-          "renormalized_top_weights": True,
-      })
-  )
+  """Serializes FlexBuffers custom options for the `moe` TFLite custom op."""
+  options: dict[str, object] = {
+      "num_experts": num_experts,
+      "num_active_experts": num_active_experts,
+      "model_dim": model_dim,
+      "hidden_dim": hidden_dim,
+      # The reference math is `F.gelu(gate, approximate="tanh")`, so the
+      # label must be "gelu_tanh". The older "gelu" spelling made the
+      # XNNPACK CPU kernel select exact GELU while the GPU kernel used the
+      # tanh approximation.
+      "activation": activation,
+      "weight_type": weight_type,
+      "renormalized_top_weights": True,
+  }
+  if gate_softcap > 0.0:
+    options["gate_softcap"] = float(gate_softcap)
+  if up_softcap > 0.0:
+    options["up_softcap"] = float(up_softcap)
+  return bytes(flexbuffers.Dumps(options))
 
 
 def _const_bytes_attr(data: bytes) -> ir.Attribute:
@@ -232,6 +247,8 @@ def _tfl_custom_moe(
     hidden_dim: int,
     weight_type: str,
     activation: str = "gelu_tanh",
+    gate_softcap: float = 0.0,
+    up_softcap: float = 0.0,
 ) -> ir.Value:
   op = ir.Operation.create(
       "tfl.custom",
@@ -247,6 +264,8 @@ def _tfl_custom_moe(
                   hidden_dim=hidden_dim,
                   weight_type=weight_type,
                   activation=activation,
+                  gate_softcap=gate_softcap,
+                  up_softcap=up_softcap,
               )
           ),
       },
@@ -268,6 +287,8 @@ def _moe_fp32(
     model_dim: int,
     hidden_dim: int,
     activation: str = "gelu_tanh",
+    gate_softcap: float = 0.0,
+    up_softcap: float = 0.0,
 ) -> torch.Tensor:
   return _moe_experts_reference(
       src,
@@ -282,6 +303,8 @@ def _moe_fp32(
       model_dim,
       hidden_dim,
       activation=activation,
+      gate_softcap=gate_softcap,
+      up_softcap=up_softcap,
   )
 
 
@@ -299,6 +322,8 @@ def _(
     model_dim,
     hidden_dim,
     activation="gelu_tanh",
+    gate_softcap=0.0,
+    up_softcap=0.0,
 ):
   del (
       top_weights,
@@ -312,6 +337,8 @@ def _(
       model_dim,
       hidden_dim,
       activation,
+      gate_softcap,
+      up_softcap,
   )
   return torch.empty_like(src)
 
@@ -331,6 +358,8 @@ def _moe_fp32_lower(
     model_dim: int,
     hidden_dim: int,
     activation: str = "gelu_tanh",
+    gate_softcap: float = 0.0,
+    up_softcap: float = 0.0,
 ):
   return _tfl_custom_moe(
       lctx,
@@ -349,6 +378,8 @@ def _moe_fp32_lower(
       hidden_dim=hidden_dim,
       weight_type="fp32",
       activation=activation,
+      gate_softcap=gate_softcap,
+      up_softcap=up_softcap,
   )
 
 
@@ -369,6 +400,8 @@ def _moe_int8(
     model_dim: int,
     hidden_dim: int,
     activation: str = "gelu_tanh",
+    gate_softcap: float = 0.0,
+    up_softcap: float = 0.0,
 ) -> torch.Tensor:
   return _moe_experts_reference(
       src,
@@ -386,6 +419,8 @@ def _moe_int8(
       ff1_scale=ff1_scale,
       linear_scale=linear_scale,
       activation=activation,
+      gate_softcap=gate_softcap,
+      up_softcap=up_softcap,
   )
 
 
@@ -406,6 +441,8 @@ def _(
     model_dim,
     hidden_dim,
     activation="gelu_tanh",
+    gate_softcap=0.0,
+    up_softcap=0.0,
 ):
   del (
       top_weights,
@@ -422,6 +459,8 @@ def _(
       model_dim,
       hidden_dim,
       activation,
+      gate_softcap,
+      up_softcap,
   )
   return torch.empty_like(src)
 
@@ -444,6 +483,8 @@ def _moe_int8_lower(
     model_dim: int,
     hidden_dim: int,
     activation: str = "gelu_tanh",
+    gate_softcap: float = 0.0,
+    up_softcap: float = 0.0,
 ):
   return _tfl_custom_moe(
       lctx,
@@ -465,6 +506,8 @@ def _moe_int8_lower(
       hidden_dim=hidden_dim,
       weight_type="int8",
       activation=activation,
+      gate_softcap=gate_softcap,
+      up_softcap=up_softcap,
   )
 
 
@@ -486,6 +529,8 @@ def moe_experts(
     ff1_scale: torch.Tensor | None = None,
     linear_scale: torch.Tensor | None = None,
     activation: str = "gelu_tanh",
+    gate_softcap: float = 0.0,
+    up_softcap: float = 0.0,
 ) -> torch.Tensor:
   """Builds the `moe` TFLite custom op."""
   if weight_type == "fp32":
@@ -502,6 +547,8 @@ def moe_experts(
         model_dim,
         hidden_dim,
         activation=activation,
+        gate_softcap=gate_softcap,
+        up_softcap=up_softcap,
     )
   if weight_type == "int8":
     if ff_gate_scale is None or ff1_scale is None or linear_scale is None:
@@ -522,6 +569,8 @@ def moe_experts(
         model_dim,
         hidden_dim,
         activation=activation,
+        gate_softcap=gate_softcap,
+        up_softcap=up_softcap,
     )
   raise ValueError(f"Unsupported MoE expert weight_type: {weight_type}")
 
@@ -559,6 +608,8 @@ def litert_moe_experts_forward(self, hidden_states, top_k_index, top_k_weights):
     activation = "silu"
   else:
     activation = raw_act
+  gate_softcap = float(getattr(self.config, "mlp_gate_softcap", 0.0) or 0.0)
+  up_softcap = float(getattr(self.config, "mlp_up_softcap", 0.0) or 0.0)
   output = moe_experts(
       hidden_states.reshape(1, -1, self.hidden_dim),
       top_k_weights.reshape(1, -1, num_active_experts),
@@ -572,6 +623,8 @@ def litert_moe_experts_forward(self, hidden_states, top_k_index, top_k_weights):
       model_dim=self.hidden_dim,
       hidden_dim=self.intermediate_dim,
       activation=activation,
+      gate_softcap=gate_softcap,
+      up_softcap=up_softcap,
   )
   return output.reshape(hidden_states.shape)
 
