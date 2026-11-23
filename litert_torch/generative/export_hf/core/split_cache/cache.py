@@ -415,6 +415,11 @@ def _flatten_kvc_t(
   batch_size = layer_0.get_batch_size()
   k_ts_idx = layer_0.get_k_ts_idx()
   v_ts_idx = layer_0.get_v_ts_idx()
+  for layer in kvc.layers:
+    # A conv layer reports placeholder axes: use the first attention layer's.
+    if isinstance(layer, LiteRTLMSplitCacheLayer):
+      k_ts_idx, v_ts_idx = layer.get_k_ts_idx(), layer.get_v_ts_idx()
+      break
   layer_types = [
       getattr(layer, "layer_type", "full_attention") for layer in kvc.layers
   ]
@@ -460,6 +465,7 @@ def _unflatten_kvc_t(
           cache_lib.LiteRTLMConvCacheLayer(
               conv_states=values[c_cache_idx],
               batch_size=batch_size,
+              layer_type=layer_type,
           )
       )
       continue
