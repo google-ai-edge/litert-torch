@@ -20,6 +20,7 @@ from litert_torch.generative.export_hf.core import fused_linear
 from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope as qkv_norm_rope_composite
 from litert_torch.generative.export_hf.experimental.composites import rope as rope_composite
 from litert_torch.generative.export_hf.experimental.composites import swiglu as swiglu_composite
+from litert_torch.generative.export_hf.model_ext import patches as patches_lib
 from litert_torch.generative.layers import normalization
 import torch
 import transformers
@@ -315,6 +316,7 @@ class FusedQwen3_5Attention(torch.nn.Module):
       past_key_values: transformers.cache_utils.Cache | None = None,
       **kwargs: Any,
   ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    past_key_values = patches_lib.resolve_cache(past_key_values, kwargs)
     input_shape = hidden_states.shape[:-1]
     hidden_shape = (*input_shape, -1, self.head_dim)
 

@@ -25,8 +25,10 @@ tokens.
 """
 
 import copy
+import inspect
 from typing import Any, Dict, List, Optional, Tuple, Union
 from litert_torch.generative.export_hf.experimental.composites import short_conv as short_conv_composite
+from litert_torch.generative.export_hf.model_ext import patches as patches_lib
 from litert_torch.generative.export_hf.model_ext.qwen3_5 import gated_delta_rule
 from litert_torch.generative.layers import normalization
 import torch
@@ -37,6 +39,12 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5Attention
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5TextRotaryEmbedding
 from transformers.models.qwen3_5.modular_qwen3_5 import Qwen3_5MLP
 from transformers.models.qwen3_5.modular_qwen3_5 import Qwen3_5RMSNorm
+
+_QWEN3_5_ATTN_CACHE_KWARG = (
+    "cache"
+    if "cache" in inspect.signature(Qwen3_5Attention.forward).parameters
+    else "past_key_values"
+)
 
 
 def _unwrap_config(config: Any) -> Any:
@@ -564,6 +572,7 @@ class Qwen3_5StaticDecoderLayer(nn.Module):
       position_ids: Optional[torch.Tensor] = None,
       **kwargs,
   ) -> torch.Tensor:
+    past_key_values = patches_lib.resolve_cache(past_key_values, kwargs)
     if positions is None:
       positions = position_ids
     residual = hidden_states
@@ -591,7 +600,7 @@ class Qwen3_5StaticDecoderLayer(nn.Module):
           hidden_states,
           position_embeddings,
           attn_mask,
-          past_key_values=past_key_values,
+          **{_QWEN3_5_ATTN_CACHE_KWARG: past_key_values},
           **attn_kwargs,
       )
 

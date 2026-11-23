@@ -25,6 +25,9 @@
 #      after __init__; export_codec.py recomputes it post-load.
 #   3. create_causal_mask kwargs: input_embeds -> inputs_embeds and
 #      cache_position dropped in 5.x.
+#   4. auto_docstring decorators removed so this vendored file is not coupled to
+#      upstream transformers ModelArgs changes (e.g. past_key_values -> cache in
+#      5.24).
 """PyTorch Qwen3TTSTokenizerV2 model."""
 
 from dataclasses import dataclass
@@ -62,7 +65,7 @@ from transformers.modeling_rope_utils import (
 )
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
-from transformers.utils import ModelOutput, auto_docstring, logging
+from transformers.utils import ModelOutput, logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 
@@ -95,7 +98,6 @@ logger = logging.get_logger(__name__)
 
 
 @dataclass
-@auto_docstring
 class Qwen3TTSTokenizerV2EncoderOutput(ModelOutput):
   r"""audio_codes (`List[torch.LongTensor]`):
 
@@ -107,7 +109,6 @@ class Qwen3TTSTokenizerV2EncoderOutput(ModelOutput):
 
 
 @dataclass
-@auto_docstring
 class Qwen3TTSTokenizerV2DecoderOutput(ModelOutput):
   r"""audio_values (`List[torch.FloatTensor]`):
 
@@ -237,7 +238,6 @@ def eager_attention_forward(
   return attn_output, attn_weights
 
 
-@auto_docstring
 class Qwen3TTSTokenizerV2DecoderPreTrainedModel(PreTrainedModel):
   config: Qwen3TTSTokenizerV2DecoderConfig
   base_model_prefix = "model"
@@ -661,7 +661,6 @@ class Qwen3TTSTokenizerV2DecoderTransformerLayer(GradientCheckpointingLayer):
     return hidden_states
 
 
-@auto_docstring
 class Qwen3TTSTokenizerV2DecoderTransformerModel(
     Qwen3TTSTokenizerV2DecoderPreTrainedModel
 ):
@@ -691,7 +690,6 @@ class Qwen3TTSTokenizerV2DecoderTransformerModel(
     self.post_init()
 
   @check_model_inputs()
-  @auto_docstring
   def forward(
       self,
       input_ids=None,
@@ -1171,7 +1169,6 @@ except (ImportError, AttributeError):
   pass
 
 
-@auto_docstring
 class Qwen3TTSTokenizerV2PreTrainedModel(PreTrainedModel):
   config: Qwen3TTSTokenizerV2Config
   base_model_prefix = "model"
@@ -1183,10 +1180,8 @@ class Qwen3TTSTokenizerV2PreTrainedModel(PreTrainedModel):
   _supports_attention_backend = True
 
 
-@auto_docstring(custom_intro="""
-    The Qwen3TTSTokenizerV2 model.
-    """)
 class Qwen3TTSTokenizerV2Model(Qwen3TTSTokenizerV2PreTrainedModel):
+  """The Qwen3TTSTokenizerV2 model."""
 
   def __init__(self, config: Qwen3TTSTokenizerV2Config):
     super().__init__(config)

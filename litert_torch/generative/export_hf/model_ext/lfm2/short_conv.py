@@ -16,6 +16,7 @@
 
 from typing import Optional
 from litert_torch.generative.export_hf.experimental.composites import short_conv as short_conv_composite
+from litert_torch.generative.export_hf.model_ext import patches as patches_lib
 import torch
 from transformers.models.lfm2 import modeling_lfm2
 
@@ -48,7 +49,15 @@ class Lfm2ShortConv(modeling_lfm2.Lfm2ShortConv):
       cache_position: Optional[torch.LongTensor] = None,
       attention_mask: Optional[torch.Tensor] = None,
       valid_mask: Optional[torch.Tensor] = None,
+      **kwargs,
   ):
+    """Runs the LFM2 short convolution step.
+
+    Accepts `cache` via `kwargs` (transformers >= 5.24) in addition to
+    `past_key_values` (< 5.24); other `kwargs` are unused.
+    """
+    past_key_values = patches_lib.resolve_cache(past_key_values, kwargs)
+    del kwargs
     seq_len = hidden_states.shape[1]
 
     # Compute valid_mask

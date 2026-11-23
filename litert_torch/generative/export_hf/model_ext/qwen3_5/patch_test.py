@@ -509,6 +509,40 @@ class Qwen3_5PatchTest(parameterized.TestCase):
     edge_model = litert_torch.convert(wrapper, (x, pos_ids))
     self.assertIn(b"odml.qkv_norm_rope", edge_model.model_content())
 
+  def test_fused_qwen3_5_attention_accepts_cache_kwarg(self):
+    torch.manual_seed(0)
+    cfg = self._make_config(partial_rotary_factor=0.25)
+    orig_attn = modeling_qwen3_5.Qwen3_5Attention(cfg, layer_idx=1).eval()
+    fused_attn = patch.FusedQwen3_5Attention(orig_attn, fuse_qkv=True).eval()
+
+    x = torch.randn(1, 4, cfg.hidden_size)
+    rotary_emb = modeling_qwen3_5_static.Qwen3_5StaticRotaryEmbedding(cfg)
+    pos_ids = torch.arange(4, dtype=torch.int32).unsqueeze(0)
+    pos_emb = rotary_emb(x, pos_ids)
+
+    class _DummyCache:
+
+      def __init__(self):
+        self.calls = 0
+
+      def update(self, k, v, layer_idx, *args, **kwargs):
+        del layer_idx, args, kwargs
+        self.calls += 1
+        return k + 0.5, v + 0.5
+
+    cache = _DummyCache()
+    legacy_cache = _DummyCache()
+    with torch.no_grad():
+      out_cache, _ = fused_attn(x, pos_emb, attention_mask=None, cache=cache)
+      out_legacy, _ = fused_attn(
+          x, pos_emb, attention_mask=None, past_key_values=legacy_cache
+      )
+      out_uncached, _ = fused_attn(x, pos_emb, attention_mask=None)
+    self.assertEqual(cache.calls, 1)
+    self.assertEqual(legacy_cache.calls, 1)
+    torch.testing.assert_close(out_cache, out_legacy)
+    self.assertFalse(torch.allclose(out_cache, out_uncached))
+
 
 if __name__ == "__main__":
   absltest.main()

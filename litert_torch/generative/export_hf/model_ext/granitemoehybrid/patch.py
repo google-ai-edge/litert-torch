@@ -374,13 +374,17 @@ def mamba2_mixer_forward(
     hidden_states: (batch, seq, hidden).
     cache_params: A `LiteRTLMCache`, or None.
     attention_mask: Unused; pad positions are given by `valid_mask`.
-    valid_mask: The (batch, seq) mask of the real positions of a prefill
-      chunk, or None.
-    **kwargs: Unused.
+    valid_mask: The (batch, seq) mask of the real positions of a prefill chunk,
+      or None.
+    **kwargs: May contain `cache` (transformers >= 5.24); other kwargs are
+      unused.
 
   Returns:
     The mixer output, (batch, seq, hidden).
   """
+  cache_params = patches_lib.resolve_cache(
+      cache_params, kwargs, legacy_name="cache_params"
+  )
   del attention_mask, kwargs
   batch_size, seq_len, _ = hidden_states.shape
   dtype = hidden_states.dtype

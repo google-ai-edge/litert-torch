@@ -504,6 +504,96 @@ class PatchTest(parameterized.TestCase):
           model.model.layers[1].self_attn.use_qkv_norm_rope_composite
       )
 
+  def test_lfm2_patched_modules_accept_cache_kwarg(self):
+    torch.manual_seed(0)
+    config = _get_dummy_lfm2_config()
+    hidden_states = torch.randn(1, 4, config.hidden_size)
+    position_ids = torch.arange(4).unsqueeze(0)
+    position_embeddings = _get_dummy_position_embeddings(
+        config, hidden_states, position_ids
+    )
+
+    class _DummyLayerCache:
+
+      def __init__(self, state):
+        self.conv_states = state
+
+    class _DummyCache:
+
+      def __init__(self, state):
+        self.layers = [_DummyLayerCache(state)]
+        self.update_calls = 0
+
+      def update(self, k, v, layer_idx, *args, **kwargs):
+        del layer_idx, args, kwargs
+        self.update_calls += 1
+        return k + 0.5, v + 0.5
+
+    init_state = torch.randn(1, config.conv_L_cache - 1, config.hidden_size)
+    with patch.lfm2_litert_patch():
+      conv_layer = modeling_lfm2.Lfm2DecoderLayer(config, layer_idx=0).eval()
+      unfused_attn_layer = modeling_lfm2.Lfm2DecoderLayer(
+          config, layer_idx=1
+      ).eval()
+      fused_attn_layer = modeling_lfm2.Lfm2DecoderLayer(
+          config, layer_idx=1
+      ).eval()
+
+    setattr(
+        fused_attn_layer,
+        "self_attn",
+        patch.FusedLfm2Attention(fused_attn_layer.self_attn, fuse_qkv=True),
+    )
+
+    cache_new = _DummyCache(init_state.clone())
+    cache_legacy = _DummyCache(init_state.clone())
+    cache_unfused = _DummyCache(init_state.clone())
+    with torch.no_grad():
+      conv_out_new = conv_layer(
+          hidden_states=hidden_states,
+          position_ids=position_ids,
+          cache=cache_new,
+      )
+      conv_out_legacy = conv_layer(
+          hidden_states=hidden_states,
+          position_ids=position_ids,
+          past_key_values=cache_legacy,
+      )
+      unfused_attn_out_new = unfused_attn_layer(
+          hidden_states=hidden_states,
+          position_embeddings=position_embeddings,
+          position_ids=position_ids,
+          cache=cache_unfused,
+      )
+      unfused_attn_out_uncached = unfused_attn_layer(
+          hidden_states=hidden_states,
+          position_embeddings=position_embeddings,
+          position_ids=position_ids,
+      )
+      attn_out_new = fused_attn_layer(
+          hidden_states=hidden_states,
+          position_embeddings=position_embeddings,
+          position_ids=position_ids,
+          cache=cache_new,
+      )
+      attn_out_legacy = fused_attn_layer(
+          hidden_states=hidden_states,
+          position_embeddings=position_embeddings,
+          position_ids=position_ids,
+          past_key_values=cache_legacy,
+      )
+    torch.testing.assert_close(conv_out_new, conv_out_legacy)
+    torch.testing.assert_close(
+        cache_new.layers[0].conv_states, cache_legacy.layers[0].conv_states
+    )
+    self.assertEqual(cache_unfused.update_calls, 1)
+    self.assertFalse(
+        torch.allclose(unfused_attn_out_new, unfused_attn_out_uncached)
+    )
+    self.assertEqual(cache_new.update_calls, 1)
+    self.assertEqual(cache_legacy.update_calls, 1)
+    torch.testing.assert_close(attn_out_new, attn_out_legacy)
+
 
 if __name__ == "__main__":
 

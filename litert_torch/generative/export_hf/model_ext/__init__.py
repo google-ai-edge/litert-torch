@@ -32,38 +32,9 @@ See `model_ext/extension.py` for full hook documentation and
 # modeling modules apply to their RMSNorm classes at import time, and the
 # built-in extensions below import such modules.
 from litert_torch.generative.export_hf.core import patches as _
+from litert_torch.generative.export_hf.model_ext import builtin_extensions as _
 from litert_torch.generative.export_hf.model_ext import extension
 from litert_torch.generative.layers import moe
-from transformers.utils import auto_docstring
-
-# Silence spurious '[ERROR] ... is part of ... signature, but not documented.'
-# printouts emitted by transformers.utils.auto_docstring when upstream model
-# classes (such as Qwen3_5TextConfig / Qwen3_5VisionConfig) are imported.
-if not getattr(auto_docstring, "_litert_quiet_patched", False):
-  for _fn_name in (
-      "_process_regular_parameters",
-      "_process_kwargs_parameters",
-  ):
-    if hasattr(auto_docstring, _fn_name):
-      _orig_fn = getattr(auto_docstring, _fn_name)
-
-      def _make_quiet_wrapper(orig_fn):
-        def _quiet_wrapper(*args, **kwargs):
-          result = orig_fn(*args, **kwargs)
-          if len(args) > 5 and isinstance(args[5], list):
-            args[5].clear()
-          elif isinstance(kwargs.get("undocumented_parameters"), list):
-            kwargs["undocumented_parameters"].clear()
-          return result
-
-        return _quiet_wrapper
-
-      setattr(auto_docstring, _fn_name, _make_quiet_wrapper(_orig_fn))
-  setattr(auto_docstring, "_litert_quiet_patched", True)
-
-# pylint: disable=g-bad-import-order,g-import-not-at-top,g-statement-before-imports
-from litert_torch.generative.export_hf.model_ext import builtin_extensions as _
-# pylint: enable=g-bad-import-order,g-import-not-at-top,g-statement-before-imports
 
 try:
   from transformers.integrations import moe as transformers_moe

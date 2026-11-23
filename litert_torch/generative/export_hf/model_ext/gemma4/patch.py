@@ -366,6 +366,7 @@ try:
         past_key_values=None,
         **kwargs,
     ):
+      past_key_values = patches_lib.resolve_cache(past_key_values, kwargs)
       input_shape = hidden_states.shape[:-1]
       hidden_shape = (*input_shape, -1, self.head_dim)
       cos, sin = position_embeddings

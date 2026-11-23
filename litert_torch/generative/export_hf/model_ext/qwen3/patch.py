@@ -162,6 +162,7 @@ class FusedQwen3Attention(torch.nn.Module):
       cache_position: torch.LongTensor | None = None,
       **kwargs,
   ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    past_key_values = patches_lib.resolve_cache(past_key_values, kwargs)
     input_shape = hidden_states.shape[:-1]
     hidden_shape_q = (*input_shape, self.num_heads, self.head_dim)
     hidden_shape_kv = (*input_shape, self.num_key_value_heads, self.head_dim)

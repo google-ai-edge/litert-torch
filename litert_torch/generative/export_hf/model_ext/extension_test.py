@@ -1883,6 +1883,29 @@ class BuiltinGemma3nExtensionContractTest(
         ],
     )
 
+  def test_resolve_cache_handles_legacy_and_v5_24_kwargs(self):
+    cache_a = object()
+    cache_b = object()
+
+    kwargs = {'cache': cache_a, 'other': 1}
+    self.assertIs(patches.resolve_cache(None, kwargs), cache_a)
+    self.assertEqual(kwargs, {'other': 1})
+
+    kwargs = {'other': 2}
+    self.assertIs(patches.resolve_cache(cache_a, kwargs), cache_a)
+    self.assertEqual(kwargs, {'other': 2})
+
+    kwargs = {'cache': cache_a}
+    self.assertIs(patches.resolve_cache(cache_a, kwargs), cache_a)
+    self.assertEqual(kwargs, {})
+
+    self.assertIsNone(patches.resolve_cache(None, {}))
+
+    with self.assertRaisesRegex(ValueError, 'cache_params.*cache'):
+      patches.resolve_cache(
+          cache_a, {'cache': cache_b}, legacy_name='cache_params'
+      )
+
 
 if __name__ == '__main__':
   googletest.main()

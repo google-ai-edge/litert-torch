@@ -133,6 +133,7 @@ class FusedGemma3Attention(torch.nn.Module):
       past_key_values=None,
       **kwargs,
   ):
+    past_key_values = patches_lib.resolve_cache(past_key_values, kwargs)
     if self.fuse_qkv:
       qkv = self.qkv_proj(hidden_states)
       q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)

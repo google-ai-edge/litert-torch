@@ -15,6 +15,7 @@
 """Patch for LFM2."""
 
 import contextlib
+import inspect
 from litert_torch.generative.export_hf.core import fused_linear
 from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope as qkv_norm_rope_composite
 from litert_torch.generative.export_hf.experimental.composites import rope as rope_composite
@@ -25,6 +26,16 @@ from litert_torch.generative.layers import normalization
 import torch
 import transformers
 from transformers.models.lfm2 import modeling_lfm2
+
+# Evaluated once at import time to avoid `inspect.signature` inside traced
+# `forward()` calls. Transformers 5.24 renamed `past_key_values` -> `cache`.
+_LFM2_ATTN_CACHE_KWARG = (
+    "cache"
+    if "cache" in inspect.signature(
+        modeling_lfm2.Lfm2Attention.forward
+    ).parameters
+    else "past_key_values"
+)
 
 
 class Lfm2RMSNorm(torch.nn.Module):
@@ -154,6 +165,7 @@ class FusedLfm2Attention(torch.nn.Module):
       position_ids: torch.LongTensor | None = None,
       **kwargs,
   ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    past_key_values = patches_lib.resolve_cache(past_key_values, kwargs)
     input_shape = hidden_states.shape[:-1]
     hidden_shape_q = (*input_shape, self.num_heads, self.head_dim)
     hidden_shape_kv = (*input_shape, self.num_key_value_heads, self.head_dim)
@@ -295,7 +307,7 @@ class FusedLfm2Attention(torch.nn.Module):
 
 
 class PatchedLfm2DecoderLayer(modeling_lfm2.Lfm2DecoderLayer):
-  """Patched Lfm2DecoderLayer supporting past_key_values and position_ids."""
+  """Patched Lfm2DecoderLayer supporting cache/past_key_values and position_ids."""
 
   def forward(
       self,
@@ -306,6 +318,7 @@ class PatchedLfm2DecoderLayer(modeling_lfm2.Lfm2DecoderLayer):
       past_key_values=None,
       **kwargs,
   ) -> torch.Tensor:
+    past_key_values = patches_lib.resolve_cache(past_key_values, kwargs)
     residual = hidden_states
     if self.is_attention_layer:
       hidden_states, _ = self.self_attn(
@@ -313,7 +326,7 @@ class PatchedLfm2DecoderLayer(modeling_lfm2.Lfm2DecoderLayer):
           position_embeddings=position_embeddings,
           attention_mask=attention_mask,
           position_ids=position_ids,
-          past_key_values=past_key_values,
+          **{_LFM2_ATTN_CACHE_KWARG: past_key_values},
           **kwargs,
       )
     else:

@@ -1004,6 +1004,57 @@ class PatchTest(parameterized.TestCase):
       inputs_dict, _ = sample_inputs[f"vision_adapter_{n}"]
       self.assertEqual(tuple(inputs_dict["soft_tokens"].shape), (1, n, 1152))
 
+  def test_fused_gemma4_text_attention_accepts_cache_kwarg(self):
+    torch.manual_seed(0)
+    config = _get_dummy_gemma4_text_config()
+    original_attn = modeling_gemma4.Gemma4TextAttention(config, layer_idx=0)
+    fused_attn = patch.FusedGemma4TextAttention(original_attn, fuse_qkv=True)
+
+    hidden_states = torch.randn(1, 4, config.hidden_size)
+    position_ids = torch.arange(4).unsqueeze(0)
+    rotary_emb = modeling_gemma4.Gemma4TextRotaryEmbedding(config)
+    position_embeddings = rotary_emb(
+        hidden_states, position_ids, layer_type=config.layer_types[0]
+    )
+
+    class _DummyCache:
+
+      def __init__(self):
+        self.calls = 0
+
+      def update(self, k, v, layer_idx, *args, **kwargs):
+        del layer_idx, args, kwargs
+        self.calls += 1
+        return k + 0.5, v + 0.5
+
+    cache = _DummyCache()
+    legacy_cache = _DummyCache()
+    with torch.no_grad():
+      out_cache, _ = fused_attn(
+          hidden_states=hidden_states,
+          position_embeddings=position_embeddings,
+          attention_mask=None,
+          shared_kv_states={},
+          cache=cache,
+      )
+      out_legacy, _ = fused_attn(
+          hidden_states=hidden_states,
+          position_embeddings=position_embeddings,
+          attention_mask=None,
+          shared_kv_states={},
+          past_key_values=legacy_cache,
+      )
+      out_uncached, _ = fused_attn(
+          hidden_states=hidden_states,
+          position_embeddings=position_embeddings,
+          attention_mask=None,
+          shared_kv_states={},
+      )
+    self.assertEqual(cache.calls, 1)
+    self.assertEqual(legacy_cache.calls, 1)
+    torch.testing.assert_close(out_cache, out_legacy)
+    self.assertFalse(torch.allclose(out_cache, out_uncached))
+
 
 if __name__ == "__main__":
   googletest.main()

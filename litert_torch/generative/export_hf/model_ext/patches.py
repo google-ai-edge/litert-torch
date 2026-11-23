@@ -47,6 +47,43 @@ _CONTEXT_REGISTRY: Dict[str, Callable[[], Any]] = {}
 _MODEL_PATCH_REGISTRY: Dict[str, Callable[[Any, Any], Any]] = {}
 
 
+def resolve_cache(
+    legacy_cache: Any,
+    kwargs: dict[str, Any],
+    *,
+    legacy_name: str = "past_key_values",
+) -> Any:
+  """Resolves the cache argument across transformers <5.24 and >=5.24.
+
+  Transformers 5.24 renamed `past_key_values` / `cache_params` to `cache` on
+  decoder, attention, conv, and mixer `forward` methods.
+
+  Args:
+    legacy_cache: Value received via the legacy parameter (`past_key_values` or
+      `cache_params`).
+    kwargs: Extra keyword arguments dict passed to `forward`; `"cache"` is
+      popped so it is not forwarded redundantly downstream.
+    legacy_name: Legacy parameter name used in conflict error messages.
+
+  Returns:
+    The resolved cache object, or `None` if neither was provided.
+
+  Raises:
+    ValueError: If both `legacy_cache` and `kwargs["cache"]` are passed with
+      distinct non-`None` objects.
+  """
+  cache = kwargs.pop("cache", None)
+  if (
+      legacy_cache is not None
+      and cache is not None
+      and legacy_cache is not cache
+  ):
+    raise ValueError(
+        f"Both `{legacy_name}` and `cache` were passed with different objects."
+    )
+  return legacy_cache if legacy_cache is not None else cache
+
+
 def register_patch(model_types):
   """Decorator that registers a load-time class patch context manager.
 

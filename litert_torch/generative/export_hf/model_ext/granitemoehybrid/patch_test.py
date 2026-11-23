@@ -372,6 +372,25 @@ class PatchTest(parameterized.TestCase):
     self.assertEqual(step_mock.call_count, num_steps)
     self.assertEqual(scan_mock.call_count, num_scans)
 
+  def test_mamba2_mixer_forward_accepts_cache_kwarg(self):
+    torch.manual_seed(0)
+    config = _get_config()
+    mixer = _get_mixer()
+    x = torch.randn(1, 1, 64)
+    cache_new = _get_mamba_cache(config)
+    cache_legacy = _get_mamba_cache(config)
+    with torch.no_grad():
+      out_new = patch.mamba2_mixer_forward(mixer, x, cache=cache_new)
+      out_legacy = patch.mamba2_mixer_forward(
+          mixer, x, cache_params=cache_legacy
+      )
+    torch.testing.assert_close(out_new, out_legacy)
+    for name in ("conv_states", "recurrent_states"):
+      torch.testing.assert_close(
+          getattr(cache_new.layers[0], name),
+          getattr(cache_legacy.layers[0], name),
+      )
+
   @parameterized.named_parameters(
       ("decode", 1, True, 0),
       ("single_token_without_a_cache", 1, False, 0),
