@@ -432,6 +432,8 @@ class Qwen3_5StaticGatedDeltaNet(nn.Module):
             norm_eps=self.norm.variance_epsilon,
             use_fp32=self.use_fp32,
             gdn_mode=self.gdn_mode,
+            # Subclasses may swap in a gated norm with a `sigmoid` gate.
+            output_gate_type=getattr(self.norm, "gate_activation", "silu"),
         )
     )
     return core_attn_out, new_conv_state, new_recurrent_state

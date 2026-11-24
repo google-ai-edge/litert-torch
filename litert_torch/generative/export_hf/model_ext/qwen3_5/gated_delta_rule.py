@@ -470,6 +470,19 @@ def _gated_delta_block_dims(
   return key_dim // head_k_dim, num_v_heads, head_k_dim, head_v_dim
 
 
+_OUTPUT_GATE_TYPES = ("silu", "sigmoid")
+
+
+def _check_output_gate_type(output_gate_type: str) -> str:
+  """Validates the gated RMSNorm output gate activation."""
+  if output_gate_type not in _OUTPUT_GATE_TYPES:
+    raise ValueError(
+        f"Unsupported output_gate_type {output_gate_type!r}; expected one of"
+        f" {_OUTPUT_GATE_TYPES}."
+    )
+  return output_gate_type
+
+
 def gated_delta_block(
     conv_out: torch.Tensor,
     zba: torch.Tensor,
@@ -483,6 +496,7 @@ def gated_delta_block(
     norm_eps: float = 1e-6,
     mode: int = 0,
     use_fused_gdn: bool = False,
+    output_gate_type: str = "silu",
 ) -> tuple[torch.Tensor, torch.Tensor]:
   """Post-conv GatedDeltaNet block, the decomposition of `odml.gated_delta_block`.
 
@@ -505,11 +519,14 @@ def gated_delta_block(
     mode: `mode` attribute of the `gated_delta_update` recurrence.
     use_fused_gdn: Whether the recurrence is emitted as the `gated_delta_update`
       custom op (export) or computed in PyTorch (reference).
+    output_gate_type: Activation applied to `z` in the gated RMSNorm, `silu`
+      (e.g. Qwen3.5) or `sigmoid`.
 
   Returns:
     The gated, normalized output [batch, seq_len, value_dim] and the new
     float32 recurrent state.
   """
+  output_gate_type = _check_output_gate_type(output_gate_type)
   batch_size, seq_len, _ = conv_out.shape
   num_k_heads, num_v_heads, head_k_dim, head_v_dim = _gated_delta_block_dims(
       conv_out, recurrent_state
@@ -561,7 +578,8 @@ def gated_delta_block(
   )
   core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(conv_out.dtype)
   z = z.reshape(batch_size, seq_len, num_v_heads, head_v_dim)
-  out = _rms_norm_last_dim(core_attn_out, norm_weight, norm_eps) * F.silu(z)
+  gate = torch.sigmoid(z) if output_gate_type == "sigmoid" else F.silu(z)
+  out = _rms_norm_last_dim(core_attn_out, norm_weight, norm_eps) * gate
   if valid_mask is not None:
     out = out * (valid_mask != 0).view(batch_size, seq_len, 1, 1).to(out.dtype)
   return out.reshape(batch_size, seq_len, value_dim), new_state.to(
@@ -582,6 +600,7 @@ def apply_gated_delta_block(
     norm_eps: float,
     use_fp32: bool = True,
     gdn_mode: int = 0,
+    output_gate_type: str = "silu",
 ) -> tuple[torch.Tensor, torch.Tensor]:
   """Emits the post-conv GatedDeltaNet block as `odml.gated_delta_block`.
 
@@ -592,8 +611,10 @@ def apply_gated_delta_block(
 
   Composite operands, in order: conv_out, zba, a_log, dt_bias, norm_weight,
   recurrent_state and the optional valid_mask. Results: the gated output and
-  the new recurrent state. Attributes: `mode`, `eps` and `norm_eps`; head counts
-  and head dims follow from the conv_out and recurrent_state shapes.
+  the new recurrent state. Attributes: `mode`, `eps`, `norm_eps` and, for a
+  non-SiLU output gate, `output_gate_type` (absent means `silu`, so SiLU
+  graphs are unchanged); head counts and head dims follow from the conv_out and
+  recurrent_state shapes.
 
   Args:
     conv_out: Short conv output [batch, seq_len, 2 * key_dim + value_dim].
@@ -608,11 +629,14 @@ def apply_gated_delta_block(
     norm_eps: Epsilon of the gated RMSNorm.
     use_fp32: Whether activations are cast to float32 at the composite boundary.
     gdn_mode: `mode` attribute of the `gated_delta_update` recurrence.
+    output_gate_type: Activation applied to `z` in the gated RMSNorm, `silu` or
+      `sigmoid`.
 
   Returns:
     The gated, normalized output [batch, seq_len, value_dim] and the new
     recurrent state.
   """
+  output_gate_type = _check_output_gate_type(output_gate_type)
   initial_dtype = conv_out.dtype
   compute_dtype = torch.float32 if use_fp32 else initial_dtype
   operands = [
@@ -625,13 +649,16 @@ def apply_gated_delta_block(
   ]
   if valid_mask is not None:
     operands.append(valid_mask.to(compute_dtype))
+  attr: dict[str, int | float | str] = {
+      "mode": int(gdn_mode),
+      "eps": float(eps),
+      "norm_eps": float(norm_eps),
+  }
+  if output_gate_type != "silu":
+    attr["output_gate_type"] = output_gate_type
   builder = composite.StableHLOCompositeBuilder(
       name="odml.gated_delta_block",
-      attr={
-          "mode": int(gdn_mode),
-          "eps": float(eps),
-          "norm_eps": float(norm_eps),
-      },
+      attr=attr,
   )
   operands = builder.mark_inputs(*operands)
   out, new_state = gated_delta_block(
@@ -641,6 +668,7 @@ def apply_gated_delta_block(
       norm_eps=float(norm_eps),
       mode=int(gdn_mode),
       use_fused_gdn=True,
+      output_gate_type=output_gate_type,
   )
   out, new_state = builder.mark_outputs(out, new_state)
   return out.to(initial_dtype), new_state
