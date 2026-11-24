@@ -330,25 +330,10 @@ class LiteRTExportableModuleForDecoderOnlyLM(ExportableModuleBase):
       ret["input_ids"] = tokens
 
     valid_mask = None
-    if tokens is not None:
-      pad_token_id = None
-      if (
-          getattr(self.source_model_artifacts, "tokenizer", None) is not None
-          and getattr(
-              self.source_model_artifacts.tokenizer, "pad_token_id", None
-          )
-          is not None
-      ):
-        pad_token_id = self.source_model_artifacts.tokenizer.pad_token_id
-      if (
-          pad_token_id is None
-          and getattr(text_config, "pad_token_id", None) is not None
-      ):
-        pad_token_id = text_config.pad_token_id
-      if not isinstance(pad_token_id, int) or pad_token_id < 0:
-        pad_token_id = 0
-      valid_mask = tokens != pad_token_id
-    elif input_pos is not None:
+    if input_pos is not None:
+      # In a prefill chunk the runtime gives the real tokens increasing
+      # positions and the padding rows position 0, so the positions mark the
+      # padding rows. The token ids do not: a prompt may contain the pad token.
       valid_mask_0 = torch.ones_like(input_pos[:1], dtype=torch.bool).unsqueeze(
           0
       )

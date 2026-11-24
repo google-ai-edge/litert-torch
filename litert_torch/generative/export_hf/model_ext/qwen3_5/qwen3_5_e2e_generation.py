@@ -179,6 +179,7 @@ def run_e2e_generation(
         dtype=torch.int64,
         device=input_ids.device,
     )
+    input_pos[chunk_len:] = 0  # Padding rows get position 0 at runtime.
     prefill_mask = qwen3_5_exportable.create_qwen3_5_attention_mask(
         prefill_chunk_size,
         cache_length,

@@ -508,9 +508,10 @@ class PatchTest(parameterized.TestCase):
       ("one_group", 11, 16, 1),
       ("two_heads_per_group", 11, 16, 4),
       ("group_per_head", 11, 16, 8),
+      ("pad_token_in_the_prompt", 11, 16, 2, 4),
   )
   def test_prefill_and_decode_match_transformers(
-      self, prompt_len, prefill_len, n_groups=2
+      self, prompt_len, prefill_len, n_groups=2, prompt_pad_at=None
   ):
     num_decode = 4
     model = _get_model(n_groups)
@@ -518,6 +519,9 @@ class PatchTest(parameterized.TestCase):
     ids = torch.randint(1, config.vocab_size, (1, prompt_len + num_decode))
     # A decoded token may be the pad token (id 0): it is still a real token.
     ids[0, prompt_len + 1] = 0
+    if prompt_pad_at is not None:
+      # So is a pad token inside the prompt.
+      ids[0, prompt_pad_at] = 0
     with torch.no_grad():
       expected = model(input_ids=ids).logits[0]
 

@@ -173,6 +173,7 @@ def run_pytorch_exportable_pipeline(
   tokens[:, :prefill_prompt_len] = input_ids[:, :prefill_prompt_len]
 
   input_pos = torch.arange(prefill_chunk_size, dtype=torch.int64, device=device)
+  input_pos[prefill_prompt_len:] = 0  # Padding rows get position 0 at runtime.
   prefill_mask = create_qwen3_5_attention_mask(
       seq_len=prefill_chunk_size,
       cache_length=cache_length,
