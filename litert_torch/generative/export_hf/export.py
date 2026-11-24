@@ -236,6 +236,8 @@ class ExportPlan:
       `'target'`).
     target: Canonical hardware target string (e.g. `'cpu_gpu'`, `'npu'`,
       `'npu:qualcomm'`).
+    artifacts: Exported model artifacts produced by `export()` when
+      `dry_run=False`, or `None` for dry runs.
   """
 
   model: str
@@ -245,6 +247,9 @@ class ExportPlan:
   export_kwargs: Mapping[str, Any]
   sources: Mapping[str, str]
   target: str = TARGET_CPU_GPU
+  artifacts: export_lib.ExportedModelArtifacts | None = dataclasses.field(
+      default=None, repr=False, compare=False
+  )
 
   def summary_rows(self) -> list[tuple[str, str, str]]:
     """Returns `(setting, value, source)` rows describing the plan."""
@@ -437,6 +442,7 @@ def _resolve_plan(
     target: str | None = None,
     extension_modules: Sequence[str] | str | None = None,
     overrides: Mapping[str, Any] | None = None,
+    config_dict: Mapping[str, Any] | None = None,
 ) -> ExportPlan:
   """Resolves the task, target defaults, and extension defaults for `model`."""
   overrides = {
@@ -471,7 +477,10 @@ def _resolve_plan(
     overrides['extension_modules'] = extension_modules
   model_ext_extension.discover_entry_point_extensions()
 
-  config, model_index = load_checkpoint_config(model)
+  if config_dict is not None:
+    config, model_index = dict(config_dict), None
+  else:
+    config, model_index = load_checkpoint_config(model)
   model_type, extensions = _find_extensions(
       model,
       config,
@@ -671,19 +680,21 @@ def _warn_if_legacy_compile(
 def run_export_tasks(
     export_tasks,
     export_config: exportable_module.ExportableModuleConfig,
+    source_model_artifacts: export_lib.SourceModelArtifacts | None = None,
 ) -> export_lib.ExportedModelArtifacts:
   """Runs export tasks."""
-  model_path = export_config.model
-  trust_remote_code = export_config.trust_remote_code
-  auto_model_override = export_config.auto_model_override
-  task = export_config.task
-  source_model_artifacts = export_lib.load_model(
-      model_path,
-      export_config,
-      trust_remote_code=trust_remote_code,
-      auto_model_override=auto_model_override,
-      task=task,
-  )
+  if source_model_artifacts is None:
+    model_path = export_config.model
+    trust_remote_code = export_config.trust_remote_code
+    auto_model_override = export_config.auto_model_override
+    task = export_config.task
+    source_model_artifacts = export_lib.load_model(
+        model_path,
+        export_config,
+        trust_remote_code=trust_remote_code,
+        auto_model_override=auto_model_override,
+        task=task,
+    )
   prev_default_tasks, prev_legacy_compile = _build_export_tasks(export_config)
   updated_config = export_lib.update_export_config(
       export_config, source_model_artifacts
@@ -714,6 +725,12 @@ def run_export_tasks(
         message=r'.*treespec\.children_specs` is deprecated.*',
     )
     for export_task in export_tasks:
+      if (
+          export_task is export_lib.export_tokenizer
+          and source_model_artifacts.tokenizer is None
+          and not export_config.bundle_litert_lm
+      ):
+        continue
       exported_model_artifacts = export_task(
           source_model_artifacts,
           export_config,
@@ -734,7 +751,7 @@ _NULLABLE_QUANTIZATION_KEYS = frozenset({
 
 
 def export(
-    model: str,
+    model: str | Any,
     output_dir: str | None = None,
     task: ExportTask | str | None = TASK_AUTO,
     target: str | None = None,
@@ -810,6 +827,7 @@ def export(
     delete_in_memory_params: bool | None = None,
     model_extension: Any = None,
     extension_modules: Sequence[str] | str | None = None,
+    tokenizer: Any = None,
     # pylint: enable=unused-argument
     **kwargs,
 ) -> ExportPlan:
@@ -1002,6 +1020,8 @@ def export(
       module paths or `.py` file paths to import before export so custom
       `ModelExtension` subclasses and their `extra_kwargs_keys` CLI flags are
       registered (e.g. `['my_pkg.my_ext']` or `'./my_arch_extension.py'`).
+    tokenizer: Optional Hugging Face tokenizer or processor used when `model` is
+      an already-loaded `PreTrainedModel` instance.
     **kwargs: Additional keyword arguments to pass to the exportable module
       config.
 
@@ -1027,12 +1047,34 @@ def export(
           'task',
           'target',
           'dry_run',
+          'tokenizer',
           'kwargs',
       )
   }
   for k, v in kwargs.items():
     if v is not _UNSET and (v is not None or k in _NULLABLE_QUANTIZATION_KEYS):
       provided_args[k] = v
+
+  source_model_artifacts: export_lib.SourceModelArtifacts | None = None
+  in_memory_config_dict: Mapping[str, Any] | None = None
+  if not isinstance(model, str):
+    model.eval()
+    model_cfg = model.config
+    text_cfg = getattr(model_cfg, 'text_config', model_cfg)
+    if hasattr(model_cfg, 'allow_global_per_layer_attribute_access'):
+      model_cfg.allow_global_per_layer_attribute_access = True
+    if hasattr(text_cfg, 'allow_global_per_layer_attribute_access'):
+      text_cfg.allow_global_per_layer_attribute_access = True
+    source_model_artifacts = export_lib.SourceModelArtifacts(
+        model=model,
+        model_config=model_cfg,
+        text_model_config=text_cfg,
+        tokenizer=tokenizer,
+    )
+    in_memory_config_dict = (
+        model_cfg.to_dict() if hasattr(model_cfg, 'to_dict') else {}
+    )
+    model = getattr(model, 'name_or_path', '') or ''
 
   if dry_run:
     return _resolve_plan(
@@ -1041,6 +1083,7 @@ def export(
         target=target,
         extension_modules=extension_modules,
         overrides=provided_args,
+        config_dict=in_memory_config_dict,
     )
 
   if not output_dir:
@@ -1062,6 +1105,7 @@ def export(
         target=target,
         extension_modules=extension_modules,
         overrides=provided_args,
+        config_dict=in_memory_config_dict,
     )
     resolved_task = ExportTask(plan.task)
 
@@ -1103,10 +1147,17 @@ def export(
     if run_compilation_pipeline:
       export_config.keep_temporary_files = True
 
-    exported_model_artifacts = run_export_tasks(
-        export_tasks,
-        export_config,
-    )
+    if source_model_artifacts is None:
+      exported_model_artifacts = run_export_tasks(
+          export_tasks,
+          export_config,
+      )
+    else:
+      exported_model_artifacts = run_export_tasks(
+          export_tasks,
+          export_config,
+          source_model_artifacts=source_model_artifacts,
+      )
 
     run_compilation_pipeline = _should_run_compilation_pipeline(export_config)
 
@@ -1123,6 +1174,16 @@ def export(
           work_dir=work_dir,
           output_dir=output_dir,
       )
+      compiled_litertlm = os.path.join(output_dir, 'model.litertlm')
+      if isinstance(
+          exported_model_artifacts, export_lib.ExportedModelArtifacts
+      ):
+        exported_model_artifacts = dataclasses.replace(
+            exported_model_artifacts,
+            litert_lm_model_path=compiled_litertlm,
+        )
+      else:
+        exported_model_artifacts.litert_lm_model_path = compiled_litertlm
       export_config.keep_temporary_files = orig_keep_temp
 
     keep_temp = export_config.keep_temporary_files
@@ -1145,4 +1206,4 @@ def export(
       'Export complete. Model saved to:'
       f' {exported_model_artifacts.litert_lm_model_path or output_dir}'
   )
-  return plan
+  return dataclasses.replace(plan, artifacts=exported_model_artifacts)
