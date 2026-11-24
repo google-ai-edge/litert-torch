@@ -437,6 +437,12 @@ class LiteRTExportableModuleForDecoderOnlyLM(ExportableModuleBase):
             flat_shapes.append(None)
           else:
             flat_shapes.append(None)
+        elif isinstance(layer, cache_lib.LiteRTLMHybridCacheLayer):
+          # The KV cache, then the Mamba2 conv and recurrent states.
+          flat_shapes.append({layer.k_ts_idx: export_config.cache_length_dim})
+          flat_shapes.append({layer.v_ts_idx: export_config.cache_length_dim})
+          flat_shapes.append(None)
+          flat_shapes.append(None)
         elif hasattr(layer, "conv_state") or hasattr(layer, "conv_states"):
           flat_shapes.append(None)
         else:

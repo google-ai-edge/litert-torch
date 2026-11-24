@@ -678,6 +678,183 @@ class CacheTest(googletest.TestCase):
     with self.assertRaisesRegex(ValueError, "Unsupported layer type"):
       cache_lib._unflatten_kvc_t([], ([], (1, 1, 2, 3, ["unknown"])))
 
+  def test_hybrid_cache_layers(self):
+    class MockFalconH1Config:
+
+      def __init__(self):
+        self.num_hidden_layers = 2
+        self.layer_types = ["hybrid", "hybrid"]
+        self.hidden_size = 64
+        self.num_attention_heads = 4
+        self.num_key_value_heads = 2
+        self.head_dim = 8
+        self.mamba_n_heads = 8
+        self.mamba_d_head = 16
+        self.mamba_d_state = 32
+        self.mamba_n_groups = 1
+        self.mamba_d_conv = 4
+
+    class MockZamba2Config:
+
+      def __init__(self):
+        self.num_hidden_layers = 3
+        self.layer_types = ["linear_attention", "hybrid", "linear_attention"]
+        self.hidden_size = 64
+        self.num_attention_heads = 4
+        self.num_key_value_heads = 2
+        self.head_dim = 8
+        self.n_mamba_heads = 8
+        self.mamba_headdim = 16
+        self.mamba_d_state = 32
+        self.mamba_ngroups = 1
+        self.mamba_d_conv = 4
+
+    class MockExportConfig:
+
+      def __init__(self):
+        self.batch_size = 1
+        self.cache_length = 128
+        self.k_ts_idx = 2
+        self.v_ts_idx = 3
+
+      def get_cache_dtype(self):
+        return torch.float32
+
+    export_config = MockExportConfig()
+    for model_config, expected_names in (
+        (
+            MockFalconH1Config(),
+            ["k_0", "v_0", "c_0", "r_0", "k_1", "v_1", "c_1", "r_1"],
+        ),
+        (
+            MockZamba2Config(),
+            ["c_0", "r_0", "k_1", "v_1", "c_1", "r_1", "c_2", "r_2"],
+        ),
+    ):
+      kv_cache = cache_lib.LiteRTLMCache.create_from_config(
+          model_config, export_config
+      )
+      for layer, layer_type in zip(kv_cache.layers, model_config.layer_types):
+        self.assertEqual(layer.layer_type, layer_type)
+        # Channels-last (B, kernel - 1, conv_dim), with
+        # conv_dim = heads * head_dim + 2 * groups * state_size.
+        self.assertEqual(layer.conv_states.shape, (1, 3, 8 * 16 + 2 * 32))
+        self.assertEqual(layer.recurrent_states.shape, (1, 8, 16, 32))
+        self.assertEqual(layer.recurrent_states.dtype, torch.float32)
+      hybrid_layer = kv_cache.layers[1]
+      self.assertIsInstance(hybrid_layer, cache_lib.LiteRTLMHybridCacheLayer)
+      self.assertEqual(hybrid_layer.keys.shape, (1, 2, 128, 8))
+      self.assertEqual(hybrid_layer.values.shape, (1, 2, 8, 128))
+      self.assertEqual(kv_cache.max_cache_len, 128)
+
+      flattened, context = cache_lib._flatten_kvc_t(kv_cache)
+      self.assertEqual(context[0], expected_names)
+      unflattened = cache_lib._unflatten_kvc_t(flattened, context)
+      self.assertEqual(
+          [type(layer) for layer in unflattened.layers],
+          [type(layer) for layer in kv_cache.layers],
+      )
+      for name, tensor in zip(context[0], flattened):
+        kind, index = name.split("_")
+        attr = {
+            "k": "keys",
+            "v": "values",
+            "c": "conv_states",
+            "r": "recurrent_states",
+        }[kind]
+        self.assertIs(getattr(unflattened.layers[int(index)], attr), tensor)
+
+    # The attention part writes the KV cache at the cache position.
+    hybrid_layer.set_cache_runtime_args(
+        {"cache_position": torch.tensor([5], dtype=torch.int32)}
+    )
+    key_states = torch.ones(1, 2, 1, 8)
+    value_states = torch.full((1, 2, 1, 8), 2.0)
+    keys, values = hybrid_layer.update(key_states, value_states)
+    self.assertTrue(torch.equal(keys[:, :, 5, :], torch.ones(1, 2, 8)))
+    self.assertTrue(torch.equal(values[:, :, :, 5], torch.full((1, 2, 8), 2.0)))
+    self.assertEqual(float(keys.sum()), 16.0)
+
+    # A dtype alone casts the KV cache and the conv state, not the recurrent
+    # state, and `to()` returns the layer.
+    self.assertIs(hybrid_layer.to(torch.float16), hybrid_layer)
+    self.assertEqual(hybrid_layer.keys.dtype, torch.float16)
+    self.assertEqual(hybrid_layer.values.dtype, torch.float16)
+    self.assertEqual(hybrid_layer.conv_states.dtype, torch.float16)
+    self.assertEqual(hybrid_layer.recurrent_states.dtype, torch.float32)
+
+    # A move by device name, by position or by keyword, or by dtype alone moves
+    # and casts the KV cache and the conv state; the recurrent state moves too
+    # and is float32 after it, also when it was set with another dtype.
+    moves = (
+        (("meta",), {}, "meta", torch.float32),
+        ((torch.device("meta"), torch.float16), {}, "meta", torch.float16),
+        ((), {"device": "meta", "dtype": torch.float16}, "meta", torch.float16),
+        ((torch.float16,), {}, "cpu", torch.float16),
+    )
+    for to_args, to_kwargs, device_type, dtype in moves:
+      layer = cache_lib.LiteRTLMHybridCacheLayer(
+          torch.zeros(1, 2, 128, 8),
+          torch.zeros(1, 2, 8, 128),
+          torch.zeros(1, 3, 8 * 16 + 2 * 32),
+          torch.zeros(1, 8, 16, 32, dtype=torch.bfloat16),
+      )
+      self.assertIs(layer.to(*to_args, **to_kwargs), layer)
+      keys, values = layer.keys, layer.values
+      if keys is None or values is None:
+        self.fail("The hybrid layer has no KV cache.")
+      for state in (keys, values, layer.conv_states):
+        self.assertEqual(state.device.type, device_type)
+        self.assertEqual(state.dtype, dtype)
+      self.assertEqual(layer.recurrent_states.device.type, device_type)
+      self.assertEqual(layer.recurrent_states.dtype, torch.float32)
+
+    # Only the "hybrid" layer type flattens as a hybrid layer: another type
+    # that the cache does not support, e.g. "chunked_attention", is refused,
+    # also with the four states of a hybrid layer.
+    states = (
+        torch.zeros(1, 2, 128, 8),
+        torch.zeros(1, 2, 8, 128),
+        torch.zeros(1, 3, 8 * 16 + 2 * 32),
+        torch.zeros(1, 8, 16, 32),
+    )
+    other_layer = cache_lib.LiteRTLMHybridCacheLayer(*states)
+    other_layer.layer_type = "chunked_attention"
+    with self.assertRaisesRegex(ValueError, "Unsupported layer type"):
+      cache_lib._flatten_kvc_t(cache_lib.LiteRTLMCache([other_layer]))
+    with self.assertRaisesRegex(ValueError, "Unsupported layer type"):
+      cache_lib._unflatten_kvc_t(
+          list(states),
+          (["k_0", "v_0", "c_0", "r_0"], (1, 1, 2, 3, ["chunked_attention"])),
+      )
+
+    # Built without the batch size and the sequence dims of its KV cache, a
+    # hybrid layer takes those of a full attention layer.
+    def layout(layer):
+      return layer.get_batch_size(), layer.get_k_ts_idx(), layer.get_v_ts_idx()
+
+    full_layer = cache_lib.LiteRTLMCacheLayer(
+        states[0], states[1], layer_type="full_attention"
+    )
+    self.assertEqual(
+        layout(cache_lib.LiteRTLMHybridCacheLayer(*states)), layout(full_layer)
+    )
+
+    class MockConfigWithoutMamba2Fields:
+
+      def __init__(self):
+        self.num_hidden_layers = 1
+        self.layer_types = ["hybrid"]
+        self.hidden_size = 64
+        self.num_attention_heads = 4
+        self.num_key_value_heads = 2
+        self.head_dim = 8
+
+    with self.assertRaisesRegex(ValueError, "needs the Mamba2 fields"):
+      cache_lib.LiteRTLMCache.create_from_config(
+          MockConfigWithoutMamba2Fields(), export_config
+      )
+
 
 if __name__ == "__main__":
   googletest.main()

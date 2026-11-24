@@ -40,6 +40,7 @@ supports lazy fallback imports for `model_ext.<model_type>.extension`:
 
 | Category | Subdirectory | Extension Class(es) | Registered `model_types` |
 | :--- | :--- | :--- | :--- |
+| **LLM** | `falcon_h1/` | `FalconH1Extension` | `falcon_h1` |
 | **LLM / VLM** | `gemma3/` | `Gemma3Extension` | `gemma3`, `gemma3_text` |
 | **LLM / VLM** | `gemma3n/` | `Gemma3nExtension` | `gemma3n` |
 | **LLM / VLM / Audio** | `gemma4/` | `Gemma4Extension` | `gemma4`, `gemma4_text` |
@@ -50,6 +51,7 @@ supports lazy fallback imports for `model_ext.<model_type>.extension`:
 | **LLM** | `nemotron_h/` | `NemotronHExtension` | `nemotron_h` |
 | **LLM** | `qwen3/` | `Qwen3Extension` | `qwen3`, `qwen3_text` |
 | **LLM** | `qwen3_5/` | `Qwen3_5Extension` | `qwen3_5`, `qwen3_5_text` |
+| **LLM** | `zamba2/` | `Zamba2Extension` | `zamba2` |
 | **ASR (Speech)** | `moonshine/` | `MoonshineExtension` | `moonshine` |
 | **ASR (Speech)** | `parakeet/` | `ParakeetCtcExtension`, `ParakeetTdtExtension` | `parakeet_ctc`, `parakeet_tdt` |
 | **ASR (Speech)** | `qwen3/` | `Qwen3AsrExtension` | `qwen3_asr` |
