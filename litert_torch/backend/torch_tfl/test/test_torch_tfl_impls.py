@@ -17,6 +17,7 @@
 from typing import Any, Dict, Sequence
 
 import litert_torch
+from litert_torch import backend
 from litert_torch import testing
 from litert_torch.backend import torch_tfl
 import numpy as np
@@ -164,6 +165,8 @@ class TestTorchTFLImpls(parameterized.TestCase):
       ("aten_mean_dim_0", torch.ops.aten.mean.dim, (rnd(torch.float32, (10, 10)), 0), dict()),
       ("aten_mean_dim_1", torch.ops.aten.mean.dim, (rnd(torch.float32, (10, 10)), 0, True), dict()),
       ("aten_mean_dim_2", torch.ops.aten.mean.dim, (rnd(torch.float32, (10, 10)), 1), dict()),
+      ("tfl_sum_0", torch.ops.tfl.sum.default, (rnd(torch.float32, (10, 10)), [1], True), dict()),
+      ("tfl_sum_1", torch.ops.tfl.sum.default, (rnd(torch.float32, (10, 10)), [0], False), dict()),
       ("aten_gt_Tensor_0", torch.ops.aten.gt.Tensor, (rnd(torch.float32, (10, 10)), rnd(torch.float32, (10, 10)),), dict()),
       ("aten_gt_Tensor_1", torch.ops.aten.gt.Tensor, (rnd(torch.float32, (1, 10)), rnd(torch.float32, (10, 1)),), dict()),
       ("aten_lt_Tensor_0", torch.ops.aten.lt.Tensor, (rnd(torch.float32, (10, 10)), rnd(torch.float32, (10, 10)),), dict()),
@@ -314,6 +317,18 @@ class TestTorchTFLImpls(parameterized.TestCase):
     self._assert_export_and_close(
         SplitWithSizesModel(), args, kwargs, dynamic_shapes
     )
+
+  def test_tfl_sum_keep_dims_before_mul(self):
+
+    class SumMulModel(torch.nn.Module):
+
+      def forward(self, x, y):
+        return torch.ops.tfl.sum(x, [1], True) * y
+
+    args = (rnd(torch.float32, (1, 8, 16)), rnd(torch.float32, (1, 1, 16)))
+    ep = torch.export.export(SumMulModel().eval(), args)
+    mlir_text = backend.export.exported_program_to_mlir(ep).get_text()
+    self.assertRegex(mlir_text, r"@tfl\.sum\(.*keep_dims = true")
 
 
 if __name__ == "__main__":

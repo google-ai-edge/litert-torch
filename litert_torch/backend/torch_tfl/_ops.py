@@ -75,6 +75,13 @@ def tfl_mean(x: torch.Tensor, dims: Any, keepdim: bool = False) -> torch.Tensor:
   return torch.mean(x, dims, keepdim)
 
 
+@custom_op_with_fake(
+    "tfl::sum", schema="(Tensor x, Any dims, bool keepdim) -> Tensor"
+)
+def tfl_sum(x: torch.Tensor, dims: Any, keepdim: bool = False) -> torch.Tensor:
+  return torch.sum(x, dims, keepdim)
+
+
 @custom_op_with_fake("tfl::greater")
 def tfl_greater(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
   return torch.gt(x, y)
