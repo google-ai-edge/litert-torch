@@ -14,15 +14,17 @@
 # ==============================================================================
 """Utility functions for quantization and calibration."""
 
+from collections.abc import Iterable
 import dataclasses
 import json
-import logging
 import os
 import re
 from typing import Any
 
+from absl import logging
 from litert_torch.generative.export_hf.experimental.calib import tokenizer as tokenizer_lib
 
+from ai_edge_litert.tools import flatbuffer_utils
 from litert_quantizer import qtyping
 from litert_quantizer import quantizer
 from litert_quantizer.algorithms.uniform_quantize import naive_min_max_quantize
@@ -445,14 +447,252 @@ def get_custom_materialize_input(float_input_tensor_regex: str):
   return _custom_materialize_input
 
 
+_RMS_NORM_COMPOSITE_NAME = 'odml.rms_norm'
+_RESIDUAL_ADD_REGEX = '.*(post_qkv|(DecoderLayer|decoder_layer)_[0-9]+;).*'
+# Scope of a module that is a direct child of a decoder layer, e.g.
+# `.../Gemma4TextDecoderLayer_0/...Gemma4RMSNorm_input_layernorm;` (but not
+# `.../Gemma4TextDecoderLayer_0/...Attention_self_attn/...RMSNorm_q_norm;`).
+_DECODER_LAYER_CHILD_REGEX = re.compile(
+    r'(DecoderLayer|decoder_layer)_[0-9]+/[^/;]*;'
+)
+
+
+def _get_op_name(
+    model: qtyping.ModelT, op: qtyping.OperatorT
+) -> qtyping.TFLOperationName | None:
+  """Returns the quantizer's name for the op type, or None if unknown."""
+  builtin_code = model.operatorCodes[op.opcodeIndex].builtinCode
+  return tfl_flatbuffer_utils.TFL_OP_CODE_TO_NAME.get(builtin_code)
+
+
+def _is_rms_norm_composite(op: qtyping.OperatorT) -> bool:
+  opts = flatbuffer_utils.get_options_as(op, qtyping.StableHLOCompositeOptionsT)
+  return opts is not None and opts.name.decode() == _RMS_NORM_COMPOSITE_NAME
+
+
+def _count_matching_ops(
+    model: qtyping.ModelT,
+    regex: str,
+    operation_name: qtyping.TFLOperationName,
+) -> int:
+  """Returns the number of ops a recipe rule with `regex` applies to.
+
+  The op scope is built the same way as in the quantizer: the op's output
+  tensor names joined with ';'.
+
+  Args:
+    model: The float model.
+    regex: The scope regex of the rule.
+    operation_name: The op type of the rule.
+  """
+  pattern = re.compile(regex)
+  count = 0
+  for subgraph in model.subgraphs:
+    for op in subgraph.operators:
+      if (
+          operation_name != qtyping.TFLOperationName.ALL_SUPPORTED
+          and _get_op_name(model, op) != operation_name
+      ):
+        continue
+      if pattern.search(
+          tfl_flatbuffer_utils.get_op_scope(op, subgraph.tensors)
+      ):
+        count += 1
+  return count
+
+
+def _warn_if_no_match(
+    model: qtyping.ModelT,
+    regex: str,
+    operation_name: qtyping.TFLOperationName,
+) -> None:
+  """Logs a warning if a recipe rule does not apply to any op in the model."""
+  if not _count_matching_ops(model, regex, operation_name):
+    logging.warning(
+        'Quantization recipe rule (regex=%r, operation=%s) matches no op in'
+        ' the model, so it has no effect. Check the tensor names of the model'
+        ' (Converter V2 names most tensors after their op, e.g. `tfl.add`).',
+        regex,
+        operation_name,
+    )
+
+
+def _extend_regex_with_scopes(regex: str, scopes: Iterable[str]) -> str:
+  """Returns a regex matching what `regex` matches plus the given op scopes.
+
+  The scopes are matched exactly, so an op that is not selected but has the
+  same scope (the same output tensor names) as a selected op is matched too.
+
+  Args:
+    regex: The scope regex of the rule.
+    scopes: The op scopes to add.
+  """
+  pattern = re.compile(regex)
+  missing = sorted(set(s for s in scopes if not pattern.search(s)))
+  if not missing:
+    return regex
+  exact = '|'.join(re.escape(s) for s in missing)
+  return f'(?:{regex})|^(?:{exact})$'
+
+
+def _get_decomposition_scopes(
+    model: qtyping.ModelT, composite_regex: str
+) -> set[str]:
+  """Returns the scopes of the ops in the decompositions of matched composites.
+
+  With Converter V2 the tensors inside a composite decomposition are named
+  after their op (e.g. `tfl.mul147`), while the STABLEHLO_COMPOSITE output
+  keeps its module path. A regex that selects a composite by name then no
+  longer selects the ops in its decomposition. This selects them by subgraph
+  membership instead: every op of the decomposition subgraph of each
+  STABLEHLO_COMPOSITE op that `composite_regex` matches (including nested
+  decompositions), and the OUTPUT op of that subgraph. The INPUT op is left
+  out: the decomposition inputs are named after the composite (e.g.
+  `odml.rms_norm.impl_arg0`) with both converters, so the regex already treats
+  them the same way.
+
+  Args:
+    model: The float model.
+    composite_regex: The scope regex that selects the composites.
+  """
+  pattern = re.compile(composite_regex)
+  pending = []
+  for subgraph in model.subgraphs:
+    for op in subgraph.operators:
+      opts = flatbuffer_utils.get_options_as(
+          op, qtyping.StableHLOCompositeOptionsT
+      )
+      if opts is None:
+        continue
+      if all(tensor_index in subgraph.outputs for tensor_index in op.outputs):
+        # The outputs are named after the signature outputs (e.g.
+        # `decode_kv_slice_v_5_output`) with both converters, so match the
+        # composite name (e.g. `odml.rms_norm`) instead.
+        name = opts.name.decode()
+      else:
+        name = tfl_flatbuffer_utils.get_op_scope(op, subgraph.tensors)
+      if pattern.search(name):
+        pending.append(opts.decompositionSubgraphIndex)
+
+  scopes = set()
+  visited = set()
+  while pending:
+    subgraph_index = pending.pop()
+    if subgraph_index in visited:
+      continue
+    visited.add(subgraph_index)
+    subgraph = model.subgraphs[subgraph_index]
+    for op in subgraph.operators:
+      scopes.add(tfl_flatbuffer_utils.get_op_scope(op, subgraph.tensors))
+      pending.extend(tfl_flatbuffer_utils.get_op_side_effect_subgraphs(op))
+    _, output_op = tfl_flatbuffer_utils.get_subgraph_input_output_operators(
+        subgraph
+    )
+    scopes.add(tfl_flatbuffer_utils.get_op_scope(output_op, subgraph.tensors))
+  scopes.discard('')
+  return scopes
+
+
+def _get_residual_add_scopes(model: qtyping.ModelT) -> set[str]:
+  """Returns the scopes of the residual ADD ops of the decoder layers.
+
+  An ADD is taken as a residual ADD if one of its inputs is produced by a norm
+  of a decoder layer (sandwich norm, `h = x + post_norm(attn(norm(x)))`), or
+  also feeds one (pre-norm, `h = x + attn(norm(x))`). A norm of a decoder layer
+  is an `odml.rms_norm` composite whose module is a direct child of the
+  decoder layer (so not `q_norm` or `k_norm`); the composite output names keep
+  the module path with both converters.
+
+  Args:
+    model: The float model.
+  """
+  scopes = set()
+  for subgraph in model.subgraphs:
+    layer_norm_inputs = set()
+    layer_norm_outputs = set()
+    for op in subgraph.operators:
+      if _is_rms_norm_composite(op) and _DECODER_LAYER_CHILD_REGEX.search(
+          tfl_flatbuffer_utils.get_op_scope(op, subgraph.tensors)
+      ):
+        layer_norm_inputs.update(op.inputs)
+        layer_norm_outputs.update(op.outputs)
+    if not layer_norm_outputs:
+      continue
+    for op in subgraph.operators:
+      if _get_op_name(model, op) != qtyping.TFLOperationName.ADD:
+        continue
+      if any(
+          tensor_index >= 0
+          and (
+              tensor_index in layer_norm_outputs
+              or tensor_index in layer_norm_inputs
+          )
+          for tensor_index in op.inputs
+      ):
+        scopes.add(tfl_flatbuffer_utils.get_op_scope(op, subgraph.tensors))
+  return scopes
+
+
+def _get_residual_add_regex(model: qtyping.ModelT) -> str:
+  """Returns the scope regex that selects the residual ADD ops.
+
+  The ADD ops are selected by name if any ADD op name matches
+  `_RESIDUAL_ADD_REGEX`. Otherwise (e.g. Converter V2 names such as
+  `tfl.add5`), they are selected from the graph with
+  `_get_residual_add_scopes`.
+
+  Args:
+    model: The float model.
+  """
+  regex = _RESIDUAL_ADD_REGEX
+  if _count_matching_ops(model, regex, qtyping.TFLOperationName.ADD):
+    return regex
+  scopes = _get_residual_add_scopes(model)
+  if not scopes:
+    _warn_if_no_match(model, regex, qtyping.TFLOperationName.ADD)
+    return regex
+  logging.info(
+      'No ADD op name matches %r; selected %d residual ADD ops from the'
+      ' graph instead.',
+      regex,
+      len(scopes),
+  )
+  return _extend_regex_with_scopes(regex, scopes)
+
+
 def _add_stablehlo_composite_graph_recipe(
     q: quantizer.Quantizer,
     norm_regex: str = '^(?!.*(rotated|rotate|reshaped)).*[rR][mM][sS]_?[nN][oO][rR][mM].*',
     activation_num_bits: int = 8,
 ) -> quantizer.Quantizer:
-  """Adds a quantization recipe for StableHLO composite graphs."""
+  """Adds a quantization recipe for StableHLO composite graphs.
+
+  The ops inside the decompositions of the composites matched by `norm_regex`
+  are kept in float, also if their own names do not match `norm_regex`.
+
+  Args:
+    q: The quantizer.
+    norm_regex: The scope regex that selects the composites.
+    activation_num_bits: The activation bits for the composites and the inputs
+      and outputs of their decompositions.
+
+  Returns:
+    The quantizer with the recipe added.
+  """
+  model = q._float_model
+  _warn_if_no_match(
+      model, norm_regex, qtyping.TFLOperationName.STABLEHLO_COMPOSITE
+  )
+  decomposition_scopes = _get_decomposition_scopes(model, norm_regex)
+  regex = _extend_regex_with_scopes(norm_regex, decomposition_scopes)
+  if regex != norm_regex:
+    logging.info(
+        'Selected the ops inside the decompositions of the composites matching'
+        ' %r by subgraph membership.',
+        norm_regex,
+    )
   q.update_quantization_recipe(
-      regex=norm_regex,
+      regex=regex,
       operation_name=qtyping.TFLOperationName.ALL_SUPPORTED,
       algorithm_key=quantizer.AlgorithmName.NO_QUANTIZE,
   )
@@ -462,7 +702,7 @@ def _add_stablehlo_composite_graph_recipe(
       qtyping.TFLOperationName.STABLEHLO_COMPOSITE,
   ]:
     q.add_static_config(
-        regex=norm_regex,
+        regex=regex,
         operation_name=op,
         activation_num_bits=activation_num_bits,
         weight_num_bits=8,
@@ -495,12 +735,17 @@ def add_main_model_quant_recipe(
   )
   if attn_bits in [8, 16]:
     print(f'--- Forcing {attn_bits}-bit activation for attention ops.')
+    attn_regex = '.*dot_product_attention.*'
+    _warn_if_no_match(
+        q._float_model, attn_regex, qtyping.TFLOperationName.ALL_SUPPORTED
+    )
     q.add_static_config(
-        regex='.*dot_product_attention.*',
+        regex=attn_regex,
         operation_name=qtyping.TFLOperationName.ALL_SUPPORTED,
         activation_num_bits=attn_bits,
         weight_num_bits=8,
     )
+  residual_add_regex = _get_residual_add_regex(q._float_model)
   if allow_float_operations:
     q = _add_stablehlo_composite_graph_recipe(
         q,
@@ -513,7 +758,7 @@ def add_main_model_quant_recipe(
         algorithm_key=quantizer.AlgorithmName.NO_QUANTIZE,
     )
     q.update_quantization_recipe(
-        regex='.*(post_qkv|(DecoderLayer|decoder_layer)_[0-9]+;).*',
+        regex=residual_add_regex,
         operation_name=qtyping.TFLOperationName.ADD,
         algorithm_key=quantizer.AlgorithmName.NO_QUANTIZE,
     )
@@ -524,7 +769,7 @@ def add_main_model_quant_recipe(
     )
   else:
     q.add_static_config(
-        regex='.*(post_qkv|(DecoderLayer|decoder_layer)_[0-9]+;).*',
+        regex=residual_add_regex,
         operation_name=qtyping.TFLOperationName.ADD,
         activation_num_bits=16,
         weight_num_bits=8,
