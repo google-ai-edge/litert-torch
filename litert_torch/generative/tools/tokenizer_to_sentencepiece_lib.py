@@ -363,12 +363,19 @@ def verify_spm_tokenizer(
 
 def convert(tokenizer, normalize_tokens: str = "decode"):
   """Converts a tokenizer to a SentencePieceModel protobuf."""
-  if hasattr(tokenizer, "vocab_file") and tokenizer.vocab_file:
-    logging.info("vocab_file exists: %s", tokenizer.vocab_file)
-    with open(tokenizer.vocab_file, "rb") as f:
+  # Copy vocab_file only when it is a SentencePiece model (*.model, e.g.
+  # tokenizer.model or spiece.model). A byte-level BPE tokenizer such as
+  # Qwen2's points vocab_file at its vocab.json, which is not one.
+  vocab_file = getattr(tokenizer, "vocab_file", None)
+  if vocab_file and vocab_file.endswith(".model"):
+    logging.info("vocab_file exists: %s", vocab_file)
+    with open(vocab_file, "rb") as f:
       sp_model = spm_model.ModelProto.FromString(f.read())
   else:
-    logging.info("vocab_file does not exist. Try to build a new one.")
+    logging.info(
+        "No SentencePiece model in vocab_file (%s). Try to build a new one.",
+        vocab_file,
+    )
     sp_model = _build_spm_model_from_tokenizer(tokenizer, normalize_tokens)
 
   spm_serialized = sp_model.SerializeToString()

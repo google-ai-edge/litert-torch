@@ -26,6 +26,7 @@ as a single piece.
 import json
 import os
 import tempfile
+from unittest import mock
 
 import transformers
 
@@ -286,6 +287,37 @@ class TokenizerToSentencepieceLibTest(parameterized.TestCase):
     hf_ids = self._hf_ids("é")
     self.assertLen(hf_ids, 1)
     self.assertEqual(hf_ids, self._spm_ids("é"))
+
+  def test_non_sentencepiece_vocab_file_builds_from_the_tokenizer(self):
+    # A byte-level BPE tokenizer such as Qwen2's points vocab_file at its
+    # vocab.json, which is not a SentencePiece model: the model is built from
+    # the tokenizer, exactly as without a vocab_file.
+    expected = tokenizer_to_sentencepiece_lib.convert(self.tokenizer)
+    with tempfile.TemporaryDirectory() as tmpdir:
+      vocab_json = os.path.join(tmpdir, "vocab.json")
+      with open(vocab_json, "w", encoding="utf-8") as f:
+        json.dump(self.tokenizer.get_vocab(), f)
+      with mock.patch.object(
+          self.tokenizer, "vocab_file", vocab_json, create=True
+      ):
+        serialized = tokenizer_to_sentencepiece_lib.convert(self.tokenizer)
+    self.assertEqual(expected, serialized)
+
+  def test_sentencepiece_vocab_file_is_copied(self):
+    # A SentencePiece tokenizer points vocab_file at its *.model file, which is
+    # copied instead of building a new model.
+    sp_model = spm_model.ModelProto()
+    sp_model.pieces.add(piece="<unk>", score=0.0, type=_PIECE_TYPE.UNKNOWN)
+    sp_model.pieces.add(piece="a", score=-1.0, type=_PIECE_TYPE.NORMAL)
+    with tempfile.TemporaryDirectory() as tmpdir:
+      model_file = os.path.join(tmpdir, "tokenizer.model")
+      with open(model_file, "wb") as f:
+        f.write(sp_model.SerializeToString())
+      with mock.patch.object(
+          self.tokenizer, "vocab_file", model_file, create=True
+      ):
+        serialized = tokenizer_to_sentencepiece_lib.convert(self.tokenizer)
+    self.assertEqual(sp_model.SerializeToString(), serialized)
 
 
 if __name__ == "__main__":
