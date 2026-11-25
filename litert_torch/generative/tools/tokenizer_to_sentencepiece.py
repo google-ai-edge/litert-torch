@@ -78,7 +78,7 @@ _NUM_PAIRS_TO_VERIFY = flags.DEFINE_integer(
 
 def main(_):
   tokenizer = transformers.AutoTokenizer.from_pretrained(_CHECKPOINT.value)
-  spm_serialized = lib.convert(tokenizer)
+  spm_serialized = lib.convert(tokenizer, _NORMALIZE_TOKENS.value)
 
   spm_tokenizer = spm.SentencePieceProcessor()
   spm_tokenizer.LoadFromSerializedProto(spm_serialized)
