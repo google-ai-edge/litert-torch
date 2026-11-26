@@ -448,6 +448,81 @@ class LitertLmNpuCompilerTest(parameterized.TestCase):
   @mock.patch(
       'litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler.ApplyPlugin'
   )
+  def test_google_tensor_compile_configs_flags(self, mock_apply_plugin_class):
+    compiled_instances = []
+
+    def apply_plugin_init_side_effect(*args, **kwargs):
+      instance_mock = mock.MagicMock()
+
+      def compile_call_side_effect(**kwargs):
+        with open(kwargs['input_model'].path, 'rb') as orig_f:
+          model_bytes = orig_f.read()
+        with open(kwargs['output_model'].path, 'wb') as f:
+          f.write(model_bytes)
+
+      instance_mock.side_effect = compile_call_side_effect
+      compiled_instances.append(instance_mock)
+      return instance_mock
+
+    mock_apply_plugin_class.side_effect = apply_plugin_init_side_effect
+
+    main_model_path = os.path.join(self.test_dir, 'model.tflite')
+    with open(main_model_path, 'wb') as f:
+      f.write(build_dummy_tflite_model([('serving_default', 0)]))
+    metadata_path = os.path.join(self.test_dir, 'metadata.pb')
+    with open(metadata_path, 'wb') as f:
+      f.write(llm_metadata_pb2.LlmMetadata().SerializeToString())
+    tokenizer_path = os.path.join(self.test_dir, 'tokenizer.model')
+    with open(tokenizer_path, 'w') as f:
+      f.write('dummy')
+
+    input_litertlm_path = os.path.join(self.test_dir, 'input.litertlm')
+    builder = litertlm_builder.LitertLmFileBuilder()
+    builder.add_tflite_model(
+        main_model_path, llm_metadata_pb2.LlmMetadata.TF_LITE_PREFILL_DECODE
+    )
+    builder.add_llm_metadata(metadata_path)
+    builder.add_sentencepiece_tokenizer(tokenizer_path)
+    with open(input_litertlm_path, 'wb') as f:
+      builder.build(f)
+
+    # Base64-encoded CompilerOptions (as written by encode_compiler_options),
+    # including '=' padding, must reach the plugin unchanged.
+    extra_options = '4gQG4AwBwBABsAcDuAcDuA8BkhMCCAE='
+    litert_lm_npu_compiler.compile_litertlm(
+        input_litertlm=input_litertlm_path,
+        output_litertlm=os.path.join(self.test_dir, 'output.litertlm'),
+        backend='google_tensor',
+        soc_model='Tensor_G6',
+        compile_configs={
+            'prefill_decode': {
+                'flags': [
+                    f'--google_tensor_extra_options={extra_options}',
+                    '--google_tensor_sharding_intensity=minimal',
+                ]
+            }
+        },
+    )
+
+    self.assertLen(compiled_instances, 1)
+    kwargs = compiled_instances[0].call_args[1]
+    self.assertEqual(kwargs['soc_manufacturer'], 'Google')
+    self.assertEqual(kwargs['soc_model'], 'Tensor_G6')
+    self.assertEqual(kwargs['google_tensor_extra_options'], extra_options)
+    self.assertEqual(kwargs['google_tensor_sharding_intensity'], 'minimal')
+
+  def test_google_tensor_sdk_libs_path_from_env(self):
+    with mock.patch.dict(
+        os.environ, {'GOOGLE_TENSOR_COMPILER_LIB': '/path/to/compiler'}
+    ):
+      self.assertEqual(
+          litert_lm_npu_compiler._get_google_tensor_sdk_libs_path(),
+          '/path/to/compiler',
+      )
+
+  @mock.patch(
+      'litert_torch.generative.export_hf.experimental.litert_lm_npu_compiler.litert_lm_npu_compiler.ApplyPlugin'
+  )
   def test_disable_weight_sharing(self, mock_apply_plugin_class):
     compiled_instances = []
 
