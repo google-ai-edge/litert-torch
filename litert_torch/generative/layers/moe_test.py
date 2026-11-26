@@ -212,6 +212,43 @@ class MoeExpertsTest(googletest.TestCase):
     out_none = moe.litert_moe_experts_forward(none_mod, x, idx, w)
     self.assertEqual(out_none.shape, x.shape)
 
+  def test_moe_experts_softcapped_swiglu_matches_reference(self):
+    torch.manual_seed(2)
+    src = torch.randn(1, 2, 4) * 3.0
+    top_weights = torch.softmax(torch.randn(1, 2, 2), dim=-1)
+    top_indices = torch.tensor([[[0, 1], [1, 0]]], dtype=torch.int32)
+    gate_w = torch.randn(2, 6, 4) * 2.0
+    ff1_w = torch.randn(2, 6, 4) * 4.0
+    linear_w = torch.randn(2, 4, 6)
+    gate_cap, up_cap = 4.0, 25.0
+    output = moe.moe_experts(
+        src,
+        top_weights,
+        top_indices,
+        moe.flatten_expert_weight(gate_w),
+        moe.flatten_expert_weight(ff1_w),
+        moe.flatten_expert_weight(linear_w),
+        torch.ones(1, 1, 1, 2),
+        num_experts=2,
+        num_active_experts=2,
+        model_dim=4,
+        hidden_dim=6,
+        activation="silu",
+        gate_softcap=gate_cap,
+        up_softcap=up_cap,
+    )
+    expected = torch.zeros_like(src)
+    for t in range(2):
+      for k in range(2):
+        e = int(top_indices[0, t, k].item())
+        g = torch.nn.functional.linear(src[0, t], gate_w[e])
+        u = torch.nn.functional.linear(src[0, t], ff1_w[e])
+        g_act = torch.tanh(g / gate_cap) * gate_cap * torch.sigmoid(g)
+        u_act = torch.tanh(u / up_cap) * up_cap
+        out_e = torch.nn.functional.linear(g_act * u_act, linear_w[e])
+        expected[0, t] += out_e * top_weights[0, t, k]
+    torch.testing.assert_close(output, expected, atol=1e-5, rtol=1e-5)
+
 
 class BindPerExpertScaleTest(googletest.TestCase):
 
