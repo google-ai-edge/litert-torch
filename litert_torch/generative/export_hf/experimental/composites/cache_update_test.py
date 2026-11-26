@@ -15,7 +15,9 @@
 """Tests for cache_update composite and ring buffer wrapping."""
 
 from absl.testing import parameterized
+import litert_torch
 from litert_torch.generative.export_hf.experimental.composites import cache_update
+import numpy as np
 import torch
 from absl.testing import absltest as googletest
 
@@ -81,8 +83,7 @@ class CacheUpdateTest(parameterized.TestCase):
     exported = torch.export.export(
         UpdateModule(), (cache, update, positions, valid_mask)
     )
-    # The cache must not be upcast: the routing matmul runs in fp16, and fp32
-    # only appears on the small [T, S] routing mask.
+    # Neither the cache nor the routing mask may be upcast to fp32.
     tensor_vals = [
         node.meta["val"]
         for node in exported.graph.nodes
@@ -97,8 +98,8 @@ class CacheUpdateTest(parameterized.TestCase):
     ]
     self.assertNotEmpty(matmul_dtypes)
     self.assertTrue(all(dt == torch.float16 for dt in matmul_dtypes))
-    fp32_numels = [v.numel() for v in tensor_vals if v.dtype == torch.float32]
-    self.assertTrue(all(n <= t * s for n in fp32_numels))
+    fp32_tensors = [v for v in tensor_vals if v.dtype == torch.float32]
+    self.assertEmpty(fp32_tensors)
 
   @parameterized.product(ts_idx=[2, 3], valid=[True, False])
   def test_update_kv_cache_with_sliding_fp16_cache_single_token(
@@ -134,9 +135,8 @@ class CacheUpdateTest(parameterized.TestCase):
     exported = torch.export.export(
         UpdateModule(), (cache, update, positions, valid_mask)
     )
-    # A single-token update must not use a (degenerate) routing matmul: with
-    # multiple KV heads it lowers to an fp16 tfl.broadcast_to, which has no
-    # kernel.
+    # A single-token update uses a broadcasting multiply instead of a
+    # degenerate routing matmul and emits no fp32 tensors.
     matmul_nodes = [
         node
         for node in exported.graph.nodes
@@ -144,6 +144,43 @@ class CacheUpdateTest(parameterized.TestCase):
         and ("matmul" in str(node.target) or "mm" in str(node.target))
     ]
     self.assertEmpty(matmul_nodes)
+    fp32_tensors = [
+        node.meta["val"]
+        for node in exported.graph.nodes
+        if node.op == "call_function"
+        and isinstance(node.meta.get("val"), torch.Tensor)
+        and node.meta["val"].dtype == torch.float32
+    ]
+    self.assertEmpty(fp32_tensors)
+
+  @parameterized.product(ts_idx=[2, 3], seq_len=[1, 3])
+  def test_update_kv_cache_with_sliding_fp16_tflite_conversion(
+      self, ts_idx, seq_len
+  ):
+    h, s, d = 2, 8, 16
+    shape_cache = (1, h, s, d) if ts_idx == 2 else (1, h, d, s)
+    shape_update = (1, h, seq_len, d) if ts_idx == 2 else (1, h, d, seq_len)
+    cache = torch.zeros(shape_cache, dtype=torch.float16)
+    update = torch.full(shape_update, 1.5, dtype=torch.float16)
+    positions = torch.arange(6, 6 + seq_len, dtype=torch.int32)
+    valid_mask = torch.tensor(
+        [True] if seq_len == 1 else [True, True, False], dtype=torch.bool
+    )
+
+    class UpdateModule(torch.nn.Module):
+
+      def forward(self, c, u, p, m):
+        return cache_update.update_kv_cache_with_sliding(
+            c, u, p, m, ts_idx=ts_idx
+        )
+
+    module = UpdateModule().eval()
+    inputs = (cache, update, positions, valid_mask)
+    edge_model = litert_torch.convert(module, inputs)
+    actual = np.asarray(edge_model(*inputs))
+    np.testing.assert_allclose(
+        actual, module(*inputs).numpy(), rtol=0, atol=0
+    )
 
   def test_cache_update_composite_with_ring_buffer(self):
     cache_k = torch.zeros((1, 2, 8, 16), dtype=torch.float32)
