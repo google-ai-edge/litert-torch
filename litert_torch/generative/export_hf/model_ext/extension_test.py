@@ -1651,10 +1651,22 @@ class ModelExtensionTest(parameterized.TestCase, googletest.TestCase):
     )
 
 
+class BuiltinQwen2ExtensionContractTest(
+    ext_testing.ModelExtensionTestMixin, googletest.TestCase
+):
+  extension_cls = builtin_extensions.Qwen2Extension
+
+
 class BuiltinQwen3ExtensionContractTest(
     ext_testing.ModelExtensionTestMixin, googletest.TestCase
 ):
   extension_cls = builtin_extensions.Qwen3Extension
+
+  def test_patch_context_and_model_type_proto(self):
+    ext = self.get_extension()
+    self.assertTrue(ext.is_causal_text_model)
+    proto = ext.get_llm_model_type_proto(None)
+    self.assertTrue(proto.HasField('qwen3'))
 
 
 class BuiltinQwen35ExtensionContractTest(

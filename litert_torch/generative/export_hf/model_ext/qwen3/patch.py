@@ -21,7 +21,6 @@ from litert_torch.generative.export_hf.core.speech import asr_model
 from litert_torch.generative.export_hf.experimental.composites import qkv_norm_rope as qkv_norm_rope_composite
 from litert_torch.generative.export_hf.experimental.composites import rope as rope_composite
 from litert_torch.generative.export_hf.experimental.composites import swiglu as swiglu_composite
-from litert_torch.generative.export_hf.model_ext import patches as patches_lib
 from litert_torch.generative.layers import normalization
 import torch
 import transformers
@@ -326,7 +325,6 @@ class FusedQwen3Attention(torch.nn.Module):
     return attn_output, attn_weights
 
 
-@patches_lib.register_patch(["qwen3", "qwen3_text", "qwen3_asr"])
 @contextlib.contextmanager
 def qwen3_litert_patch():
   """Qwen3 patch."""
@@ -345,7 +343,6 @@ def qwen3_litert_patch():
     attn_funs["sdpa"] = original_sdpa
 
 
-@patches_lib.register_model_patch(["qwen3", "qwen3_text", "qwen3_asr"])
 @contextlib.contextmanager
 def patch_qwen3_model(model, export_config):
   """Dynamic model patch for Qwen3 export."""

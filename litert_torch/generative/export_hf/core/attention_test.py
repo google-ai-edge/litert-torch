@@ -23,6 +23,7 @@ import litert_torch.generative.export_hf.core.attention  # pylint: disable=unuse
 from litert_torch.generative.export_hf.core import attention as attention_lib
 from litert_torch.generative.export_hf.core import exportable_module
 from litert_torch.generative.export_hf.core import exportable_module_config
+import litert_torch.generative.export_hf.model_ext  # pylint: disable=unused-import
 from litert_torch.generative.export_hf.model_ext import extension as model_ext_extension
 import numpy as np
 import torch

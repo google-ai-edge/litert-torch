@@ -43,9 +43,6 @@ _CAUSAL_TEXT_MODEL_KEYS = frozenset({
     "lfm2",
     "llama",
     "mistral",
-    "qwen2",
-    "qwen3",
-    "qwen3_text",
 })
 
 
@@ -125,6 +122,14 @@ class ExportableModuleBase(torch.nn.Module, abc.ABC):
     if isinstance(model_type, str) and model_type:
       return model_type.lower() in _CAUSAL_TEXT_MODEL_KEYS
     model_id = (self.export_config.model or "").lower()
+    for mt in model_ext_extension.registered_model_types():
+      if mt.lower() in model_id:
+        matched_ext = model_ext_extension.get_model_extension(mt)
+        if (
+            matched_ext is not None
+            and matched_ext.is_causal_text_model is not None
+        ):
+          return bool(matched_ext.is_causal_text_model)
     return any(key in model_id for key in _CAUSAL_TEXT_MODEL_KEYS)
 
   def composite_flags(self) -> dict[str, bool]:
