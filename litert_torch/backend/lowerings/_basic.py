@@ -520,3 +520,80 @@ def _operator_mul(lctx, self: int | ir.Value, other: int | ir.Value):
   if isinstance(other, int) and isinstance(self, ir.Value):
     other = utils.splat(other, self.type.element_type, self.type.shape)
   return stablehlo.multiply(self, other)
+
+
+def _trilu_indices_impl(
+    op_name: str,
+    indices_fn,
+    row: int,
+    col: int,
+    offset: int = 0,
+    *,
+    dtype: Optional[torch.dtype] = None,
+    layout: Optional[torch.layout] = None,
+    device=None,
+    pin_memory: Optional[bool] = None,
+) -> ir.Value:
+  """Lowers triu_indices/tril_indices to a static stablehlo.constant."""
+  del device, pin_memory
+  if row < 0:
+    raise ValueError(f"{op_name}: row must be non-negative, got {row}")
+  if col < 0:
+    raise ValueError(f"{op_name}: col must be non-negative, got {col}")
+  if layout is not None and layout != torch.strided:
+    logging.warning("%s only supports torch.strided layout.", op_name)
+
+  if dtype is None or dtype == torch.int64:
+    np_dtype = np.int64
+  elif dtype == torch.int32:
+    np_dtype = np.int32
+  else:
+    raise ValueError(f"{op_name} not implemented for dtype {dtype}")
+
+  rows, cols = indices_fn(row, k=offset, m=col)
+  indices = np.stack((rows, cols), axis=0).astype(np_dtype, copy=False)
+  if indices.size == 0:
+    return utils.splat(
+        0, utils.numpy_dtype_to_ir_type(indices.dtype), indices.shape
+    )
+  return utils.numpy_array_constant(indices)
+
+
+# Schema:
+#   - aten::triu_indices(int row, int col, int offset=0, *,
+#       ScalarType? dtype=long, Layout? layout=None, Device? device=None,
+#       bool? pin_memory=None) -> Tensor
+# Torch Reference:
+#   - https://pytorch.org/docs/stable/generated/torch.triu_indices.html
+@lower(torch.ops.aten.triu_indices.default)
+def _aten_triu_indices(
+    lctx: LoweringContext,
+    row: int,
+    col: int,
+    offset: int = 0,
+    **kwargs,
+) -> ir.Value:
+  del lctx
+  return _trilu_indices_impl(
+      "triu_indices", np.triu_indices, row, col, offset, **kwargs
+  )
+
+
+# Schema:
+#   - aten::tril_indices(int row, int col, int offset=0, *,
+#       ScalarType? dtype=long, Layout? layout=None, Device? device=None,
+#       bool? pin_memory=None) -> Tensor
+# Torch Reference:
+#   - https://pytorch.org/docs/stable/generated/torch.tril_indices.html
+@lower(torch.ops.aten.tril_indices.default)
+def _aten_tril_indices(
+    lctx: LoweringContext,
+    row: int,
+    col: int,
+    offset: int = 0,
+    **kwargs,
+) -> ir.Value:
+  del lctx
+  return _trilu_indices_impl(
+      "tril_indices", np.tril_indices, row, col, offset, **kwargs
+  )
