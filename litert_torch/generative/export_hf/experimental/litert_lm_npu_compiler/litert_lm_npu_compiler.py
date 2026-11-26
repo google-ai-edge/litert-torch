@@ -71,7 +71,7 @@ _define_flag(
     flags.DEFINE_enum,
     'backend',
     None,
-    ['qualcomm', 'mediatek'],
+    ['qualcomm', 'mediatek', 'google_tensor'],
     'Target NPU backend.',
 )
 _define_flag(
@@ -206,8 +206,28 @@ def _get_soc_manufacturer(backend: str) -> str:
     return 'Qualcomm'
   elif backend == 'mediatek':
     return 'MediaTek'
+  elif backend == 'google_tensor':
+    return 'Google'
   else:
     raise ValueError(f'Unsupported backend: {backend}')
+
+
+def _get_google_tensor_sdk_libs_path() -> str | None:
+  """Returns the directory of the Google Tensor compiler library, if found.
+
+  Looks up the `ai_edge_litert_sdk_google_tensor` package, then the
+  `GOOGLE_TENSOR_COMPILER_LIB` environment variable (as the LiteRT Google Tensor
+  AOT backend does).
+  """
+  try:
+    import ai_edge_litert_sdk_google_tensor  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
+
+    return str(ai_edge_litert_sdk_google_tensor.path_to_sdk_libs())
+  except ModuleNotFoundError:
+    pass
+  if env_path := os.environ.get('GOOGLE_TENSOR_COMPILER_LIB'):
+    return env_path
+  return None
 
 
 def _get_mediatek_sdk_version(soc_model: str) -> tuple[str, str]:
@@ -320,7 +340,7 @@ def compile_litertlm(
   Args:
     input_litertlm: Path to the input .litertlm file.
     output_litertlm: Path to the output .litertlm file.
-    backend: Target backend ('qualcomm' or 'mediatek').
+    backend: Target backend ('qualcomm', 'mediatek' or 'google_tensor').
     soc_model: SoC model ID (e.g. 'SM8850', 'MT6993').
     compile_configs: Optional JSON string or dictionary representing compilation
       configs.
@@ -700,6 +720,8 @@ def compile_litertlm(
                   sdk_libs_path = str(
                       ai_edge_litert_sdk_mediatek.path_to_sdk_libs()
                   )
+              elif backend == 'google_tensor':
+                sdk_libs_path = _get_google_tensor_sdk_libs_path()
 
               if sdk_libs_path:
                 logging.info('Found vendor SDK library path: %s', sdk_libs_path)

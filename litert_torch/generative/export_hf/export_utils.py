@@ -144,6 +144,13 @@ def run_npu_compilation_pipeline(
     except Exception:  # pylint: disable=broad-except
       model_name = None
 
+    # The exported bundle may already be at `final_litertlm`; `overwrite=True`
+    # would then delete the input before it is read, so move it aside first.
+    if os.path.abspath(current_litertlm) == os.path.abspath(final_litertlm):
+      uncompiled_litertlm = os.path.join(work_dir, "uncompiled.litertlm")
+      shutil.move(current_litertlm, uncompiled_litertlm)
+      current_litertlm = uncompiled_litertlm
+
     compile_func(
         input_litertlm=current_litertlm,
         output_litertlm=final_litertlm,
