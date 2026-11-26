@@ -24,6 +24,12 @@ import torch
 from torch import nn
 
 
+def _has_conv_layer(kv_cache) -> bool:
+  return any(
+      getattr(layer, 'layer_type', None) == 'conv' for layer in kv_cache.layers
+  )
+
+
 class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
     base_exportable_module.LiteRTExportableModuleForDecoderOnlyLM
 ):
@@ -87,6 +93,12 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
     }
     kv_cache.set_cache_runtime_args(cache_runtime_args)
 
+    if _has_conv_layer(kv_cache):
+      # A padding row of a short prefill chunk is masked even from itself, so
+      # the mask diagonal marks the real rows; the conv state ends at the last.
+      visible = mask_global[0, 0, :, -seq_len:] >= 0
+      ret['valid_mask'] = visible.reshape(-1)[:: seq_len + 1].unsqueeze(0)
+
     ret.update({
         'position_ids': torch.arange(seq_len, device=device)[None, :],
         'past_key_values': kv_cache,
@@ -125,6 +137,18 @@ class LiteRTSplitCacheExportableModuleForDecoderOnlyLM(
 
   def post_process_kv_cache(self, output_cache):
     assert isinstance(output_cache, kv_cache_lib.LiteRTLMSplitCache)
+    if _has_conv_layer(output_cache):
+      # Named by layer index, like the `kv_cache_*_{i}` inputs: with conv layers
+      # in between, the list position of a slice is not its layer index.
+      slices = {}
+      for i, layer in enumerate(output_cache.layers):
+        if getattr(layer, 'layer_type', None) == 'conv':
+          slices[f'kv_slice_c_{i}'] = layer.conv_states  # pyrefly: ignore[missing-attribute]
+        else:
+          slices[f'kv_slice_k_{i}'] = layer.keys[1]  # pyrefly: ignore[missing-attribute]
+          slices[f'kv_slice_v_{i}'] = layer.values[1]  # pyrefly: ignore[missing-attribute]
+      assert all(x is not None for x in slices.values())
+      return slices
     k_slices = []
     v_slices = []
     for layer in output_cache.layers:
@@ -429,6 +453,19 @@ class CacheUpdate(torch.nn.Module):
     kv_cache.set_cache_runtime_args(cache_kwargs)
 
     for i in range(num_layers):
+      if getattr(kv_cache.layers[i], 'layer_type', None) == 'conv':
+        # A conv slice is the whole next state; a call without real tokens
+        # keeps the old one. The `where` also keeps the output from being the
+        # slice input itself, which LiteRT's CompiledModel does not write.
+        conv_states = kv_slice.layers[i].conv_states  # pyrefly: ignore[missing-attribute]
+        if valid_mask is not None:
+          conv_states = torch.where(
+              valid_mask.any(),
+              conv_states,
+              kv_cache.layers[i].conv_states,  # pyrefly: ignore[missing-attribute]
+          )
+        kv_cache.layers[i].conv_states = conv_states  # pyrefly: ignore[missing-attribute]
+        continue
       # TODO(weiyiw): Fix for linear attention layers.
       assert hasattr(kv_slice.layers[i], 'keys')
       assert hasattr(kv_slice.layers[i], 'values')

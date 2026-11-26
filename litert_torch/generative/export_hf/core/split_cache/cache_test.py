@@ -18,6 +18,7 @@ from typing import List, Tuple
 
 from litert_torch.generative.export_hf.core.split_cache import cache as split_cache_lib
 import torch
+import torch.utils._pytree as pytree
 
 from absl.testing import absltest as googletest
 
@@ -183,6 +184,39 @@ class SplitCacheTest(googletest.TestCase):
         layer.update(torch.zeros(1, 2, 4, 8), torch.zeros(1, 2, 4, 8))
         self.assertEqual(layer.keys[1].dtype, expected_dtype)
         self.assertEqual(layer.values[1].dtype, expected_dtype)
+
+  def test_pytree_round_trip_with_conv_layer(self):
+    class MockLfm2Config:
+      num_hidden_layers = 2
+      layer_types = ["conv", "full_attention"]
+      conv_L_cache = 3
+      hidden_size = 32
+      num_attention_heads = 4
+      num_key_value_heads = 2
+
+    for k_ts_idx, v_ts_idx in ((2, 3), (3, 2)):
+      with self.subTest(k_ts_idx=k_ts_idx, v_ts_idx=v_ts_idx):
+        export_config = split_cache_lib.ExportableModuleConfig(
+            model="dummy_model",
+            cache_length=16,
+            k_ts_idx=k_ts_idx,
+            v_ts_idx=v_ts_idx,
+        )
+        kv_cache = split_cache_lib.LiteRTLMSplitCache.create_from_config(
+            MockLfm2Config(), export_config
+        )
+
+        leaves, spec = pytree.tree_flatten(kv_cache)
+        restored = pytree.tree_unflatten(leaves, spec)
+
+        conv_layer, attention_layer = restored.layers
+        self.assertEqual(conv_layer.layer_type, "conv")
+        self.assertIs(conv_layer.conv_states, kv_cache.layers[0].conv_states)
+        # The K/V axes come from the attention layer, not from conv layer 0.
+        self.assertEqual(attention_layer.k_ts_idx, k_ts_idx)
+        self.assertEqual(attention_layer.v_ts_idx, v_ts_idx)
+        self.assertEqual(attention_layer.max_cache_len, 16)
+        self.assertEqual(attention_layer.head_dim, 8)
 
 
 if __name__ == "__main__":
