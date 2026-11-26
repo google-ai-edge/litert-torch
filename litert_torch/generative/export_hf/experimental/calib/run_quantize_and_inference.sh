@@ -32,8 +32,8 @@ CALIBRATION_MERGED_DIR=${CALIBRATION_MERGED_DIR:-"/tmp/calibration_merged"}
 QUANTIZED_DIR=${QUANTIZED_DIR:-"/tmp/quantized_oss"}
 
 A16W8=${A16W8:-"true"}
-ALIGN_KV_CACHE=${ALIGN_KV_CACHE:-"true"}
-ALLOW_FLOAT_OPERATIONS=${ALLOW_FLOAT_OPERATIONS:-"true"}
+# ALLOW_FLOAT_OPERATIONS is the previous name of this setting.
+USE_FLOAT_INPUT_OUTPUT_NORMALIZER=${USE_FLOAT_INPUT_OUTPUT_NORMALIZER:-${ALLOW_FLOAT_OPERATIONS:-"true"}}
 
 MAX_DECODE_STEPS=${MAX_DECODE_STEPS:-"16"}
 STOP_TOKEN=${STOP_TOKEN:-"106"}
@@ -95,11 +95,11 @@ run_calibration() {
     --embedder_model_path="${EMBEDDER_MODEL_PATH}" \
     --auxiliary_model_path="${AUX_MODEL_PATH}" \
     --spm_path="${SPM_PATH}" \
-    --eval_task_names="${task_names}" \
-    --dataset_dir="${DATASET_DIR}" \
-    --dataset_format="${DATASET_FORMAT}" \
+    --calibration_eval_task_names="${task_names}" \
+    --calibration_dataset_dir="${DATASET_DIR}" \
+    --calibration_dataset_format="${DATASET_FORMAT}" \
     --calibration_result_save_dir="${output_save_dir}" \
-    --max_decode_steps=128
+    --max_calibration_decode_steps=128
 }
 
 run_merge() {
@@ -113,7 +113,7 @@ run_merge() {
 
 run_quantization() {
   local calib_dir=$1
-  echo "--- Running Quantization (a16w8=${A16W8}, align_kv=${ALIGN_KV_CACHE}, allow_float=${ALLOW_FLOAT_OPERATIONS}) using ${calib_dir}..."
+  echo "--- Running Quantization (a16w8=${A16W8}, use_float_input_output_normalizer=${USE_FLOAT_INPUT_OUTPUT_NORMALIZER}) using ${calib_dir}..."
   python3 -m litert_torch.generative.export_hf.experimental.calib.quantize \
     --model_path="${MODEL_PATH}" \
     --calibration_path="${calib_dir}/model.tflite.json" \
@@ -122,8 +122,7 @@ run_quantization() {
     --aux_calibration_path="${calib_dir}/aux.tflite.json" \
     --aux_output_path="${QUANTIZED_DIR}/aux.tflite" \
     --a16w8="${A16W8}" \
-    --align_kv_cache="${ALIGN_KV_CACHE}" \
-    --allow_float_operations="${ALLOW_FLOAT_OPERATIONS}"
+    --use_float_input_output_normalizer="${USE_FLOAT_INPUT_OUTPUT_NORMALIZER}"
 }
 
 run_inference_quantized() {
