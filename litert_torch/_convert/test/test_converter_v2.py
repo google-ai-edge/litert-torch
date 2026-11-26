@@ -619,7 +619,6 @@ class TestConverterV2(googletest.TestCase):
       zero_point: int,
       expected_params_bytes: int,
       rows: int | None = None,
-      check_outputs: bool = True,
       extra_loaders: dict[str, torch.Tensor] | None = None,
   ):
     """Converts `x @ dequantize(w[:rows]).T` and checks params.bin and outputs.
@@ -630,7 +629,6 @@ class TestConverterV2(googletest.TestCase):
       zero_point: The zero point of the dequantize.
       expected_params_bytes: The expected size of params.bin.
       rows: If set, slices the first `rows` rows of `w` before dequantizing.
-      check_outputs: Whether to compare the outputs with the eager module.
       extra_loaders: More weights loader values for `weight` to stream from,
         by subtest name (e.g. `w` already packed).
     """
@@ -677,10 +675,9 @@ class TestConverterV2(googletest.TestCase):
             os.path.getsize(os.path.join(export_dir, "params.bin")),
             expected_params_bytes,
         )
-        if check_outputs:
-          np.testing.assert_allclose(
-              edge_model(x.numpy()), expected, rtol=1e-3, atol=1e-3
-          )
+        np.testing.assert_allclose(
+            edge_model(x.numpy()), expected, rtol=1e-3, atol=1e-3
+        )
 
   def test_subbyte_quant_weights_are_packed(self):
     """Tests that i4/i2 dequantized weights are bit-packed in params.bin."""
@@ -739,14 +736,11 @@ class TestConverterV2(googletest.TestCase):
 
   def test_ui4_quant_weights_are_packed(self):
     """Tests that ui8 parameters dequantized as ui4 are bit-packed."""
-    # Only checks params.bin: ui4 `quant.dequantize` with a nonzero zero point
-    # doesn't match the eager reference even for unpacked weights.
     self._check_subbyte_linear(
         torch.randint(0, 16, (16, 32), dtype=torch.uint8),
         "ui4",
         8,
         expected_params_bytes=16 * 32 // 2,
-        check_outputs=False,
     )
 
   def test_small_subbyte_quant_weight_is_not_packed(self):

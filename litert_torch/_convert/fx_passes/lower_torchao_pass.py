@@ -603,16 +603,24 @@ def _quant_composite(
 ) -> torch.Tensor:
   """Functional eager-mode implementation of `quant_composite`."""
   attr = _QUANT_ATTR_CACHE.get(attr_json, {})
+  def _param_tensor(values: list[Any], q_dim: Any) -> torch.Tensor:
+    t = torch.tensor(values, dtype=torch.float32, device=x.device)
+    if q_dim is not None and x.ndim > 1 and t.numel() > 1:
+      shape = [1] * x.ndim
+      shape[q_dim] = t.numel()
+      t = t.view(shape)
+    return t
+
   if name == "quant.dequantize":
     scale = attr.get("scale", [])
     if scale:
-      scale_t = torch.tensor(scale, dtype=torch.float32, device=x.device)
       q_dim = attr.get("quantization_dimension", 0)
-      if q_dim is not None and x.ndim > 1 and scale_t.numel() > 1:
-        shape = [1] * x.ndim
-        shape[q_dim] = scale_t.numel()
-        scale_t = scale_t.view(shape)
-      return x.to(torch.float32) * scale_t
+      scale_t = _param_tensor(scale, q_dim)
+      zp = attr.get("zero_point", [])
+      x_f = x.to(torch.float32)
+      if zp:
+        x_f = x_f - _param_tensor(zp, q_dim)
+      return x_f * scale_t
     return x.to(torch.float32)
   if name == "quant.fake_quant":
     scale = attr.get("scale", [])
@@ -650,15 +658,15 @@ def _quant_composite(
         "i32": torch.int32,
     }.get(dtype_str, torch.int8)
     if scale:
-      scale_t = torch.tensor(scale, dtype=torch.float32, device=x.device)
       q_dim = attr.get("quantization_dimension", 0)
-      if q_dim is not None and x.ndim > 1 and scale_t.numel() > 1:
-        shape = [1] * x.ndim
-        shape[q_dim] = scale_t.numel()
-        scale_t = scale_t.view(shape)
+      scale_t = _param_tensor(scale, q_dim)
+      zp = attr.get("zero_point", [])
+      q_val = x / scale_t
+      if zp:
+        q_val = q_val + _param_tensor(zp, q_dim)
       bounds = {"ui8": (0.0, 255.0), "i16": (-32768.0, 32767.0)}
       min_v, max_v = bounds.get(dtype_str, (-128.0, 127.0))
-      return torch.clamp(torch.round(x / scale_t), min_v, max_v).to(torch_dtype)
+      return torch.clamp(torch.round(q_val), min_v, max_v).to(torch_dtype)
     return x.to(torch_dtype)
   return x
 
